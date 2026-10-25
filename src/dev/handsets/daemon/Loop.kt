@@ -7,6 +7,8 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.MainCoroutineDispatcher
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.android.asCoroutineDispatcher
 import kotlinx.coroutines.asExecutor
@@ -30,7 +32,8 @@ import kotlin.coroutines.EmptyCoroutineContext
  */
 object Loop {
 
-    lateinit var Main: CoroutineDispatcher
+    /** The main looper. Dispatches (posts) unless you use `Main.immediate`. */
+    lateinit var Main: MainCoroutineDispatcher
         private set
 
     val Work: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(
@@ -46,7 +49,11 @@ object Loop {
     val blockingExecutor: Executor = Blocking.asExecutor()
     val frameCopyExecutor: Executor = FrameCopy.asExecutor()
 
-    lateinit var mainHandler: Handler
+    /**
+     * Only for framework APIs that take a Handler (listener registration,
+     * MediaCodec callbacks). Everything else uses [Main] / `Main.immediate`.
+     */
+    internal lateinit var mainHandler: Handler
         private set
 
     lateinit var scope: CoroutineScope
@@ -56,16 +63,22 @@ object Loop {
     fun init() {
         mainHandler = Handler(Looper.getMainLooper())
         Main = try {
-            Dispatchers.Main.immediate.also { it.isDispatchNeeded(EmptyCoroutineContext) }
+            Dispatchers.Main.also { it.immediate.isDispatchNeeded(EmptyCoroutineContext) }
         } catch (t: Throwable) {
             // Factory missing from the jar: bind to the main looper directly.
             System.err.println("hsd: Dispatchers.Main unavailable ($t); using a looper handler")
-            mainHandler.asCoroutineDispatcher("hs-main").immediate
+            mainHandler.asCoroutineDispatcher("hs-main")
         }
-        scope = CoroutineScope(SupervisorJob() + Main + CoroutineExceptionHandler { _, t ->
-            System.err.println("hsd: uncaught in coroutine: $t")
-            t.printStackTrace()
-        })
+        scope =
+            CoroutineScope(SupervisorJob() + Main.immediate + CoroutineExceptionHandler { _, t ->
+                System.err.println("hsd: uncaught in coroutine: $t")
+                t.printStackTrace()
+            })
+    }
+
+    /** Runs [block] on the main looper on a later turn (never inline). Any thread. */
+    fun post(block: () -> Unit) {
+        scope.launch(Main) { block() }
     }
 }
 

@@ -8,7 +8,7 @@ import java.io.FileDescriptor
 import java.net.InetAddress
 
 /** Listening socket on 127.0.0.1, accepted on the main looper. */
-class HsServer(private val port: Int, private val dispatch: Dispatch) {
+internal class HsServer(private val port: Int, private val dispatch: Dispatch) {
 
     private lateinit var listenFd: FileDescriptor
 

@@ -24,7 +24,7 @@ class UiEvents(private val ua: UiAutomation) {
     private var installed = false
 
     init {
-        Loop.mainHandler.post { install() }
+        Loop.post { install() }
     }
 
     /** Main thread only. */
@@ -44,7 +44,7 @@ class UiEvents(private val ua: UiAutomation) {
                 if (Looper.myLooper() == Looper.getMainLooper()) dispatch(ev)
                 else {
                     val copy = AccessibilityEvent.obtain(ev)
-                    Loop.mainHandler.post { dispatch(copy) }
+                    Loop.post { dispatch(copy) }
                 }
             }
             installed = true

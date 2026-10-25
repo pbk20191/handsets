@@ -27,7 +27,7 @@ internal object Frames {
         return suspendCancellableCoroutine { k ->
             val cb = Choreographer.FrameCallback { nanos -> if (k.isActive) k.resume(nanos / 1_000_000) }
             ch.postFrameCallback(cb)
-            k.invokeOnCancellation { Loop.mainHandler.post { ch.removeFrameCallback(cb) } }
+            k.invokeOnCancellation { Loop.post { ch.removeFrameCallback(cb) } }
         }
     }
 }

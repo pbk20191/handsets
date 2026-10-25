@@ -54,7 +54,7 @@ internal object Binders {
 
     /** Resolve `<stubFqcn>.asInterface(IBinder)` and wrap the given binder.  */
     @JvmStatic
-    fun asInterface(stubFqcn: String?, b: IBinder?): Any? {
+    fun asInterface(stubFqcn: String, b: IBinder?): Any? {
         try {
             val stub = Class.forName(stubFqcn)
             val m = stub.getMethod("asInterface", IBinder::class.java)

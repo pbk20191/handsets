@@ -30,7 +30,7 @@ import kotlin.coroutines.resume
 class Conn(private val fd: FileDescriptor) {
 
     val job: Job = SupervisorJob(Loop.scope.coroutineContext[Job])
-    val scope = CoroutineScope(Loop.Main + job + CoroutineExceptionHandler { _, t ->
+    val scope = CoroutineScope(Loop.Main.immediate + job + CoroutineExceptionHandler { _, t ->
         // A stray failure in a connection's coroutine must never reach the
         // looper's uncaught handler (that would kill app_process).
         if (t !is IOException) System.err.println("hsd: connection coroutine failed: $t")
@@ -53,7 +53,7 @@ class Conn(private val fd: FileDescriptor) {
         private set
 
     init {
-        job.invokeOnCompletion { Loop.mainHandler.post { close() } }
+        job.invokeOnCompletion { Loop.post { close() } }
     }
 
     // ── reading ─────────────────────────────────────────────────────────

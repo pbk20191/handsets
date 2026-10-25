@@ -13,7 +13,7 @@ import java.nio.charset.StandardCharsets
  * main looper; gesture timing uses delay(), and each injectInputEvent (a
  * synchronous binder call) hops to Work.
  */
-class Gestures(private val h: Server.Handlers) {
+internal class Gestures(private val h: Server.Handlers) {
 
     private val waits get() = h.uiEvents.waits
 

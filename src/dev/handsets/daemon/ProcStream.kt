@@ -162,7 +162,7 @@ internal class ProcStream(private val clip: Clipboard) {
     private suspend fun awaitReadable(fd: FileDescriptor) = suspendCancellableCoroutine<Unit> { k ->
         // Resume via post: resuming inline would re-watch this fd inside its own
         // callback, and the 0 returned here would then unregister it natively.
-        Io.watch(fd, Io.IN or Io.ERR) { Loop.mainHandler.post { if (k.isActive) k.resume(Unit) }; 0 }
+        Io.watch(fd, Io.IN or Io.ERR) { Loop.post { if (k.isActive) k.resume(Unit) }; 0 }
         // Unwatch before the caller closes the fd: a late unwatch could hit a
         // new fd that reused the number.
         k.invokeOnCancellation { Io.unwatch(fd) }

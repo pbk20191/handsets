@@ -13,7 +13,7 @@ import kotlin.system.exitProcess
  * thread-per-connection server: read a length-prefixed command, answer it,
  * repeat. Stream verbs own the socket until the client goes away.
  */
-class Dispatch(private val ready: CompletableDeferred<Server>) {
+internal class Dispatch(private val ready: CompletableDeferred<Server>) {
 
     suspend fun session(c: Conn) {
         try {
@@ -52,8 +52,9 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
                     "shell" -> procs(s).shell(c, Server.afterHead(cmd))
                     "monitor" -> procs(s).monitor(c)
                     "push" -> c.send(Server.parseFileArgs(cmd).let { a ->
-                        if (a.path == null) Server.errBytes("push-needs-path")
-                        else transfers(s).push(c, a.path, a.mode, a.size)
+                        val path = a.path
+                        if (path == null) Server.errBytes("push-needs-path")
+                        else transfers(s).push(c, path, a.mode, a.size)
                     })
                     "install" -> c.send(Server.parseFileArgs(cmd).let { a ->
                         transfers(s).install(c, a.size, a.reinstall, a.grant)

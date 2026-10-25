@@ -123,7 +123,7 @@ For other languages, drive `hs --json` as a subprocess and parse one JSON line p
 ### Building the daemon
 
 `./gradlew hsJar` (or `./build.sh`, a thin wrapper) builds `build/hs.jar`:
-javac + kotlinc against the SDK's `android.jar`, then R8 from the SDK's
+kotlinc against the SDK's `android.jar`, then R8 from the SDK's
 `build-tools/<ver>/lib/d8.jar` shrinks and dexes the daemon together with its
 runtime libraries (kotlin-stdlib, kotlinx-coroutines). The same project imports
 into Android Studio / IntelliJ for navigation and completion.
