@@ -76,33 +76,7 @@ final class Clipboard {
      *  text changes, writes one length-prefixed frame with the new
      *  content. Terminates on IO error (client gone) with a 0-length
      *  frame so the host sees a clean end. */
-    void watch(DataOutputStream out, long intervalMs) {
-        if (intervalMs <= 0) intervalMs = 500;
-        String last = currentText();
-        // Emit the current value immediately so callers don't have to
-        // race the first poll.
-        if (last != null) {
-            if (!emit(out, last)) return;
-        } else {
-            last = "";
-        }
-        while (true) {
-            try { Thread.sleep(intervalMs); }
-            catch (InterruptedException e) { break; }
-            String now = currentText();
-            if (now == null) continue;
-            if (!now.equals(last)) {
-                if (!emit(out, now)) return;
-                last = now;
-            }
-        }
-        // Best-effort terminator.
-        try {
-            synchronized (out) { out.writeInt(0); out.flush(); }
-        } catch (IOException ignored) {}
-    }
-
-    private String currentText() {
+    String currentText() {
         try {
             Object service = svc();
             Method m = getOrFindGet(service.getClass());
@@ -113,20 +87,6 @@ final class Clipboard {
             return cs == null ? "" : cs.toString();
         } catch (Throwable ignored) {
             return null;
-        }
-    }
-
-    private static boolean emit(DataOutputStream out, String text) {
-        byte[] payload = text.getBytes(StandardCharsets.UTF_8);
-        try {
-            synchronized (out) {
-                out.writeInt(payload.length);
-                out.write(payload);
-                out.flush();
-            }
-            return true;
-        } catch (IOException e) {
-            return false;
         }
     }
 

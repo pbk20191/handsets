@@ -89,6 +89,30 @@ class Conn(private val fd: FileDescriptor) {
         }
     }
 
+    /**
+     * Suspends until the peer hangs up, without consuming input: if the peer
+     * sends bytes instead (a pipelined command), this just never returns.
+     */
+    suspend fun awaitHangup() {
+        val one = ByteArray(1)
+        while (true) {
+            if (closed) return
+            if (inEnd > inStart) kotlinx.coroutines.awaitCancellation()
+            try {
+                val n = Os.recvfrom(fd, one, 0, 1, OsConstants.MSG_PEEK, null)
+                if (n == 0) return
+                kotlinx.coroutines.awaitCancellation()
+            } catch (e: ErrnoException) {
+                if (e.errno != OsConstants.EAGAIN) return
+            }
+            suspendCancellableCoroutine<Unit> { c ->
+                readWaiter = c
+                updateInterest()
+                c.invokeOnCancellation { if (readWaiter === c) { readWaiter = null; updateInterest() } }
+            }
+        }
+    }
+
     private suspend fun ensure(n: Int) {
         while (inEnd - inStart < n) {
             if (inBuf.size - inStart < n) {

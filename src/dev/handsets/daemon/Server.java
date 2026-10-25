@@ -25,12 +25,8 @@ public final class Server {
         public Clipboard clip;
         public Am am;
         public Props props;
-        public Dumpsys dumpsys;
-        public Logcat logcat;
         public SettingsApi settings;
-        public ShellExec shellExec;
         public Wm wm;
-        public Lifecycle lifecycle;
         public State state;
         public UiEvents uiEvents;
         public NodeActions nodes;
@@ -462,28 +458,6 @@ public final class Server {
         return h.props.doSet(pair[0], pair[1]);
     }
 
-    void runDumpsys(String cmd, DataOutputStream out) {
-        String tail = afterHead(cmd);
-        if (tail == null || tail.isEmpty()) {
-            writeErrAndTerminator(out, "dumpsys-needs-service");
-            return;
-        }
-        String[] parts = tail.split("\\s+");
-        String svc = parts[0];
-        String[] args = new String[parts.length - 1];
-        System.arraycopy(parts, 1, args, 0, args.length);
-        h.dumpsys.dump(svc, args, out);
-    }
-
-    void runLogcat(String cmd, DataOutputStream out) {
-        String tail = afterHead(cmd);
-        java.util.List<String> args = new java.util.ArrayList<>();
-        if (tail != null && !tail.isEmpty()) {
-            for (String t : tail.split("\\s+")) args.add(t);
-        }
-        h.logcat.stream(args, out);
-    }
-
     private byte[] runSettingsGet(String cmd) {
         String[] parts = positionalPair(cmd);
         if (parts == null) return errBytes("settings_get-needs-namespace-and-key");
@@ -499,26 +473,11 @@ public final class Server {
         return h.settings.put(parts[0], parts[1], parts[2]);
     }
 
-    void runShell(String cmd, DataOutputStream out) {
-        String tail = afterHead(cmd);
-        if (tail == null || tail.isEmpty()) {
-            writeErrAndTerminator(out, "shell-needs-argv");
-            return;
-        }
-        java.util.List<String> argv = new java.util.ArrayList<>();
-        for (String t : tail.split("\\s+")) argv.add(t);
-        h.shellExec.run(argv, out);
-    }
-
     private byte[] runWmRotation(String cmd) {
         String v = positional(cmd);
         if (v == null) return errBytes("wm_rotation-needs-value");
         try { return h.wm.setRotation(Integer.parseInt(v)); }
         catch (NumberFormatException nf) { return errBytes("bad-rotation:" + v); }
-    }
-
-    void runMonitor(DataOutputStream out) {
-        h.lifecycle.monitor(out);
     }
 
     // ---------- wait-for / composite handlers ----------
@@ -614,11 +573,6 @@ public final class Server {
         int limit  = (int) longArg(cmd, "limit", 50);
         boolean history = longArg(cmd, "history", 0) != 0;
         return h.notifs.dump(pkg, limit, history);
-    }
-
-    void runClipWatch(String cmd, java.io.DataOutputStream out) {
-        long interval = longArg(cmd, "interval_ms", 500);
-        h.clip.watch(out, interval);
     }
 
     // ---------- key=value arg helpers ----------
@@ -728,7 +682,7 @@ public final class Server {
     }
 
     /** Return everything after the command head (the first space-separated token), or null. */
-    private static String afterHead(String cmd) {
+    static String afterHead(String cmd) {
         int sp = cmd.indexOf(' ');
         if (sp < 0) return null;
         String tail = cmd.substring(sp + 1).trim();
@@ -736,7 +690,7 @@ public final class Server {
     }
 
     /** Write an ERR frame then the chunked-stream EOF terminator. */
-    private static void writeErrAndTerminator(DataOutputStream out, String tail) {
+    static void writeErrAndTerminator(DataOutputStream out, String tail) {
         try {
             byte[] msg = errBytes(tail);
             synchronized (out) {

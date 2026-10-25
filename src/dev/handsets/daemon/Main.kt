@@ -20,10 +20,10 @@ import kotlin.system.exitProcess
  * connected from a Work thread once the loop is running, because connect()
  * blocks until its service-connected callback is delivered on that looper.
  */
-object Main {
+data object Main {
 
     @JvmStatic
-    fun main(args: Array<String>) {
+    fun main(vararg args: String) {
         var port = 9008
         for (a in args) if (a.startsWith("--port=")) port = a.substring("--port=".length).toInt()
 
@@ -33,7 +33,7 @@ object Main {
             Loop.init()
             // ActivityThread.systemMain() binds handlers to the calling thread's
             // looper, so the system context must be created here, on main.
-            val sysCtx = Binders.systemContext()
+            val sysCtx = Binders.systemContext()!!
 
             val ready = CompletableDeferred<Server>()
             HsServer(port, Dispatch(ready)).start()
@@ -79,12 +79,8 @@ object Main {
         h.clip = Clipboard()
         h.am = Am(sysCtx)
         try { h.props = Props() } catch (t: Throwable) { System.err.println("warn: Props init failed: $t") }
-        h.dumpsys = Dumpsys()
-        h.logcat = Logcat()
         h.settings = SettingsApi(sysCtx)
-        h.shellExec = ShellExec()
         h.wm = Wm(sysCtx.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
-        h.lifecycle = Lifecycle()
         h.uiEvents = UiEvents(ua)
         h.nodes = NodeActions(ua)
         h.state = State(sysCtx, ua, h.uiEvents)

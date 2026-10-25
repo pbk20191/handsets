@@ -40,23 +40,27 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
                         c.send(Server.utf8("ok n=" + H264Streamer.activeCount()))
                     }
                     "state_watch" -> { stateWatch(c, s.handlers().state); return }
-                    "stream", "stream_h264", "stream_tilejpeg", "clip_watch", "monitor" -> {
+                    "clip_watch" -> {
+                        c.closeOnEof()
+                        procs(s).clipWatch(c, Server.longArg(cmd, "interval_ms", 500))
+                        return
+                    }
+                    "stream", "stream_h264", "stream_tilejpeg" -> {
                         c.closeOnEof()
                         legacyOut(c) { out ->
                             when (head) {
                                 "stream" -> s.runStream(cmd, out)
                                 "stream_h264" -> s.runH264Stream(cmd, out)
-                                "stream_tilejpeg" -> s.runTileStream(cmd, out)
-                                "clip_watch" -> s.runClipWatch(cmd, out)
-                                else -> s.runMonitor(out)
+                                else -> s.runTileStream(cmd, out)
                             }
                         }
                         return
                     }
                     "pull" -> transfers(s).pull(c, Server.parseFileArgs(cmd).path)
-                    "dumpsys" -> legacyOut(c) { s.runDumpsys(cmd, it) }
-                    "logcat" -> legacyOut(c) { s.runLogcat(cmd, it) }
-                    "shell" -> legacyOut(c) { s.runShell(cmd, it) }
+                    "dumpsys" -> procs(s).dumpsys(c, Server.afterHead(cmd))
+                    "logcat" -> procs(s).logcat(c, Server.afterHead(cmd))
+                    "shell" -> procs(s).shell(c, Server.afterHead(cmd))
+                    "monitor" -> procs(s).monitor(c)
                     "push" -> c.send(Server.parseFileArgs(cmd).let { a ->
                         if (a.path == null) Server.errBytes("push-needs-path")
                         else transfers(s).push(c, a.path, a.mode, a.size)
@@ -80,6 +84,9 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
             c.close()
         }
     }
+
+    private var procs: ProcStream? = null
+    private fun procs(s: Server) = procs ?: ProcStream(s.handlers().clip).also { procs = it }
 
     private var transfers: Transfers? = null
     private fun transfers(s: Server) = transfers

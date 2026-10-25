@@ -81,7 +81,8 @@ object Io {
         queue.addOnFileDescriptorEventListener(fd, events) { _, ev -> cb(ev) }
     }
 
+    /** Safe from any thread; must happen before the fd is closed. */
     fun unwatch(fd: FileDescriptor) {
-        queue.removeOnFileDescriptorEventListener(fd)
+        if (fd.valid()) queue.removeOnFileDescriptorEventListener(fd)
     }
 }
