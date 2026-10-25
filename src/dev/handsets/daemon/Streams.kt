@@ -86,6 +86,9 @@ internal object Streams {
                 first = false
                 if (body != null) c.send(body)
             }
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException || t is java.io.IOException) throw t
+            t.printStackTrace()   // old TileStreamer logged and ended the stream without a frame
         } finally {
             mirror.unsubscribe(l)
         }
@@ -135,7 +138,7 @@ internal object Streams {
             if (bitrateKbps0 > 0) bitrateKbps0 else 6000,
             if (gopSec0 > 0) gopSec0 else 1,
         )
-        val sub = H264Sub()
+        val sub = H264Sub(gopMax(key) + 56)
         var hub = hubs[key]
         if (hub == null) {
             hub = H264Hub(key, dm)
@@ -161,8 +164,8 @@ internal object Streams {
         }
     }
 
-    private class H264Sub {
-        val ch = Channel<ByteArray>(SUB_QUEUE)
+    private class H264Sub(queue: Int) {
+        val ch = Channel<ByteArray>(queue)
         /** Skipping until the next IDR (no usable GOP when it joined or lagged). */
         var waitingIdr = false
         var error: ByteArray? = null
@@ -250,7 +253,7 @@ internal object Streams {
         private fun frame(b: ByteArray, idr: Boolean) {
             if (idr) gop.clear()
             if (idr || gop.isNotEmpty()) {
-                if (gop.size < GOP_MAX) gop.add(b) else { gop.clear(); requestKeyframe() }
+                if (gop.size < gopMax(key)) gop.add(b) else { gop.clear(); requestKeyframe() }
             }
             // Snapshot: a send can resume a subscriber inline that then leaves.
             for (s in subs.toList()) {
@@ -320,8 +323,8 @@ internal object Streams {
         }
     }
 
-    private const val GOP_MAX = 200
-    private const val SUB_QUEUE = GOP_MAX + 56
+    /** Frames one GOP can hold (fps × GOP seconds, a little slack), bounded for memory. */
+    private fun gopMax(k: H264Key) = (k.fps * k.gopSec + 8).coerceIn(30, 600)
 
     private class VdNull : RuntimeException("createVirtualDisplay-null")
 

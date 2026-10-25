@@ -33,7 +33,10 @@ internal class ProcStream(private val clip: Clipboard) {
         val parts = tail.split(WS)
         val svc = parts[0]
         val args = parts.drop(1).toTypedArray()
-        val b = try { Binders.service(svc) } catch (t: Throwable) { return c.errAndEnd("no-such-service:$svc") }
+        val b = try { withContext(Loop.Work) { Binders.service(svc) } } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            return c.errAndEnd("no-such-service:$svc")
+        }
         val pipe = try { ParcelFileDescriptor.createPipe() } catch (e: IOException) {
             return c.errAndEnd("pipe-failed:${e.message}")
         }

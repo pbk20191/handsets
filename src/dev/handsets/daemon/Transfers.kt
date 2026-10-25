@@ -83,8 +83,10 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
     suspend fun pull(c: Conn, path: String?) {
         if (path == null) return c.errAndEnd("pull-needs-path")
         val f = File(path)
-        if (!f.exists()) return c.errAndEnd("not-found:$path")
-        if (f.isDirectory) return c.errAndEnd("is-directory:$path")
+        // exists/isDirectory can stall on FUSE-backed storage: ask on Work.
+        val (exists, isDir) = withContext(Loop.Work) { f.exists() to f.isDirectory }
+        if (!exists) return c.errAndEnd("not-found:$path")
+        if (isDir) return c.errAndEnd("is-directory:$path")
         var input: FileInputStream? = null
         try {
             input = withContext(Loop.Work) { FileInputStream(f) }
@@ -109,7 +111,7 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
 
     suspend fun push(c: Conn, path: String, mode: Int, expectedSize: Long): ByteArray {
         val parent = File(path).parentFile
-        if (parent != null && !parent.isDirectory) {
+        if (parent != null && !withContext(Loop.Work) { parent.isDirectory }) {
             c.drainChunks()
             return err("parent-missing:$parent")
         }
@@ -144,7 +146,7 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
     }
 
     private suspend fun installSession(c: Conn, sizes: LongArray, reinstall: Boolean, grantAll: Boolean, multi: Boolean): ByteArray {
-        val pi = ctx.packageManager.packageInstaller
+        val pi = withContext(Loop.Work) { ctx.packageManager.packageInstaller }
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
         val total = sizes.sum()
         if (total > 0) params.setSize(total)
@@ -203,7 +205,7 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
     }
 
     suspend fun uninstall(pkg: String): ByteArray = try {
-        val pi = ctx.packageManager.packageInstaller
+        val pi = withContext(Loop.Work) { ctx.packageManager.packageInstaller }
         val status = StatusReceiver()
         withContext(Loop.Work) { pi.uninstall(pkg, status.intentSender) }
         val result = status.await(60_000)

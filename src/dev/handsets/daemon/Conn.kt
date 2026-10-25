@@ -71,7 +71,15 @@ class Conn(private val fd: FileDescriptor) {
         ensure(n)
         val out = inBuf.copyOfRange(inStart, inStart + n)
         inStart += n
+        shrinkIfIdle()
         return out
+    }
+
+    /** Drop a buffer grown for one large chunk once it has been consumed. */
+    private fun shrinkIfIdle() {
+        if (inStart == inEnd && inBuf.size > MAX_IDLE_BUF) {
+            inBuf = ByteArray(8192); inStart = 0; inEnd = 0
+        }
     }
 
     /** Next bytes available (up to [max]); null on EOF. */
@@ -288,6 +296,7 @@ class Conn(private val fd: FileDescriptor) {
 
     companion object {
         const val OUT_LIMIT = 4L * 1024 * 1024
+        private const val MAX_IDLE_BUF = 64 * 1024
         private const val MSG_NOSIGNAL = 0x4000   // linux; not exposed by OsConstants
     }
 }
