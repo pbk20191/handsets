@@ -69,7 +69,7 @@ object Main {
         h.dumper = Dumper(ua)
         h.shot = Screenshot(ua)
         h.input = Input(ua)
-        h.files = Files()
+        h.sysCtx = sysCtx
         h.installer = Installer(sysCtx)
         h.pm = Pm(sysCtx)
         h.manifest = Manifest(sysCtx)

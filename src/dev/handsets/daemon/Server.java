@@ -12,10 +12,10 @@ public final class Server {
     /** Bag of handler classes wired up in {@link Main}; lets the constructor
      *  stay legible as we grow the command surface. */
     public static final class Handlers {
+        public android.content.Context sysCtx;
         public Dumper dumper;
         public Screenshot shot;
         public Input input;
-        public Files files;
         public Installer installer;
         public Pm pm;
         public Manifest manifest;
@@ -63,8 +63,6 @@ public final class Server {
                 return runPmList(cmd);
             case "pm_path":
                 return runPmPath(cmd);
-            case "pm_uninstall":
-                return runPmUninstall(cmd);
             case "pm_grant":
             case "pm_revoke":
                 return runPmPerm(head, cmd);
@@ -326,33 +324,6 @@ public final class Server {
 
     // ---------- adb-like command handlers ----------
 
-    void runPull(String cmd, DataOutputStream out) throws IOException {
-        FileArgs a = parseFileArgs(cmd);
-        if (a.path == null) {
-            writeFrame(out, errBytes("pull-needs-path"));
-            out.writeInt(0);
-            out.flush();
-            return;
-        }
-        try {
-            h.files.pull(a.path, out);
-        } catch (Throwable t) {
-            // Files.pull already best-effort-terminates the stream.
-            System.err.println("pull failed: " + t);
-        }
-    }
-
-    byte[] runPush(String cmd, DataInputStream in) {
-        FileArgs a = parseFileArgs(cmd);
-        if (a.path == null) return errBytes("push-needs-path");
-        return h.files.push(a.path, a.mode, a.size, in);
-    }
-
-    byte[] runInstall(String cmd, DataInputStream in) {
-        FileArgs a = parseFileArgs(cmd);
-        return h.installer.install(a.size, a.reinstall, a.grant, in);
-    }
-
     private byte[] runPmList(String cmd) {
         boolean thirdParty = cmd.contains(" 3") || cmd.contains("third=1");
         boolean systemOnly = cmd.contains(" s") || cmd.contains("system=1");
@@ -363,12 +334,6 @@ public final class Server {
         String pkg = positional(cmd);
         if (pkg == null) return errBytes("pm_path-needs-pkg");
         return h.pm.path(pkg);
-    }
-
-    private byte[] runPmUninstall(String cmd) {
-        String pkg = positional(cmd);
-        if (pkg == null) return errBytes("pm_uninstall-needs-pkg");
-        return h.pm.uninstall(pkg);
     }
 
     private byte[] runPmPerm(String head, String cmd) {
@@ -409,7 +374,7 @@ public final class Server {
      */
     // ---------- arg parsers for the new commands ----------
 
-    private static final class FileArgs {
+    static final class FileArgs {
         String path;
         int mode;
         long size;
@@ -417,7 +382,7 @@ public final class Server {
         boolean grant;
     }
 
-    private static FileArgs parseFileArgs(String cmd) {
+    static FileArgs parseFileArgs(String cmd) {
         FileArgs a = new FileArgs();
         int sp = cmd.indexOf(' ');
         if (sp < 0) return a;
@@ -550,27 +515,6 @@ public final class Server {
         if (v == null) return errBytes("wm_rotation-needs-value");
         try { return h.wm.setRotation(Integer.parseInt(v)); }
         catch (NumberFormatException nf) { return errBytes("bad-rotation:" + v); }
-    }
-
-    byte[] runInstallMulti(String cmd, DataInputStream in) {
-        // install_multi sizes=N0,N1,N2 [reinstall=1] [grant=1]
-        FileArgs base = parseFileArgs(cmd);
-        long[] sizes = null;
-        for (String tok : cmd.split("\\s+")) {
-            if (tok.startsWith("sizes=")) {
-                String[] parts = tok.substring("sizes=".length()).split(",");
-                sizes = new long[parts.length];
-                try {
-                    for (int i = 0; i < parts.length; i++) sizes[i] = Long.parseLong(parts[i]);
-                } catch (NumberFormatException e) {
-                    return errBytes("install_multi-bad-sizes");
-                }
-            }
-        }
-        if (sizes == null || sizes.length == 0) {
-            return errBytes("install_multi-needs-sizes");
-        }
-        return h.installer.installMulti(sizes, base.reinstall, base.grant, in);
     }
 
     void runMonitor(DataOutputStream out) {

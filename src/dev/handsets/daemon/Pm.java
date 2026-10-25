@@ -67,26 +67,6 @@ final class Pm {
         }
     }
 
-    byte[] uninstall(String pkg) {
-        try {
-            PackageInstaller pi = ctx.getPackageManager().getPackageInstaller();
-            LocalIntentSender status = new LocalIntentSender();
-            IntentSender sender = status.intentSender();
-            pi.uninstall(pkg, sender);
-            Intent result = status.await(60_000);
-            if (result == null) return err("uninstall-timeout");
-            int code = result.getIntExtra(PackageInstaller.EXTRA_STATUS,
-                    PackageInstaller.STATUS_FAILURE);
-            String msg = result.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
-            if (code == PackageInstaller.STATUS_SUCCESS) {
-                return ok("ok package=" + pkg);
-            }
-            return err("uninstall-failed:status=" + code + " msg=" + msg);
-        } catch (Throwable t) {
-            return err("uninstall-threw:" + t.getClass().getSimpleName() + ":" + t.getMessage());
-        }
-    }
-
     byte[] grant(String pkg, String perm) {
         return changeRuntimePerm(pkg, perm, /* grant */ true);
     }

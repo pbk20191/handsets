@@ -4,7 +4,6 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
 import java.nio.charset.StandardCharsets
@@ -54,13 +53,20 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
                         }
                         return
                     }
-                    "pull" -> legacyOut(c) { s.runPull(cmd, it) }
+                    "pull" -> transfers(s).pull(c, Server.parseFileArgs(cmd).path)
                     "dumpsys" -> legacyOut(c) { s.runDumpsys(cmd, it) }
                     "logcat" -> legacyOut(c) { s.runLogcat(cmd, it) }
                     "shell" -> legacyOut(c) { s.runShell(cmd, it) }
-                    "push" -> c.send(legacyIn(c) { s.runPush(cmd, it) })
-                    "install" -> c.send(legacyIn(c) { s.runInstall(cmd, it) })
-                    "install_multi" -> c.send(legacyIn(c) { s.runInstallMulti(cmd, it) })
+                    "push" -> c.send(Server.parseFileArgs(cmd).let { a ->
+                        if (a.path == null) Server.errBytes("push-needs-path")
+                        else transfers(s).push(c, a.path, a.mode, a.size)
+                    })
+                    "install" -> c.send(Server.parseFileArgs(cmd).let { a ->
+                        transfers(s).install(c, a.size, a.reinstall, a.grant)
+                    })
+                    "install_multi" -> c.send(installMulti(c, s, cmd))
+                    "pm_uninstall" -> c.send(Server.positional(cmd)?.let { transfers(s).uninstall(it) }
+                        ?: Server.errBytes("pm_uninstall-needs-pkg"))
                     in GESTURES -> c.send(gestures(s).handle(head, cmd)!!)
                     in ON_MAIN -> c.send(s.respond(head, cmd) ?: unknown(head))
                     else -> c.send(withContext(Loop.Work) { s.respond(head, cmd) } ?: unknown(head))
@@ -73,6 +79,27 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
         } finally {
             c.close()
         }
+    }
+
+    private var transfers: Transfers? = null
+    private fun transfers(s: Server) = transfers
+        ?: Transfers(s.handlers().sysCtx, s.handlers().installer).also { transfers = it }
+
+    /** install_multi sizes=N0,N1,… [reinstall=1] [grant=1] */
+    private suspend fun installMulti(c: Conn, s: Server, cmd: String): ByteArray {
+        val base = Server.parseFileArgs(cmd)
+        var sizes: LongArray? = null
+        for (tok in cmd.split(Regex("""\s+"""))) {
+            if (tok.startsWith("sizes=")) {
+                sizes = try {
+                    tok.substring("sizes=".length).split(",").map { it.toLong() }.toLongArray()
+                } catch (e: NumberFormatException) {
+                    return Server.errBytes("install_multi-bad-sizes")
+                }
+            }
+        }
+        if (sizes == null || sizes.isEmpty()) return Server.errBytes("install_multi-needs-sizes")
+        return transfers(s).installMulti(c, sizes, base.reinstall, base.grant)
     }
 
     private var gestures: Gestures? = null
@@ -99,9 +126,6 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
             out.flush()
         }
     }
-
-    private suspend fun legacyIn(c: Conn, block: (DataInputStream) -> ByteArray): ByteArray =
-        withContext(LegacyIo.dispatcher) { block(LegacyIo.inp(c)) }
 
     private companion object {
         val PONG = "pong".toByteArray()
