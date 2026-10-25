@@ -1,8 +1,5 @@
 package dev.handsets.daemon;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
 public final class Server {
@@ -251,12 +248,6 @@ public final class Server {
 
     static byte[] errBytes(String tail) {
         return ("ERR:" + tail).getBytes(StandardCharsets.UTF_8);
-    }
-
-    private static void writeFrame(DataOutputStream out, byte[] bytes) throws IOException {
-        out.writeInt(bytes.length);
-        out.write(bytes);
-        out.flush();
     }
 
     // ---------- adb-like command handlers ----------
@@ -628,19 +619,6 @@ public final class Server {
         if (sp < 0) return null;
         String tail = cmd.substring(sp + 1).trim();
         return tail.isEmpty() ? null : tail;
-    }
-
-    /** Write an ERR frame then the chunked-stream EOF terminator. */
-    static void writeErrAndTerminator(DataOutputStream out, String tail) {
-        try {
-            byte[] msg = errBytes(tail);
-            synchronized (out) {
-                out.writeInt(msg.length);
-                out.write(msg);
-                out.writeInt(0);
-                out.flush();
-            }
-        } catch (IOException ignored) {}
     }
 
     private static String[] positionalPair(String cmd) {
