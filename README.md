@@ -120,6 +120,19 @@ with Session() as d:
 
 For other languages, drive `hs --json` as a subprocess and parse one JSON line per call.
 
+### Building the daemon
+
+`./gradlew hsJar` (or `./build.sh`, a thin wrapper) builds `build/hs.jar`:
+javac + kotlinc against the SDK's `android.jar`, then R8 from the SDK's
+`build-tools/<ver>/lib/d8.jar` shrinks and dexes the daemon together with its
+runtime libraries (kotlin-stdlib, kotlinx-coroutines). The same project imports
+into Android Studio / IntelliJ for navigation and completion.
+
+The SDK is found via `local.properties` (`sdk.dir`), `ANDROID_HOME`, or
+`ANDROID_SDK_ROOT`. The newest installed numeric platform is used by default;
+override with `-PandroidCompileSdk=36`. R8 comes from build-tools `36.0.0` by
+default; override with `-PbuildTools=<version>`.
+
 ---
 
 Exit codes: `0` ok · `1` failure · `2` NOT_FOUND · `3` TIMEOUT · `4` AMBIGUOUS. Full structured `error.code` in `hs --json` output for the long tail.

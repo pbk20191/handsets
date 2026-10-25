@@ -87,12 +87,12 @@ public final class Screenshot {
     }
 
     private static DisplayManager initDisplayManager() throws Exception {
-        if (android.os.Looper.getMainLooper() == null) {
-            android.os.Looper.prepareMainLooper();
-        }
-        Class<?> atCls = Class.forName("android.app.ActivityThread");
-        Object atInst = atCls.getMethod("systemMain").invoke(null);
-        Context sysCtx = (Context) atCls.getMethod("getSystemContext").invoke(atInst);
+//        if (android.os.Looper.getMainLooper() == null) {
+//            android.os.Looper.prepareMainLooper();
+//        }
+//        Class<?> atCls = Class.forName("android.app.ActivityThread");
+//        Object atInst = atCls.getMethod("systemMain").invoke(null);
+        Context sysCtx = Binders.systemContext();
         // Android 14+ rejects createVirtualDisplay when the Context's
         // op-package name doesn't map to the calling UID. The system
         // Context's package is "android" but we run as shell UID (2000),

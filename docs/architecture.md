@@ -26,5 +26,5 @@ subscribes to `state_watch` and atomically rewrites
 src/dev/handsets/daemon/      on-device daemon (Java → dex → jar)
 handsets-cli/                 host CLI — short-verb surface (`hs use`, `hs see`, …)
 handsets-viewer/              GUI mirror — winit + Metal + zero-copy VideoToolbox
-build.sh                      javac → R8 → dex → jar
+build.gradle.kts              javac/kotlinc → R8 (SDK) → dex → build/hs.jar  (build.sh wraps it)
 ```
