@@ -37,7 +37,8 @@ internal class ProcStream(private val clip: Clipboard) {
         // on Work while the looper drains the read end.
         val pump = c.scope.async { try { pump(c, read.fileDescriptor, 64 * 1024) } finally { Io.unwatch(read.fileDescriptor); read.close() } }
         try {
-            withContext(Loop.Work) { b.dump(write.fileDescriptor, args) }
+            // Blocks until the client drains the pipe: keep it off Work.
+            withContext(Pools.blocking) { b.dump(write.fileDescriptor, args) }
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException) { write.close(); throw t }
             c.errAndEnd("dump-threw:${t.javaClass.simpleName}:${t.message}")
@@ -95,7 +96,10 @@ internal class ProcStream(private val clip: Clipboard) {
             return c.errAndEnd(spawnErr + e.message)
         }
         // Kill the process if the client leaves while it is quiet.
-        val hangup = c.scope.launch { c.awaitHangup(); c.close() }
+        val hangup = c.scope.launch {
+            try { c.awaitHangup() } catch (_: IOException) {}
+            c.close()
+        }
         try {
             if (pipe != null && wfdNum != null) {
                 closeQuietly(pipe[1])

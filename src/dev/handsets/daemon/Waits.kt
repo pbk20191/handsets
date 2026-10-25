@@ -68,6 +68,7 @@ class UiEvents(private val ua: UiAutomation) {
 class Waits {
 
     private var lastEventTs = System.currentTimeMillis()
+    private var eventSeq = 0L
     private val waiters = ArrayList<CancellableContinuation<Unit>>()
 
     fun onEvent() = touch()
@@ -75,6 +76,7 @@ class Waits {
     /** Marks "an action just happened" so idle is measured from now. */
     fun touch() {
         lastEventTs = System.currentTimeMillis()
+        eventSeq++
         if (waiters.isEmpty()) return
         val ws = ArrayList(waiters)
         waiters.clear()
@@ -97,11 +99,15 @@ class Waits {
     suspend fun awaitPredicate(timeoutMs: Long, check: suspend () -> Boolean): Long {
         val start = System.currentTimeMillis()
         val deadline = start + timeoutMs
+        var seen = eventSeq
         if (safeCheck(check)) return 0
         while (true) {
             val now = System.currentTimeMillis()
             if (now >= deadline) return -1
-            withTimeoutOrNull(deadline - now) { nextEvent() }
+            // A check may suspend (node lookup on Work): if events arrived
+            // meanwhile, recheck at once instead of waiting for the next one.
+            if (eventSeq == seen) withTimeoutOrNull(deadline - now) { nextEvent() }
+            seen = eventSeq
             if (safeCheck(check)) return System.currentTimeMillis() - start
         }
     }

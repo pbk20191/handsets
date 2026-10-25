@@ -475,7 +475,9 @@ public final class Screenshot {
             try { img = reader.acquireLatestImage(); } catch (Throwable t) { return; }
             if (img == null) return;
             absorbing = true;
-            Loop.INSTANCE.getWorkExecutor().execute(new Runnable() {
+            // Its own thread: ~16 ms GPU-fence copies per frame must not queue
+            // ahead of taps and dumps on the Work pool.
+            Pools.INSTANCE.getFrames().execute(new Runnable() {
                 @Override public void run() {
                     try { absorb(img); }
                     catch (Throwable ignored) {}
@@ -532,9 +534,11 @@ public final class Screenshot {
             try { reader.setOnImageAvailableListener(null, null); } catch (Throwable ignored) {}
             try { vd.release(); } catch (Throwable ignored) {}
             try { reader.close(); } catch (Throwable ignored) {}
-            synchronized (lock) {
-                if (cached != null) { cached.recycle(); cached = null; }
-                if (scratch != null) { scratch.recycle(); scratch = null; }
+            synchronized (absorbLock) {
+                synchronized (lock) {
+                    if (cached != null) { cached.recycle(); cached = null; }
+                    if (scratch != null) { scratch.recycle(); scratch = null; }
+                }
             }
         }
     }

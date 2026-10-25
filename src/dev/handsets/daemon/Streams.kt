@@ -141,8 +141,11 @@ internal object Streams {
             hubs[key] = hub
             hub.subs.add(sub)
             try {
-                hub.start()
+                // Codec + VirtualDisplay setup are synchronous binder calls.
+                withContext(Pools.blocking) { hub.start() }
+                if (hub.released) hub.stopNow()
             } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) { hub.release(); throw t }
                 hub.fail(t)
                 hub.release()
             }
@@ -172,7 +175,11 @@ internal object Streams {
         private var encoder: MediaCodec? = null
         private var surface: Surface? = null
         private var vd: VirtualDisplay? = null
-        private var released = false
+        var released = false
+            private set
+
+        /** Release resources from start() that raced with an early release(). */
+        fun stopNow() { released = false; release() }
 
         fun start() {
             val fmt = MediaFormat.createVideoFormat(MIME_AVC, key.w, key.h).apply {
@@ -196,16 +203,20 @@ internal object Streams {
                     if (released) return
                     var payload: ByteArray? = null
                     try {
+                        if (released) return
                         val buf = codec.getOutputBuffer(index)
                         if (buf != null && info.size > 0) {
                             buf.position(info.offset)
                             buf.limit(info.offset + info.size)
                             payload = ByteArray(info.size).also { buf.get(it) }
                         }
+                    } catch (_: Throwable) {
+                        payload = null
                     } finally {
                         try { codec.releaseOutputBuffer(index, false) } catch (_: Throwable) {}
                     }
                     if (payload == null) return
+                    if (released) return
                     if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) config(payload)
                     else frame(payload, info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0)
                 }
@@ -232,7 +243,7 @@ internal object Streams {
 
         private fun config(b: ByteArray) {
             csd = b
-            for (s in subs) s.ch.trySend(b)
+            for (s in subs.toList()) s.ch.trySend(b)
         }
 
         private fun frame(b: ByteArray, idr: Boolean) {
@@ -240,7 +251,8 @@ internal object Streams {
             if (idr || gop.isNotEmpty()) {
                 if (gop.size < GOP_MAX) gop.add(b) else { gop.clear(); requestKeyframe() }
             }
-            for (s in subs) {
+            // Snapshot: a send can resume a subscriber inline that then leaves.
+            for (s in subs.toList()) {
                 if (s.waitingIdr) {
                     if (!idr) continue
                     s.waitingIdr = false
@@ -276,7 +288,7 @@ internal object Streams {
         fun fail(t: Throwable) {
             val e = if (t is VdNull) err("createVirtualDisplay-null")
             else err("h264-failed:${t.javaClass.simpleName}:${t.message}").also { t.printStackTrace() }
-            for (s in subs) { s.error = e; s.ch.close() }
+            for (s in subs.toList()) { s.error = e; s.ch.close() }
         }
 
         fun requestKeyframe() {
@@ -291,13 +303,19 @@ internal object Streams {
             if (released) return
             released = true
             if (hubs[key] === this) hubs.remove(key)
-            for (s in subs) s.ch.close()
-            try { vd?.release() } catch (_: Throwable) {}
-            encoder?.let { e ->
-                try { e.stop() } catch (_: Throwable) {}
-                try { e.release() } catch (_: Throwable) {}
+            for (s in subs.toList()) s.ch.close()
+            val v = vd
+            val enc = encoder
+            val sf = surface
+            // Codec/display teardown is synchronous binder work: keep it off main.
+            Pools.blockingExecutor.execute {
+                try { v?.release() } catch (_: Throwable) {}
+                enc?.let { e ->
+                    try { e.stop() } catch (_: Throwable) {}
+                    try { e.release() } catch (_: Throwable) {}
+                }
+                try { sf?.release() } catch (_: Throwable) {}
             }
-            try { surface?.release() } catch (_: Throwable) {}
         }
     }
 

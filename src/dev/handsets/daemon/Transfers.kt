@@ -9,6 +9,7 @@ import android.os.IBinder
 import android.os.Parcel
 import android.system.Os
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
@@ -84,23 +85,25 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
         val f = File(path)
         if (!f.exists()) return c.errAndEnd("not-found:$path")
         if (f.isDirectory) return c.errAndEnd("is-directory:$path")
-        val input = withContext(Loop.Work) { FileInputStream(f) }
+        var input: FileInputStream? = null
         try {
+            input = withContext(Loop.Work) { FileInputStream(f) }
             while (true) {
                 val chunk = withContext(Loop.Work) {
                     val buf = ByteArray(CHUNK)
-                    val n = input.read(buf)
+                    val n = input!!.read(buf)
                     if (n > 0) buf.copyOf(n) else null
                 } ?: break
                 c.send(chunk)
             }
             c.sendRaw(END)
         } catch (e: IOException) {
-            // Terminate the stream so the client can recover, then drop the connection.
-            try { c.sendRaw(END) } catch (_: IOException) {}
-            throw e
+            // Like the old Files.pull: terminate the stream, keep the connection.
+            if (c.closed) throw e
+            System.err.println("pull failed: $e")
+            c.sendRaw(END)
         } finally {
-            withContext(Loop.Work) { input.close() }
+            input?.let { i -> withContext(NonCancellable + Loop.Work) { try { i.close() } catch (_: IOException) {} } }
         }
     }
 
@@ -128,7 +131,7 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
         } catch (e: IOException) {
             return err("write-failed:${e.message}")
         } finally {
-            out?.let { o -> withContext(Loop.Work) { try { o.close() } catch (_: IOException) {} } }
+            out?.let { o -> withContext(NonCancellable + Loop.Work) { try { o.close() } catch (_: IOException) {} } }
         }
     }
 
@@ -168,7 +171,7 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
                 val got = try {
                     c.copyChunks(apk).also { withContext(Loop.Work) { session.fsync(apk) } }
                 } finally {
-                    withContext(Loop.Work) { try { apk.close() } catch (_: IOException) {} }
+                    withContext(NonCancellable + Loop.Work) { try { apk.close() } catch (_: IOException) {} }
                 }
                 if (want > 0 && got != want) {
                     withContext(Loop.Work) { session.abandon() }
@@ -190,7 +193,7 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
             return err("install-failed:status=$code pkg=$pkg msg=$msg")
         } catch (t: Throwable) {
             val s = session
-            try { if (s != null) withContext(Loop.Work) { s.abandon() } } catch (_: Throwable) {}
+            try { if (s != null) withContext(NonCancellable + Loop.Work) { s.abandon() } } catch (_: Throwable) {}
             if (t is kotlinx.coroutines.CancellationException) throw t
             return err((if (multi) "install-multi-threw:" else "install-threw:") + t.javaClass.simpleName + ":" + t.message)
         } finally {

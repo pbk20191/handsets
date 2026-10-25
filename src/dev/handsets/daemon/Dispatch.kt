@@ -25,7 +25,7 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
                     return
                 }
                 // UTF-8 so `clip_set <CJK>` / `text <CJK>` round-trip.
-                val cmd = String(c.readFully(len), StandardCharsets.UTF_8).trim()
+                val cmd = String(c.readFully(len), StandardCharsets.UTF_8).trim { it <= ' ' }   // Java trim(): ASCII controls + space only
                 val sp = cmd.indexOf(' ')
                 val head = if (sp >= 0) cmd.substring(0, sp) else cmd
                 when (head) {

@@ -4,6 +4,7 @@ import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -29,7 +30,11 @@ import kotlin.coroutines.resume
 class Conn(private val fd: FileDescriptor) {
 
     val job: Job = SupervisorJob(Loop.scope.coroutineContext[Job])
-    val scope = CoroutineScope(Loop.Main + job)
+    val scope = CoroutineScope(Loop.Main + job + CoroutineExceptionHandler { _, t ->
+        // A stray failure in a connection's coroutine must never reach the
+        // looper's uncaught handler (that would kill app_process).
+        if (t !is IOException) System.err.println("hsd: connection coroutine failed: $t")
+    })
 
     private var inBuf = ByteArray(8192)
     private var inStart = 0
@@ -252,7 +257,7 @@ class Conn(private val fd: FileDescriptor) {
     }
 
     private fun onEvents(ev: Int): Int {
-        if (ev and Io.ERR != 0) { watching = 0; close(); return 0 }
+        if (ev and Io.ERR != 0) { Io.unwatch(fd); watching = 0; close(); return 0 }
         inCallback = true
         try {
             if (ev and Io.OUT != 0) drain()

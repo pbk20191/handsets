@@ -14,24 +14,47 @@ import kotlinx.coroutines.withContext
 internal class StateRefresher(private val state: State, private val debounceMs: Long, private val heartbeatMs: Long) {
 
     private var pending: Job? = null
+    private var debouncing = false
+    private var computing = false
+    private var dirtyAgain = false
 
     /** Main thread only. */
-    fun start() = schedule(heartbeatMs)
+    fun start() = schedule(heartbeatMs, debounce = false)
 
-    /** Main thread only. */
-    fun mark() = schedule(debounceMs)
+    /**
+     * Main thread only. Refreshes [debounceMs] after the first event of a
+     * burst; later events in the burst don't push it back (so a steady event
+     * stream can't starve subscribers), and events during a refresh queue one more.
+     */
+    fun mark() {
+        when {
+            debouncing -> {}
+            computing -> dirtyAgain = true
+            else -> schedule(debounceMs, debounce = true)
+        }
+    }
 
-    private fun schedule(afterMs: Long) {
+    private fun schedule(afterMs: Long, debounce: Boolean) {
         pending?.cancel()
+        debouncing = debounce
         pending = Loop.scope.launch {
             delay(afterMs)
+            debouncing = false
+            computing = true
             try {
                 val snap = withContext(Loop.Work) { state.computeDevice() }
                 state.publish(snap)
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
+            } finally {
+                computing = false
             }
-            schedule(heartbeatMs)
+            if (dirtyAgain) {
+                dirtyAgain = false
+                schedule(debounceMs, debounce = true)
+            } else {
+                schedule(heartbeatMs, debounce = false)
+            }
         }
     }
 }
