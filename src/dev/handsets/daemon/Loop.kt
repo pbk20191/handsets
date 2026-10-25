@@ -6,10 +6,12 @@ import android.os.MessageQueue
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.android.asCoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
 import java.io.FileDescriptor
+import kotlin.coroutines.EmptyCoroutineContext
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicInteger
@@ -42,9 +44,13 @@ object Loop {
     /** Must run on the main thread after `Looper.prepareMainLooper()`. */
     fun init() {
         mainHandler = Handler(Looper.getMainLooper())
-        // Dispatchers.Main can't resolve its factory after R8 in a bare
-        // app_process jar, so bind a dispatcher to the main looper directly.
-        Main = mainHandler.asCoroutineDispatcher("hs-main").immediate
+        Main = try {
+            Dispatchers.Main.immediate.also { it.isDispatchNeeded(EmptyCoroutineContext) }
+        } catch (t: Throwable) {
+            // Factory missing from the jar: bind to the main looper directly.
+            System.err.println("hsd: Dispatchers.Main unavailable ($t); using a looper handler")
+            mainHandler.asCoroutineDispatcher("hs-main").immediate
+        }
         scope = CoroutineScope(SupervisorJob() + Main + CoroutineExceptionHandler { _, t ->
             System.err.println("hsd: uncaught in coroutine: $t")
             t.printStackTrace()

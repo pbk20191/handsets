@@ -111,9 +111,12 @@ val hsJar by tasks.registering(Jar::class) {
     group = "build"
     description = "Builds build/hs.jar (classes.dex only) for app_process."
     from(r8Dex) { include("classes.dex") }
+    // ServiceLoader entry so Dispatchers.Main finds AndroidDispatcherFactory at runtime.
+    from({ configurations.runtimeClasspath.get().filter { it.name.startsWith("kotlinx-coroutines-android") }.map { zipTree(it) } }) {
+        include("META-INF/services/kotlinx.coroutines.internal.MainDispatcherFactory")
+    }
     archiveFileName = "hs.jar"
     destinationDirectory = layout.projectDirectory.dir("build")
-    // Only classes.dex: app_process doesn't need a manifest.
     isPreserveFileTimestamps = false
     manifest { }
 }

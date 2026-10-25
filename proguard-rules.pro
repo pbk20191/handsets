@@ -13,3 +13,7 @@
 # kotlinx-coroutines: atomic field updaters 
 -keepclassmembers class kotlinx.coroutines.** { volatile <fields>; }
 -keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
+# Dispatchers.Main: ServiceLoader reads META-INF/services/kotlinx.coroutines.internal.MainDispatcherFactory
+# (packed into hs.jar by the hsJar task) and instantiates the factory by name.
+-keep class kotlinx.coroutines.android.AndroidDispatcherFactory { <init>(); }
+-keepnames class kotlinx.coroutines.internal.MainDispatcherFactory
