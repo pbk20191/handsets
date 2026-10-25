@@ -28,14 +28,26 @@ Accessibility events, display/package/config listeners, `ImageReader` and
 `MediaCodec` callbacks, and all timers (`delay`) run there too. Nothing on the
 main thread may block.
 
-`Loop.Work` (`hs-work-1..4`) takes CPU work and binder calls that can take
-long: JPEG/PNG encoding, tile diffs, mirror pixel copies, accessibility tree
-dumps, PackageInstaller and file I/O. Results come back to main.
+Everything off main runs on the kotlinx-coroutines scheduler, so all of it
+shares one worker pool (`DefaultDispatcher-worker-N`):
+
+- `Loop.Work` (`Default.limitedParallelism(≤4)`): CPU work and binder calls
+  that can take long — JPEG/PNG encoding, tile diffs, accessibility tree
+  dumps, PackageInstaller and file I/O.
+- `Loop.Blocking` (`IO`): calls that wait on a peer — binder dumps into a
+  pipe a slow client drains, MediaCodec / VirtualDisplay setup and teardown.
+- `Loop.FrameCopy` (`IO.limitedParallelism(1)`): mirror pixel copies, which
+  block on the GPU fence once per frame.
+
+Gestures pace MOVE events on `Choreographer` vsync callbacks; `stream fps=N`
+sends on the first vsync after each slot. `state_watch` and `clip_watch`
+collect `StateFlow`s (one clipboard poller per interval, only while watched).
 
 Output is queued per connection: `send` applies backpressure past 4 MiB;
 `sendLatest` keeps only the newest unsent frame (JPEG stream, `state_watch`).
-H.264 never drops: an encoder output buffer is released only after its frame
-is queued, so a slow client stalls just its own encoder.
+`stream_h264` connections with the same parameters share one encoder; each
+access unit is copied once. Joiners and lagging viewers restart from cached
+SPS/PPS + the frames since the last IDR, so the shared encoder never waits.
 
 `wire-smoke.py run` / `diff` (in `scripts/`) records normalized responses for
 every verb so two daemon builds can be compared on a device.

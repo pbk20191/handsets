@@ -9,13 +9,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.android.asCoroutineDispatcher
-import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.asExecutor
 import java.io.FileDescriptor
+import java.util.concurrent.Executor
 import kotlin.coroutines.EmptyCoroutineContext
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import java.util.concurrent.ThreadFactory
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Threading model of the daemon.
@@ -23,21 +20,31 @@ import java.util.concurrent.atomic.AtomicInteger
  *  - [Main]: the process main thread running `Looper.loop()`. Every socket,
  *    pipe, listener callback, timer and coroutine lives here unless it is
  *    explicitly moved off. Code running on Main must never block.
- *  - [Work]: a small fixed pool for CPU work (encoding, buffer copies, tree
- *    dumps) and binder calls that may take long. Results come back to Main.
+ *  - [Work], [Blocking], [FrameCopy]: views of the kotlinx-coroutines
+ *    scheduler, so every off-main task shares one worker pool
+ *    (`DefaultDispatcher-worker-N`). Work is CPU work and binder calls that
+ *    may take long, capped so it can't hog the pool; Blocking is calls that
+ *    wait on a peer (pipe-fed binder dumps, codec and VirtualDisplay setup
+ *    and teardown); FrameCopy serializes mirror pixel copies, which block on
+ *    the GPU fence. Results come back to Main.
  */
 object Loop {
 
     lateinit var Main: CoroutineDispatcher
         private set
 
-    /** The Work pool as a plain Executor, for Java callers. */
-    val workExecutor: ExecutorService = Executors.newFixedThreadPool(
-        minOf(4, Runtime.getRuntime().availableProcessors()).coerceAtLeast(2),
-        daemonThreads("hs-work"),
+    val Work: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(
+        minOf(4, Runtime.getRuntime().availableProcessors()).coerceAtLeast(2)
     )
 
-    val Work: CoroutineDispatcher = workExecutor.asCoroutineDispatcher()
+    val Blocking: CoroutineDispatcher = Dispatchers.IO
+
+    val FrameCopy: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1)
+
+    /** The same dispatchers as plain Executors, for Java callers. */
+    val workExecutor: Executor = Work.asExecutor()
+    val blockingExecutor: Executor = Blocking.asExecutor()
+    val frameCopyExecutor: Executor = FrameCopy.asExecutor()
 
     lateinit var mainHandler: Handler
         private set
@@ -59,13 +66,6 @@ object Loop {
             System.err.println("hsd: uncaught in coroutine: $t")
             t.printStackTrace()
         })
-    }
-
-    private fun daemonThreads(prefix: String): ThreadFactory {
-        val n = AtomicInteger()
-        return ThreadFactory { r ->
-            Thread(r, "$prefix-${n.incrementAndGet()}").apply { isDaemon = true }
-        }
     }
 }
 

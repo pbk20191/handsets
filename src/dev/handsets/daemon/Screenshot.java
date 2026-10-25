@@ -477,7 +477,7 @@ public final class Screenshot {
             absorbing = true;
             // Its own thread: ~16 ms GPU-fence copies per frame must not queue
             // ahead of taps and dumps on the Work pool.
-            Pools.INSTANCE.getFrames().execute(new Runnable() {
+            Loop.INSTANCE.getFrameCopyExecutor().execute(new Runnable() {
                 @Override public void run() {
                     try { absorb(img); }
                     catch (Throwable ignored) {}

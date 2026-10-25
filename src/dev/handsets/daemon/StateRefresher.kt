@@ -2,6 +2,7 @@ package dev.handsets.daemon
 
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -12,6 +13,9 @@ import kotlinx.coroutines.withContext
  * snapshot is computed on Work and published on main.
  */
 internal class StateRefresher(private val state: State, private val debounceMs: Long, private val heartbeatMs: Long) {
+
+    /** Latest published snapshot; see [State.snapshots]. */
+    val snapshots = MutableStateFlow<ByteArray?>(null)
 
     private var pending: Job? = null
     private var debouncing = false

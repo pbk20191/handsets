@@ -41,20 +41,21 @@ class Gestures(private val h: Server.Handlers) {
         motion(t, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y)
     }
 
-    /** One MOVE per 60 Hz frame; UP at the final coords with the last MOVE's time. */
+    /**
+     * One MOVE per vsync, stamped with the frame time, positioned by elapsed
+     * time; the last MOVE lands on the endpoint and UP shares its time.
+     */
     suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durMs0: Int) {
         val durMs = if (durMs0 <= 0) 500 else durMs0
-        val steps = maxOf(2, durMs / 16)
         val t0 = SystemClock.uptimeMillis()
         motion(t0, t0, MotionEvent.ACTION_DOWN, x1, y1)
-        for (i in 1..steps) {
-            val at = t0 + i.toLong() * durMs / steps
-            val f = i.toFloat() / steps
-            val wait = at - SystemClock.uptimeMillis()
-            if (wait > 0) delay(wait)
+        var at: Long
+        do {
+            at = maxOf(Frames.next(), t0 + 1)
+            val f = minOf(1f, (at - t0).toFloat() / durMs)
             motion(t0, at, MotionEvent.ACTION_MOVE, Math.round(x1 + (x2 - x1) * f), Math.round(y1 + (y2 - y1) * f))
-        }
-        motion(t0, t0 + durMs, MotionEvent.ACTION_UP, x2, y2)
+        } while (at - t0 < durMs)
+        motion(t0, at, MotionEvent.ACTION_UP, x2, y2)
     }
 
     private suspend fun input(head: String, cmd: String): ByteArray = try {

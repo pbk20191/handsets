@@ -6,6 +6,11 @@ import android.system.Os
 import android.system.OsConstants
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -38,7 +43,7 @@ internal class ProcStream(private val clip: Clipboard) {
         val pump = c.scope.async { try { pump(c, read.fileDescriptor, 64 * 1024) } finally { Io.unwatch(read.fileDescriptor); read.close() } }
         try {
             // Blocks until the client drains the pipe: keep it off Work.
-            withContext(Pools.blocking) { b.dump(write.fileDescriptor, args) }
+            withContext(Loop.Blocking) { b.dump(write.fileDescriptor, args) }
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException) { write.close(); throw t }
             c.errAndEnd("dump-threw:${t.javaClass.simpleName}:${t.message}")
@@ -64,19 +69,22 @@ internal class ProcStream(private val clip: Clipboard) {
         runProcess(c, split(tail), 64 * 1024, "spawn-failed:", exitTrailer = true)
     }
 
+    /** Clipboard text as a StateFlow per poll interval, polled only while collected. */
+    private val clipFlows = HashMap<Long, StateFlow<String?>>()
+
+    private fun clipFlow(intervalMs: Long): StateFlow<String?> = clipFlows.getOrPut(intervalMs) {
+        flow {
+            while (true) {
+                withContext(Loop.Work) { clip.currentText() }?.let { emit(it) }
+                delay(intervalMs)
+            }
+        }.stateIn(Loop.scope, SharingStarted.WhileSubscribed(replayExpirationMillis = 0), null)
+    }
+
     /** Pushes the clipboard text now and on every change; ends when the client does. */
     suspend fun clipWatch(c: Conn, intervalMs0: Long) {
         val intervalMs = if (intervalMs0 <= 0) 500 else intervalMs0
-        var last = withContext(Loop.Work) { clip.currentText() }
-        if (last != null) c.send(last.toByteArray(Charsets.UTF_8)) else last = ""
-        while (true) {
-            delay(intervalMs)
-            val now = withContext(Loop.Work) { clip.currentText() } ?: continue
-            if (now != last) {
-                c.send(now.toByteArray(Charsets.UTF_8))
-                last = now
-            }
-        }
+        clipFlow(intervalMs).filterNotNull().collect { c.send(it.toByteArray(Charsets.UTF_8)) }
     }
 
     private suspend fun runProcess(c: Conn, argv: List<String>, bufSize: Int, spawnErr: String, exitTrailer: Boolean) {

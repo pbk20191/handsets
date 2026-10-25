@@ -1,7 +1,7 @@
 package dev.handsets.daemon
 
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -105,13 +105,9 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
     /** Pushes every fresh device snapshot; only the newest unsent one is kept. */
     private suspend fun stateWatch(c: Conn, state: State) {
         c.closeOnEof()
-        val l = State.SnapshotListener { json -> c.scope.launch { c.sendLatest(0, json) } }
-        try {
-            withContext(Loop.Work) { state.subscribe(l) }
-            awaitCancellation()
-        } finally {
-            state.unsubscribe(l)
-        }
+        withContext(Loop.Work) { state.snapshots() }
+            .filterNotNull()
+            .collect { c.sendLatest(0, it) }
     }
 
     private fun unknown(head: String) = Server.errBytes("UNKNOWN_CMD:$head")

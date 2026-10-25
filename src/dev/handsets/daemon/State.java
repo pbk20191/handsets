@@ -25,7 +25,6 @@ import java.net.InetAddress;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -75,24 +74,17 @@ final class State {
     private volatile boolean refresherStarted;
     private volatile boolean listenersRegistered;
 
-    /** Push-mode subscribers. Invoked on every fresh snapshot. */
-    public interface SnapshotListener {
-        void onSnapshot(byte[] json);
-    }
-    private final CopyOnWriteArrayList<SnapshotListener> subs = new CopyOnWriteArrayList<>();
-
-    public void subscribe(SnapshotListener l) {
-        subs.add(l);
-        // Push the current snapshot synchronously so the subscriber doesn't
-        // have to wait for the next change to populate its mirror.
+    /**
+     * Every fresh device snapshot, latest only (push mode for state_watch).
+     * Seeded with the current snapshot so a new collector gets it at once;
+     * computes one if none exists yet, so call it off the main thread.
+     */
+    kotlinx.coroutines.flow.StateFlow<byte[]> snapshots() {
         byte[] snap = cachedDevice.get();
         if (snap == null) snap = device();
-        try { l.onSnapshot(snap); } catch (Throwable ignored) {}
+        refresher.getSnapshots().compareAndSet(null, snap);
         ensureRefresher();
-    }
-
-    public void unsubscribe(SnapshotListener l) {
-        subs.remove(l);
+        return refresher.getSnapshots();
     }
 
     private final UiEvents uiEvents;
@@ -240,13 +232,11 @@ final class State {
         });
     }
 
-    /** Main thread: store a fresh snapshot and push it to subscribers. */
+    /** Main thread: store a fresh snapshot and push it to collectors. */
     void publish(byte[] s) {
         cachedDevice.set(s);
         cachedDeviceStamp.set(new long[]{System.currentTimeMillis()});
-        for (SnapshotListener l : subs) {
-            try { l.onSnapshot(s); } catch (Throwable ignored) {}
-        }
+        refresher.getSnapshots().setValue(s);
     }
 
     /** Main thread: something changed; refresh soon. */
@@ -459,7 +449,7 @@ final class State {
         sb.append("\"wifi_ssid\":")       .append(jsonStr(readWifiSsid())).append(',');
 
         // Dynamic — display.
-        Display d = ctx.getSystemService(android.hardware.display.DisplayManager.class)
+        Display d = ctx.<DisplayManager>getSystemService(android.hardware.display.DisplayManager.class)
                 .getDisplay(Display.DEFAULT_DISPLAY);
         android.graphics.Point sz = new android.graphics.Point();
         d.getRealSize(sz);
@@ -587,7 +577,7 @@ final class State {
             if (v == 1) return "light";
         } catch (Throwable ignored) {}
         try {
-            android.app.UiModeManager uim = ctx.getSystemService(android.app.UiModeManager.class);
+            android.app.UiModeManager uim = ctx.<android.app.UiModeManager>getSystemService(android.app.UiModeManager.class);
             if (uim != null) {
                 int mode = uim.getNightMode();
                 if (mode == android.app.UiModeManager.MODE_NIGHT_YES) return "dark";
@@ -607,7 +597,7 @@ final class State {
      *  a null active network from ConnectivityManager. */
     private String readNetworkType() {
         try {
-            ConnectivityManager cm = ctx.getSystemService(ConnectivityManager.class);
+            ConnectivityManager cm = ctx.<ConnectivityManager>getSystemService(ConnectivityManager.class);
             Network active = cm.getActiveNetwork();
             if (active != null) {
                 NetworkCapabilities caps = cm.getNetworkCapabilities(active);
@@ -651,7 +641,7 @@ final class State {
     private String readIp() {
         // ConnectivityManager first (cleaner attribution).
         try {
-            ConnectivityManager cm = ctx.getSystemService(ConnectivityManager.class);
+            ConnectivityManager cm = ctx.<ConnectivityManager>getSystemService(ConnectivityManager.class);
             Network active = cm.getActiveNetwork();
             if (active != null) {
                 LinkProperties lp = cm.getLinkProperties(active);
@@ -689,7 +679,7 @@ final class State {
     /** Connected wifi SSID, stripped of WifiInfo's surrounding quotes. */
     private String readWifiSsid() {
         try {
-            WifiManager wm = ctx.getSystemService(WifiManager.class);
+            WifiManager wm = ctx.<WifiManager>getSystemService(WifiManager.class);
             if (wm == null) return "";
             @SuppressWarnings("deprecation")
             WifiInfo info = wm.getConnectionInfo();

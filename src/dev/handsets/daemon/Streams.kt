@@ -7,6 +7,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.Surface
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
@@ -51,16 +52,16 @@ internal object Streams {
             }
             val intervalMs = if (fps > 0) 1000L / fps else 0L
             sendOne()
-            var next = System.currentTimeMillis() + intervalMs
+            var next = SystemClock.uptimeMillis() + intervalMs
             while (true) {
+                // Bounded wait: the periodic re-send doubles as a keep-alive.
+                withTimeoutOrNull(IDLE_INTERVAL_MS) { wake.receive() }
                 if (intervalMs > 0) {
-                    val wait = next - System.currentTimeMillis()
-                    if (wait > 0) withTimeoutOrNull(wait) { wake.receive() }
+                    // fps cap: send on the first vsync at or after the slot.
+                    var now = SystemClock.uptimeMillis()
+                    while (now < next) now = Frames.next()
                     wake.tryReceive()
-                    next = System.currentTimeMillis() + intervalMs
-                } else {
-                    // Bounded wait: the periodic re-send doubles as a keep-alive.
-                    withTimeoutOrNull(IDLE_INTERVAL_MS) { wake.receive() }
+                    next = now + intervalMs
                 }
                 sendOne()
             }
@@ -142,7 +143,7 @@ internal object Streams {
             hub.subs.add(sub)
             try {
                 // Codec + VirtualDisplay setup are synchronous binder calls.
-                withContext(Pools.blocking) { hub.start() }
+                withContext(Loop.Blocking) { hub.start() }
                 if (hub.released) hub.stopNow()
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) { hub.release(); throw t }
@@ -308,7 +309,7 @@ internal object Streams {
             val enc = encoder
             val sf = surface
             // Codec/display teardown is synchronous binder work: keep it off main.
-            Pools.blockingExecutor.execute {
+            Loop.blockingExecutor.execute {
                 try { v?.release() } catch (_: Throwable) {}
                 enc?.let { e ->
                     try { e.stop() } catch (_: Throwable) {}
