@@ -6,6 +6,9 @@ import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import android.view.MotionEvent.PointerCoords
 import android.view.MotionEvent.PointerProperties
 
@@ -24,6 +27,9 @@ internal class Input(private val ua: UiAutomation) {
     // Streamed-pointer state. Guarded by `this`.
     private var pointerActive = false
     private var pointerDownTime = 0L
+
+    /** Streamed pointer state (down/move/up from any connection), one event at a time. */
+    private val pointer = Mutex()
     private var pointerLastX = 0
     private var pointerLastY = 0
 
@@ -39,8 +45,9 @@ internal class Input(private val ua: UiAutomation) {
 
     // ---------- single gestures: timing lives in Gestures.kt ----------
     // ---------- streamed pointer ----------
-    @Synchronized
-    fun pointerDown(x: Int, y: Int) {
+    suspend fun pointerDown(x: Int, y: Int) = pointer.withLock { withContext(Loop.Work) { pointerDownLocked(x, y) } }
+
+    private fun pointerDownLocked(x: Int, y: Int) {
         if (pointerActive) {
             // A stray second DOWN — emit an UP first to keep the dispatcher happy.
             motion(
@@ -58,8 +65,9 @@ internal class Input(private val ua: UiAutomation) {
         )
     }
 
-    @Synchronized
-    fun pointerMove(x: Int, y: Int) {
+    suspend fun pointerMove(x: Int, y: Int) = pointer.withLock { withContext(Loop.Work) { pointerMoveLocked(x, y) } }
+
+    private fun pointerMoveLocked(x: Int, y: Int) {
         if (!pointerActive) return
         pointerLastX = x
         pointerLastY = y
@@ -69,8 +77,9 @@ internal class Input(private val ua: UiAutomation) {
         )
     }
 
-    @Synchronized
-    fun pointerUp(x: Int, y: Int) {
+    suspend fun pointerUp(x: Int, y: Int) = pointer.withLock { withContext(Loop.Work) { pointerUpLocked(x, y) } }
+
+    private fun pointerUpLocked(x: Int, y: Int) {
         if (!pointerActive) return
         pointerLastX = x
         pointerLastY = y

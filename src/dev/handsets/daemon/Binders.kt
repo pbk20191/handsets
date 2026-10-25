@@ -17,27 +17,22 @@ import kotlin.concurrent.Volatile
  * the reflective lookups below succeed without throwing.
  */
 internal object Binders {
-    @Volatile
-    private var systemContext: Context? = null
-
-    @JvmStatic
-    @Synchronized
-    fun systemContext(): Context? {
-        val cached = systemContext
-        if (cached != null) return cached
+    /** ActivityThread.systemMain() binds to the calling thread's looper: first call on main. */
+    private val systemContextLazy: Context by lazy {
         try {
             if (Looper.getMainLooper() == null) {
                 Looper.prepareMainLooper()
             }
             val at = Class.forName("android.app.ActivityThread")
             val inst = at.getMethod("systemMain").invoke(null)
-            val ctx = at.getMethod("getSystemContext").invoke(inst) as Context?
-            systemContext = ctx
-            return ctx
+            at.getMethod("getSystemContext").invoke(inst) as Context
         } catch (t: Throwable) {
             throw RuntimeException("system Context lookup failed", t)
         }
     }
+
+    @JvmStatic
+    fun systemContext(): Context? = systemContextLazy
 
     @JvmStatic
     fun service(name: String?): IBinder {

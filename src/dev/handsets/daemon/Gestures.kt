@@ -74,9 +74,9 @@ internal class Gestures(private val h: Server.Handlers) {
                     } else { tap(a.x, a.y); OK }
                 }
                 "swipe" -> { swipe(a.x1, a.y1, a.x2, a.y2, if (a.dur > 0) a.dur else 300); OK }
-                "down" -> { withContext(Loop.Work) { h.input.pointerDown(a.x, a.y) }; OK }
-                "move" -> { withContext(Loop.Work) { h.input.pointerMove(a.x, a.y) }; OK }
-                "up" -> { withContext(Loop.Work) { h.input.pointerUp(a.x, a.y) }; OK }
+                "down" -> { h.input.pointerDown(a.x, a.y); OK }
+                "move" -> { h.input.pointerMove(a.x, a.y); OK }
+                "up" -> { h.input.pointerUp(a.x, a.y); OK }
                 "scroll" -> {
                     // Positive dy → swipe up → content scrolls up.
                     val dy = if (a.dy == 0) 1 else a.dy
@@ -182,7 +182,7 @@ internal class Gestures(private val h: Server.Handlers) {
         }
         if (el < 0) return Server.errBytes("TIMEOUT:tap_and_dump")
         return try {
-            utf8(withContext(Loop.Work) { h.dumper.dumpActive() })
+            utf8(h.dumper.dumpActive())
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException) throw t
             Server.errBytes("INTERNAL:dump-failed:${t.message}")

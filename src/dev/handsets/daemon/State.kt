@@ -84,8 +84,7 @@ internal class State(
     private val cachedDeviceStamp = AtomicReference<LongArray?>(longArrayOf(0L))
     private val refresher = StateRefresher(this, DEBOUNCE_MS, HEARTBEAT_MS)
 
-    @Volatile
-    private var refresherStarted = false
+    private val refresherStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
     @Volatile
     private var listenersRegistered = false
@@ -220,10 +219,8 @@ internal class State(
     }
 
     /** Starts listeners + refresher on the main looper (any thread, idempotent).  */
-    @Synchronized
     private fun ensureRefresher() {
-        if (refresherStarted) return
-        refresherStarted = true
+        if (!refresherStarted.compareAndSet(false, true)) return
         Loop.post {
             registerListeners()
             refresher.start()
@@ -351,12 +348,11 @@ internal class State(
     }
 
     /** Static fields — props, total RAM/storage, CPU model. Computed once.  */
-    @Volatile
-    private var cachedStaticJson: String? = null
+    private val staticJsonLazy: String by lazy { computeStaticJson() }
 
-    @Synchronized
-    private fun staticJson(): String? {
-        if (cachedStaticJson != null) return cachedStaticJson
+    private fun staticJson(): String? = staticJsonLazy
+
+    private fun computeStaticJson(): String {
         val sb = StringBuilder(512)
         sb.append("\"model\":").append(jsonStr(getprop("ro.product.model"))).append(',')
         sb.append("\"manufacturer\":").append(jsonStr(getprop("ro.product.manufacturer")))
@@ -378,8 +374,7 @@ internal class State(
         sb.append("\"total_ram_kb\":").append(readMemTotalKb()).append(',')
         sb.append("\"total_storage_kb\":").append(readStorageTotalKb()).append(',')
         sb.append("\"sdk\":").append(Build.VERSION.SDK_INT).append(',')
-        cachedStaticJson = sb.toString()
-        return cachedStaticJson
+        return sb.toString()
     }
 
     @Volatile
@@ -393,27 +388,22 @@ internal class State(
         if (cur != null && System.currentTimeMillis() - appCountsAt < APP_COUNT_TTL_MS) {
             return cur
         }
-        synchronized(this) {
-            val now = appCounts
-            if (now != null && System.currentTimeMillis() - appCountsAt < APP_COUNT_TTL_MS) {
-                return now
-            }
-            var total: Long = 0
-            var third: Long = 0
-            try {
-                for (p in ctx.getPackageManager().getInstalledPackages(0)) {
-                    total++
-                    val ai = p.applicationInfo
-                    if (ai != null && (ai.flags and ApplicationInfo.FLAG_SYSTEM) == 0) {
-                        third++
-                    }
+    // Two callers racing past the TTL check both recompute; harmless.
+        var total: Long = 0
+        var third: Long = 0
+        try {
+            for (p in ctx.getPackageManager().getInstalledPackages(0)) {
+                total++
+                val ai = p.applicationInfo
+                if (ai != null && (ai.flags and ApplicationInfo.FLAG_SYSTEM) == 0) {
+                    third++
                 }
-            } catch (ignored: Throwable) {
             }
-            appCounts = longArrayOf(total, third)
-            appCountsAt = System.currentTimeMillis()
-            return appCounts!!
+        } catch (ignored: Throwable) {
         }
+        appCounts = longArrayOf(total, third)
+        appCountsAt = System.currentTimeMillis()
+        return appCounts!!
     }
 
     private fun invalidateAppCounts() {
@@ -612,11 +602,8 @@ internal class State(
     }
 
     // ---------- lazy binder/method caches ----------
-    private fun powerBinder(): Any? {
-        val p = iPowerManager
-        if (p != null) return p
-        synchronized(this) {
-            if (iPowerManager != null) return iPowerManager
+    /** Resolved once (thread-safe `lazy`); also wires the methods it probes. */
+    private val powerBinderLazy: Any? by lazy {
             val svc = asInterface(
                 "android.os.IPowerManager\$Stub", service("power")
             )
@@ -630,18 +617,15 @@ internal class State(
                     isInteractive0 = m
                 }
             }
-            iPowerManager = svc
-            return svc
-        }
+            svc
     }
 
-    private fun activityTaskBinder(): Any? {
-        val p = iActivityTaskManager
-        if (p != null) return p
-        synchronized(this) {
-            if (iActivityTaskManager != null) return iActivityTaskManager
+    private fun powerBinder(): Any? = powerBinderLazy
+
+    /** Resolved once (thread-safe `lazy`); also wires the methods it probes. */
+    private val activityTaskBinderLazy: Any? by lazy {
             val svc = iActivityTaskManagerOrNull()
-            if (svc == null) return null
+            if (svc == null) return@lazy null
             // Pick the widest `getTasks` overload — first arg is max task count.
             var best: Method? = null
             for (m in svc.javaClass.getMethods()) {
@@ -652,16 +636,13 @@ internal class State(
                 }
             }
             getTasks = best
-            iActivityTaskManager = svc
-            return svc
-        }
+            svc
     }
 
-    private fun activityBinder(): Any? {
-        val p = iActivityManager
-        if (p != null) return p
-        synchronized(this) {
-            if (iActivityManager != null) return iActivityManager
+    private fun activityTaskBinder(): Any? = activityTaskBinderLazy
+
+    /** Resolved once (thread-safe `lazy`); also wires the methods it probes. */
+    private val activityBinderLazy: Any? by lazy {
             val svc = iActivityManager()
             for (m in svc!!.javaClass.getMethods()) {
                 if ("getRunningAppProcesses" == m.getName()
@@ -671,10 +652,10 @@ internal class State(
                     break
                 }
             }
-            iActivityManager = svc
-            return svc
-        }
+            svc
     }
+
+    private fun activityBinder(): Any? = activityBinderLazy
 
     companion object {
         // ---------- device-JSON cache ----------

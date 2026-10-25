@@ -14,7 +14,6 @@ import android.media.ImageReader
 import android.media.ImageReader.OnImageAvailableListener
 import android.view.Display
 import dev.handsets.daemon.Binders.systemContext
-import dev.handsets.daemon.Loop.frameCopyExecutor
 import dev.handsets.daemon.Loop.mainHandler
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
@@ -23,6 +22,11 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.Volatile
 import kotlin.math.max
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * Fast screenshot via a VirtualDisplay that mirrors the default display into
@@ -38,7 +42,8 @@ import kotlin.math.max
 internal class Screenshot(private val ua: UiAutomation) {
     private val sourceSize: Point // (0,0) if lookup failed
     private val displayManager: DisplayManager? // null if framework init failed
-    private val mirrorAvailable: Boolean
+    private var mirrorAvailable = false
+    private val mirrorsMutex = Mutex()
 
     // Insertion-ordered cache keyed by long-edge resolution.
     // First call for a size pays ~50 ms; subsequent calls are warm.
@@ -46,10 +51,7 @@ internal class Screenshot(private val ua: UiAutomation) {
         object : LinkedHashMap<Int?, Mirror?>(8, 0.75f, true) {
             override fun removeEldestEntry(e: MutableMap.MutableEntry<Int?, Mirror?>): Boolean {
                 if (size > MAX_CACHED_MIRRORS) {
-                    try {
-                        e.value!!.close()
-                    } catch (ignored: Throwable) {
-                    }
+                    e.value?.let { m -> Loop.scope.launch { m.close() } }
                     return true
                 }
                 return false
@@ -73,12 +75,16 @@ internal class Screenshot(private val ua: UiAutomation) {
             System.err.println("screenshot: DisplayManager init failed: " + t)
         }
         this.displayManager = dm
+    }
 
+    /** Creates the default 768 px mirror; call once after construction. */
+    suspend fun probeMirror() {
+        val dm = displayManager
         var ok = false
         if (dm != null) {
             try {
-                val m: Mirror = Mirror.Companion.create(dm, sourceSize, 768)
-                mirrors.put(768, m)
+                val m: Mirror = Mirror.create(dm, sourceSize, 768)
+                mirrorsMutex.withLock { mirrors.put(768, m) }
                 ok = true
                 println(
                     ("screenshot: mirror " + m.outW + "x" + m.outH
@@ -91,7 +97,7 @@ internal class Screenshot(private val ua: UiAutomation) {
         this.mirrorAvailable = ok
     }
 
-    fun capture(args: CaptureArgs): ByteArray? {
+    suspend fun capture(args: CaptureArgs): ByteArray? {
         val longEdge = resolveLongEdge(args)
         val quality: Int = clampQuality(args.quality)
         val png: Boolean = isPng(args.format)
@@ -102,17 +108,17 @@ internal class Screenshot(private val ua: UiAutomation) {
                 result = mirrorCapture(longEdge, quality, args.format)
             } catch (t: Throwable) {
                 System.err.println("screenshot: mirror.capture failed, falling back: " + t)
-                result = fallbackCapture(longEdge, quality, args.format)
+                result = withContext(Loop.Work) { fallbackCapture(longEdge, quality, args.format) }
             }
         } else {
-            result = fallbackCapture(longEdge, quality, args.format)
+            result = withContext(Loop.Work) { fallbackCapture(longEdge, quality, args.format) }
         }
 
         // Optional FLAG_SECURE detection. It shells out to dumpsys, so keep
         // the hot screenshot path pure unless the caller explicitly asks.
         val threshold = if (png) 32 * 1024 else 12 * 1024
         if (args.secureCheck && result.size < threshold) {
-            val secureWin: String? = findSecureWindow()
+            val secureWin: String? = withContext(Loop.Work) { findSecureWindow() }
             if (secureWin != null) {
                 return ("ERR:secure-window:" + secureWin)
                     .toByteArray(StandardCharsets.UTF_8)
@@ -121,17 +127,11 @@ internal class Screenshot(private val ua: UiAutomation) {
         return result
     }
 
-    @Throws(Exception::class)
-    private fun mirrorCapture(longEdge: Int, quality: Int, format: String?): ByteArray {
-        var m: Mirror?
-        synchronized(mirrors) {
-            m = mirrors.get(longEdge)
-            if (m == null) {
-                m = Mirror.Companion.create(displayManager!!, sourceSize, longEdge)
-                mirrors.put(longEdge, m)
-            }
-        }
-        return m!!.encodeLatest(format, quality)
+    private suspend fun mirrorCapture(longEdge: Int, quality: Int, format: String?): ByteArray =
+        mirrorAt(longEdge).encodeLatest(format, quality)
+
+    private suspend fun mirrorAt(longEdge: Int): Mirror = mirrorsMutex.withLock {
+        mirrors[longEdge] ?: Mirror.create(displayManager!!, sourceSize, longEdge).also { mirrors[longEdge] = it }
     }
 
     private fun fallbackCapture(longEdge: Int, quality: Int, format: String?): ByteArray {
@@ -193,18 +193,9 @@ internal class Screenshot(private val ua: UiAutomation) {
      * by `args`. Used by the stream command to subscribe to frame events
      * on the same cached mirror the per-call screenshot path uses.
      */
-    @Throws(Exception::class)
-    fun mirrorFor(args: CaptureArgs): Mirror {
+    suspend fun mirrorFor(args: CaptureArgs): Mirror {
         check(mirrorAvailable) { "mirror unavailable" }
-        val longEdge = resolveLongEdge(args)
-        synchronized(mirrors) {
-            var m = mirrors.get(longEdge)
-            if (m == null) {
-                m = Mirror.Companion.create(displayManager!!, sourceSize, longEdge)
-                mirrors.put(longEdge, m)
-            }
-            return m
-        }
+        return mirrorAt(resolveLongEdge(args))
     }
 
     // ---- mirror pipeline ----
@@ -214,7 +205,11 @@ internal class Screenshot(private val ua: UiAutomation) {
         @JvmField val outW: Int,
         @JvmField val outH: Int
     ) {
-        val lock: Any = Any()
+        /** Guards `cached` (and its stride) for readers and the frame swap. */
+        private val frameMutex = Mutex()
+
+        /** Serializes pixel copies into `scratch` against each other and close(). */
+        private val absorbMutex = Mutex()
 
         // COW so fanout doesn't need the lock and listeners can come and go safely.
         private val subscribers = CopyOnWriteArrayList<FrameListener>()
@@ -231,21 +226,9 @@ internal class Screenshot(private val ua: UiAutomation) {
             return !subscribers.isEmpty()
         }
 
-        /** Lock guarding `cached`. Hold during pixel reads.  */
-        fun lockObject(): Any {
-            return lock
-        }
-
-        /** Most-recent fully-written cached bitmap. Only safe to use while
-         * holding [.lockObject].  */
-        fun currentCached(): Bitmap? {
-            return cached
-        }
-
-        /** Pixel width of [.currentCached] (may exceed outW by row-stride padding).  */
-        fun cachedStridePix(): Int {
-            return cachedRowPix
-        }
+        /** Runs [block] with the latest frame (null before the first) and its stride width in pixels. */
+        suspend fun <T> withFrame(block: (Bitmap?, Int) -> T): T =
+            frameMutex.withLock { block(cached, cachedRowPix) }
 
         // The listener thread does the expensive GPU-fence-blocking
         // copyPixelsFromBuffer into `scratch` *without* holding the lock, then
@@ -260,24 +243,18 @@ internal class Screenshot(private val ua: UiAutomation) {
         private var scratch: Bitmap? = null // owned by listener thread; swapped in & out
         private var scratchRowPix = 0
 
-        fun encodeLatest(format: String?, quality: Int): ByteArray {
-            synchronized(lock) {
-                checkNotNull(cached) { "no frame yet" }
-                val toEncode: Bitmap?
-                var recycle = false
-                if (cachedRowPix == outW) {
-                    toEncode = cached
-                } else {
-                    toEncode = Bitmap.createBitmap(cached!!, 0, 0, outW, outH)
-                    recycle = true
-                }
+        suspend fun encodeLatest(format: String?, quality: Int): ByteArray = frameMutex.withLock {
+            withContext(Loop.Work) {
+                val c = checkNotNull(cached) { "no frame yet" }
+                val crop = cachedRowPix != outW
+                val toEncode = if (crop) Bitmap.createBitmap(c, 0, 0, outW, outH) else c
                 try {
                     val baos = ByteArrayOutputStream(64 * 1024)
                     val cf: CompressFormat = compressFormat(format)
-                    toEncode!!.compress(cf, if (cf == CompressFormat.PNG) 100 else quality, baos)
-                    return baos.toByteArray()
+                    toEncode.compress(cf, if (cf == CompressFormat.PNG) 100 else quality, baos)
+                    baos.toByteArray()
                 } finally {
-                    if (recycle) toEncode!!.recycle()
+                    if (crop) toEncode.recycle()
                 }
             }
         }
@@ -286,84 +263,72 @@ internal class Screenshot(private val ua: UiAutomation) {
         // collapse into a single re-acquire of the latest image.
         private var absorbing = false
         private var absorbPending = false
-        private val absorbLock = Any()
 
         fun onImageAvailable() {
             if (absorbing) {
                 absorbPending = true
                 return
             }
-            val img: Image?
-            try {
-                img = reader.acquireLatestImage()
+            val img: Image = try {
+                reader.acquireLatestImage()
             } catch (t: Throwable) {
-                return
-            }
-            if (img == null) return
+                null
+            } ?: return
             absorbing = true
-            // Its own thread: ~16 ms GPU-fence copies per frame must not queue
+            // FrameCopy: ~16 ms GPU-fence copies per frame must not queue
             // ahead of taps and dumps on the Work pool.
-            frameCopyExecutor.execute(object : Runnable {
-                override fun run() {
-                    try {
-                        absorb(img)
-                    } catch (ignored: Throwable) {
-                    } finally {
-                        img.close()
-                    }
-                    Loop.post {
-                        absorbing = false
-                        if (absorbPending) {
-                            absorbPending = false
-                            onImageAvailable()
-                        }
+            Loop.scope.launch(Loop.FrameCopy) {
+                try {
+                    absorb(img)
+                } catch (ignored: Throwable) {
+                } finally {
+                    img.close()
+                }
+                withContext(Loop.Main) {
+                    absorbing = false
+                    if (absorbPending) {
+                        absorbPending = false
+                        onImageAvailable()
                     }
                 }
-            })
+            }
         }
 
-        private fun absorb(img: Image) {
-            synchronized(absorbLock) {
-                val p = img.getPlanes()[0]
-                val stride = p.getRowStride()
-                val pixelStride = p.getPixelStride()
-                val rowPix = stride / max(1, pixelStride)
-                val h = img.getHeight()
+        private suspend fun absorb(img: Image) = absorbMutex.withLock {
+            val p = img.getPlanes()[0]
+            val rowPix = p.getRowStride() / max(1, p.getPixelStride())
+            val h = img.getHeight()
 
-                // Allocate / resize the listener's private scratch outside the lock.
-                if (scratch == null || scratchRowPix != rowPix || scratch!!.getHeight() != h) {
-                    if (scratch != null) scratch!!.recycle()
-                    scratch = Bitmap.createBitmap(rowPix, h, Bitmap.Config.ARGB_8888)
+            // Resize the private scratch, then do the GPU-fence-blocking copy
+            // (~16 ms on a vsync-locked producer) without holding frameMutex.
+            val sc = scratch?.takeIf { scratchRowPix == rowPix && it.getHeight() == h }
+                ?: Bitmap.createBitmap(rowPix, h, Bitmap.Config.ARGB_8888).also {
+                    scratch?.recycle()
+                    scratch = it
                     scratchRowPix = rowPix
                 }
-                // This is the GPU-fence-blocking call (~16 ms on a vsync-locked
-                // producer). Keep it outside the lock.
-                scratch!!.copyPixelsFromBuffer(p.getBuffer())
+            sc.copyPixelsFromBuffer(p.getBuffer())
 
-                synchronized(lock) {
-                    val oldCached = cached
-                    val oldRowPix = cachedRowPix
-                    cached = scratch
-                    cachedRowPix = scratchRowPix
-                    scratch = oldCached // reuse previous cached as next scratch
-                    scratchRowPix = oldRowPix
-                    frameSeq++
-                }
+            frameMutex.withLock {
+                val oldCached = cached
+                val oldRowPix = cachedRowPix
+                cached = scratch
+                cachedRowPix = scratchRowPix
+                scratch = oldCached // reuse previous cached as next scratch
+                scratchRowPix = oldRowPix
+                frameSeq++
+            }
 
-                // Fan out to subscribers outside the lock. COW makes iteration safe.
-                // Listeners must be non-blocking.
-                if (!subscribers.isEmpty()) {
-                    for (l in subscribers) {
-                        try {
-                            l.onFrame()
-                        } catch (ignored: Throwable) {
-                        }
-                    }
+            // Listeners must be non-blocking.
+            for (l in subscribers) {
+                try {
+                    l.onFrame()
+                } catch (ignored: Throwable) {
                 }
             }
         }
 
-        fun close() {
+        suspend fun close() {
             try {
                 reader.setOnImageAvailableListener(null, null)
             } catch (ignored: Throwable) {
@@ -376,23 +341,18 @@ internal class Screenshot(private val ua: UiAutomation) {
                 reader.close()
             } catch (ignored: Throwable) {
             }
-            synchronized(absorbLock) {
-                synchronized(lock) {
-                    if (cached != null) {
-                        cached!!.recycle()
-                        cached = null
-                    }
-                    if (scratch != null) {
-                        scratch!!.recycle()
-                        scratch = null
-                    }
+            absorbMutex.withLock {
+                frameMutex.withLock {
+                    cached?.recycle()
+                    cached = null
+                    scratch?.recycle()
+                    scratch = null
                 }
             }
         }
 
         companion object {
-            @Throws(Exception::class)
-            fun create(dm: DisplayManager, sourceSize: Point, targetLongEdge: Int): Mirror {
+            suspend fun create(dm: DisplayManager, sourceSize: Point, targetLongEdge: Int): Mirror {
                 var srcW = sourceSize.x
                 var srcH = sourceSize.y
                 if (srcW <= 0 || srcH <= 0) {
@@ -434,10 +394,12 @@ internal class Screenshot(private val ua: UiAutomation) {
                     }
                 }, handler)
 
-                val vd = dm.createVirtualDisplay(
-                    "hs-mirror-" + outW + "x" + outH, outW, outH, 320,
-                    reader.getSurface(), flags
-                )
+                val vd = withContext(Loop.Blocking) {
+                    dm.createVirtualDisplay(
+                        "hs-mirror-" + outW + "x" + outH, outW, outH, 320,
+                        reader.getSurface(), flags
+                    )
+                }
                 if (vd == null) {
                     reader.close()
                     throw RuntimeException("createVirtualDisplay returned null")
@@ -451,9 +413,7 @@ internal class Screenshot(private val ua: UiAutomation) {
                 // mirror frame; the listener still wakes us as soon as it arrives.
                 val deadline = System.nanoTime() + 1500000000L
                 while (System.nanoTime() < deadline) {
-                    synchronized(m.lock) {
-                        if (m.cached != null) return m
-                    }
+                    if (m.withFrame { bmp, _ -> bmp != null }) return m
                     // Also try a direct pull — sometimes the listener doesn't fire
                     // for the very first frame but the queue has it.
                     val img = reader.acquireLatestImage()
@@ -465,7 +425,7 @@ internal class Screenshot(private val ua: UiAutomation) {
                         }
                         return m
                     }
-                    Thread.sleep(15)
+                    delay(15)
                 }
                 return m
             }

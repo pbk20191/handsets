@@ -40,10 +40,7 @@ internal class Server(private val h: Handlers) {
      */
     fun respond(head: String, cmd: String): ByteArray? {
         when (head) {
-            "dump" -> return utf8(safeDumpAll())
-            "dump_active" -> return utf8(safeDumpActive())
             "info" -> return utf8(h.shot!!.sourceSize().x.toString() + " " + h.shot!!.sourceSize().y)
-            "screenshot" -> return safeScreenshot(cmd)
             "pm_list" -> return runPmList(cmd)
             "pm_path" -> return runPmPath(cmd)
             "pm_grant", "pm_revoke" -> return runPmPerm(head, cmd)
@@ -78,29 +75,17 @@ internal class Server(private val h: Handlers) {
         }
     }
 
-    private fun safeDumpAll(): String {
-        try {
-            return h.dumper!!.dumpAll()
-        } catch (t: Throwable) {
-            return "ERR:INTERNAL:dump-failed:" + t.javaClass.getSimpleName() + ":" + t.message
+    /** dump / dump_active / screenshot: suspend, they wait on the dumper or the mirror. */
+    suspend fun capture(head: String, cmd: String): ByteArray = try {
+        when (head) {
+            "dump" -> utf8(h.dumper.dumpAll())
+            "dump_active" -> utf8(h.dumper.dumpActive())
+            else -> h.shot.capture(parseScreenshotArgs(cmd)) ?: errBytes("screenshot-failed:null")
         }
-    }
-
-    private fun safeDumpActive(): String {
-        try {
-            return h.dumper!!.dumpActive()
-        } catch (t: Throwable) {
-            return "ERR:INTERNAL:dump-failed:" + t.javaClass.getSimpleName() + ":" + t.message
-        }
-    }
-
-    private fun safeScreenshot(cmd: String): ByteArray? {
-        try {
-            val args: CaptureArgs = parseScreenshotArgs(cmd)
-            return h.shot!!.capture(args)
-        } catch (t: Throwable) {
-            return errBytes("screenshot-failed:" + t.javaClass.getSimpleName() + ":" + t.message)
-        }
+    } catch (t: Throwable) {
+        if (t is kotlinx.coroutines.CancellationException) throw t
+        if (head == "screenshot") errBytes("screenshot-failed:" + t.javaClass.getSimpleName() + ":" + t.message)
+        else utf8("ERR:INTERNAL:dump-failed:" + t.javaClass.getSimpleName() + ":" + t.message)
     }
 
     internal class InputArgs {

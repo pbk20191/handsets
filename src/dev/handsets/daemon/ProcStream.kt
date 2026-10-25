@@ -20,6 +20,7 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import kotlin.coroutines.resume
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Chunked-stream verbs backed by a pipe: dumpsys, logcat, shell, monitor,
@@ -51,7 +52,7 @@ internal class ProcStream(private val clip: Clipboard) {
             if (t is kotlinx.coroutines.CancellationException) { write.close(); throw t }
             c.errAndEnd("dump-threw:${t.javaClass.simpleName}:${t.message}")
             write.close()
-            withTimeoutOrNull(2000) { pump.await() }
+            withTimeoutOrNull(2000.milliseconds) { pump.await() }
             return
         }
         write.close()

@@ -32,9 +32,8 @@ internal object Streams {
         val key = mirror to quality
         val seq = mirror.frameSeq
         jpegCache[key]?.let { if (it.seq == seq) return it.bytes }
-        val jpeg = withContext(Loop.Work) {
-            try { mirror.encodeLatest("jpeg", quality) } catch (_: IllegalStateException) { null }
-        } ?: return null
+        val jpeg = try { mirror.encodeLatest("jpeg", quality) } catch (_: IllegalStateException) { null }
+            ?: return null
         jpegCache[key] = Encoded(seq, jpeg)
         return jpeg
     }
@@ -82,7 +81,7 @@ internal object Streams {
             while (true) {
                 if (!first) withTimeoutOrNull(TileStreamer.IDLE_INTERVAL_MS) { wake.receive() }
                 val force = first
-                val body = withContext(Loop.Work) { ts.nextPacket(force) }
+                val body = ts.nextPacket(force)
                 first = false
                 if (body != null) c.send(body)
             }

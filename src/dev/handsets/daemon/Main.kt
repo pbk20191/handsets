@@ -67,7 +67,7 @@ data object Main {
 
         val h = Server.Handlers()
         h.dumper = Dumper(ua)
-        h.shot = Screenshot(ua)
+        h.shot = Screenshot(ua).also { it.probeMirror() }
         h.input = Input(ua)
         h.sysCtx = sysCtx
         h.installer = Installer(sysCtx)

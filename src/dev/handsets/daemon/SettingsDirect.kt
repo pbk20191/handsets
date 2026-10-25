@@ -81,41 +81,39 @@ internal class SettingsDirect {
     private fun provider(): Any? {
         val p = provider
         if (p != null) return p
-        synchronized(this) {
-            if (provider != null) return provider
-            try {
-                val iam = iActivityManager()
-                val ext: Method? = findExternalGetter(iam!!.javaClass)
-                if (ext == null) {
-                    failed = true
-                    return null
-                }
-                val userId = myUserId()
-                val holder = ext.invoke(iam, "settings", userId, token, "hs")
-                if (holder == null) {
-                    failed = true
-                    return null
-                }
-                val providerField = holder.javaClass.getField("provider")
-                val prov = providerField.get(holder)
-                if (prov == null) {
-                    failed = true
-                    return null
-                }
-                val call = findCallMethod(prov.javaClass)
-                if (call == null) {
-                    failed = true
-                    return null
-                }
-                val paramTypes = call.getParameterTypes()
-                callPrefix = buildPrefix(paramTypes)
-                callMethod = call
-                provider = prov
-                return prov
-            } catch (t: Throwable) {
+        // No lock: racing callers resolve the same provider; `provider` is published last.
+        try {
+            val iam = iActivityManager()
+            val ext: Method? = findExternalGetter(iam!!.javaClass)
+            if (ext == null) {
                 failed = true
                 return null
             }
+            val userId = myUserId()
+            val holder = ext.invoke(iam, "settings", userId, token, "hs")
+            if (holder == null) {
+                failed = true
+                return null
+            }
+            val providerField = holder.javaClass.getField("provider")
+            val prov = providerField.get(holder)
+            if (prov == null) {
+                failed = true
+                return null
+            }
+            val call = findCallMethod(prov.javaClass)
+            if (call == null) {
+                failed = true
+                return null
+            }
+            val paramTypes = call.getParameterTypes()
+            callPrefix = buildPrefix(paramTypes)
+            callMethod = call
+            provider = prov
+            return prov
+        } catch (t: Throwable) {
+            failed = true
+            return null
         }
     }
 

@@ -4,12 +4,19 @@ import android.app.UiAutomation
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 class Dumper(private val ua: UiAutomation) {
     private val buf = StringBuilder(64 * 1024)
 
-    @Synchronized
-    fun dumpAll(): String {
+    /** One dump at a time: they share [buf]. Waiters suspend, they don't block a thread. */
+    private val mutex = Mutex()
+
+    suspend fun dumpAll(): String = mutex.withLock { withContext(Loop.Work) { dumpAllLocked() } }
+
+    private fun dumpAllLocked(): String {
         buf.setLength(0)
         val out = JsonOut(buf)
         out.beginObj()
@@ -27,14 +34,15 @@ class Dumper(private val ua: UiAutomation) {
         return out.finish()
     }
 
-    @Synchronized
-    fun dumpActive(): String {
+    suspend fun dumpActive(): String = mutex.withLock { withContext(Loop.Work) { dumpActiveLocked() } }
+
+    private fun dumpActiveLocked(): String {
         buf.setLength(0)
         val out = JsonOut(buf)
         out.beginObj()
         out.num("ts", System.currentTimeMillis())
 
-        val root = ua.getRootInActiveWindow()
+        val root = ua.rootInActiveWindow
         out.key("root")
         Traverse.writeNode(root, out)
 

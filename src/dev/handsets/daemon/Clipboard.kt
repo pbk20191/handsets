@@ -21,31 +21,32 @@ import kotlin.concurrent.Volatile
  * given how cheap a clip-read is.
  */
 internal class Clipboard {
-    @Volatile
-    private var svc: Any? = null
+    private val svc: Any by lazy {
+        asInterface("android.content.IClipboard\$Stub", service("clipboard"))!!
+    }
 
-    @Volatile
-    private var getClip: Method? = null
+    /** Longest (most recent) getPrimaryClip overload. */
+    private val getClip: Method? by lazy {
+        svc.javaClass.getMethods()
+            .filter { it.getName() == "getPrimaryClip" && it.getReturnType() == ClipData::class.java }
+            .maxByOrNull { it.getParameterTypes().size }
+    }
 
-    @Volatile
-    private var setClip: Method? = null
-
-    @Synchronized
-    private fun svc(): Any {
-        if (svc == null) {
-            svc = asInterface(
-                "android.content.IClipboard\$Stub",
-                service("clipboard")
-            )
-        }
-        return svc!!
+    /** Longest (most recent) setPrimaryClip overload. */
+    private val setClip: Method? by lazy {
+        svc.javaClass.getMethods()
+            .filter { m ->
+                val p = m.getParameterTypes()
+                m.getName() == "setPrimaryClip" && p.isNotEmpty() && p[0] == ClipData::class.java
+            }
+            .maxByOrNull { it.getParameterTypes().size }
     }
 
     // ---------- read ----------
     fun get(): ByteArray? {
         try {
-            val service = svc()
-            val m = getOrFindGet(service.javaClass)
+            val service = svc
+            val m = getClip
             if (m == null) return err("get-method-not-found")
             val cd = m.invoke(service, *buildArgs(m, null)) as ClipData?
             if (cd == null) return ByteArray(0)
@@ -62,8 +63,8 @@ internal class Clipboard {
         if (text == null) text = ""
         try {
             val cd = ClipData.newPlainText("hs", text)
-            val service = svc()
-            val m = getOrFindSet(service.javaClass)
+            val service = svc
+            val m = setClip
             if (m == null) return err("set-method-not-found")
             m.invoke(service, *buildArgs(m, cd))
             return "ok".toByteArray(StandardCharsets.UTF_8)
@@ -80,8 +81,8 @@ internal class Clipboard {
      * frame so the host sees a clean end.  */
     fun currentText(): String? {
         try {
-            val service = svc()
-            val m = getOrFindGet(service.javaClass)
+            val service = svc
+            val m = getClip
             if (m == null) return null
             val cd = m.invoke(service, *buildArgs(m, null)) as ClipData?
             if (cd == null || cd.getItemCount() == 0) return ""
@@ -93,44 +94,6 @@ internal class Clipboard {
     }
 
     // ---------- reflection helpers ----------
-    private fun getOrFindGet(cls: Class<*>): Method? {
-        val cached = getClip
-        if (cached != null) return cached
-        synchronized(this) {
-            if (getClip != null) return getClip
-            for (m in cls.getMethods()) {
-                if ("getPrimaryClip" != m.getName()) continue
-                if (m.getReturnType() != ClipData::class.java) continue
-                // Prefer the longest (most-recent) overload.
-                if (getClip == null
-                    || m.getParameterTypes().size > getClip!!.getParameterTypes().size
-                ) {
-                    getClip = m
-                }
-            }
-            return getClip
-        }
-    }
-
-    private fun getOrFindSet(cls: Class<*>): Method? {
-        val cached = setClip
-        if (cached != null) return cached
-        synchronized(this) {
-            if (setClip != null) return setClip
-            for (m in cls.getMethods()) {
-                if ("setPrimaryClip" != m.getName()) continue
-                val p = m.getParameterTypes()
-                if (p.size < 1 || p[0] != ClipData::class.java) continue
-                if (setClip == null
-                    || p.size > setClip!!.getParameterTypes().size
-                ) {
-                    setClip = m
-                }
-            }
-            return setClip
-        }
-    }
-
     companion object {
         private const val CALLER = "com.android.shell"
 

@@ -34,6 +34,7 @@ internal class Dispatch(private val ready: CompletableDeferred<Server>) {
                 }
                 val s = ready.await()
                 when (head) {
+                    "dump", "dump_active", "screenshot" -> c.send(s.capture(head, cmd))
                     "keyframe" -> c.send(Server.utf8("ok n=" + Streams.requestKeyframeAll()))
                     "state_watch" -> { stateWatch(c, s.handlers().state); return }
                     "clip_watch" -> {
@@ -121,11 +122,11 @@ internal class Dispatch(private val ready: CompletableDeferred<Server>) {
             if (args.longEdge == 0 && !args.max) args.max = true
             when (head) {
                 "stream" -> {
-                    val mirror = withContext(Loop.Work) { h.shot.mirrorFor(args) }
+                    val mirror = h.shot.mirrorFor(args)
                     Streams.jpeg(c, mirror, Server.clampQuality(args.quality), args.fps)
                 }
                 "stream_tilejpeg" -> {
-                    val mirror = withContext(Loop.Work) { h.shot.mirrorFor(args) }
+                    val mirror = h.shot.mirrorFor(args)
                     Streams.tiles(c, mirror, Server.clampQuality(args.quality), if (args.tile > 0) args.tile else 128)
                 }
                 else -> {

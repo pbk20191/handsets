@@ -38,16 +38,12 @@ internal class TileStreamer(private val mirror: Screenshot.Mirror, quality: Int,
     private val packetBuf = ByteArrayOutputStream(64 * 1024)
     private val jpegScratch = ByteArrayOutputStream(32 * 1024)
 
-    /** Next wire packet (Work thread). `forceKeyframe` for the first one.  */
-    fun nextPacket(forceKeyframe: Boolean): ByteArray {
-        synchronized(mirror.lockObject()) {
-            return buildPacketUnderLock(forceKeyframe)
-        }
-    }
+    /** Next wire packet. `forceKeyframe` for the first one. */
+    suspend fun nextPacket(forceKeyframe: Boolean): ByteArray =
+        mirror.withFrame { bmp, stride -> buildPacket(bmp, stride, forceKeyframe) }
 
-    /** Must be called while holding `mirror.lockObject()`.  */
-    private fun buildPacketUnderLock(forceKeyframe: Boolean): ByteArray {
-        val bmp = mirror.currentCached()
+    /** Runs while the mirror's frame is held, so `bmp` can't be swapped mid-read. */
+    private fun buildPacket(bmp: Bitmap?, stride: Int, forceKeyframe: Boolean): ByteArray {
         if (bmp == null) {
             // No frame yet — send an empty delta so the viewer at least sees
             // liveness.

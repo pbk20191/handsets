@@ -34,7 +34,7 @@ import kotlin.concurrent.Volatile
  */
 internal class Providers(sysCtx: Context?) {
     private val token: IBinder = Binder()
-    private val providerCache = HashMap<String?, Any?>()
+    private val providerCache = java.util.concurrent.ConcurrentHashMap<String, Any>()
 
     @Volatile
     private var queryMethod: Method? = null
@@ -199,27 +199,18 @@ internal class Providers(sysCtx: Context?) {
      * SettingsDirect uses. Cached per-authority for life of the
      * daemon (the binder is stable).  */
     private fun acquire(authority: String?): Any? {
-        var cached = providerCache.get(authority)
-        if (cached != null) return cached
-        synchronized(providerCache) {
-            cached = providerCache.get(authority)
-            if (cached != null) return cached
-            try {
-                val iam = iActivityManager()
-                val ext: Method? = findExternalGetter(iam!!.javaClass)
-                if (ext == null) return null
-                val userId = myUserId()
-                val holder = ext.invoke(iam, authority, userId, token, "hs")
-                if (holder == null) return null
-                val providerField = holder.javaClass.getField("provider")
-                val prov = providerField.get(holder)
-                if (prov == null) return null
-                providerCache.put(authority, prov)
-                return prov
-            } catch (t: Throwable) {
-                System.err.println("providers: acquire " + authority + " failed: " + t)
-                return null
-            }
+        if (authority == null) return null
+        providerCache[authority]?.let { return it }
+        // Two callers racing on a cold authority both look it up; the first stored wins.
+        try {
+            val iam = iActivityManager()
+            val ext: Method = findExternalGetter(iam!!.javaClass) ?: return null
+            val holder = ext.invoke(iam, authority, myUserId(), token, "hs") ?: return null
+            val prov = holder.javaClass.getField("provider").get(holder) ?: return null
+            return providerCache.putIfAbsent(authority, prov) ?: prov
+        } catch (t: Throwable) {
+            System.err.println("providers: acquire " + authority + " failed: " + t)
+            return null
         }
     }
 
@@ -229,37 +220,35 @@ internal class Providers(sysCtx: Context?) {
      * AttributionSource on API 31+).  */
     private fun ensureQueryMethod(providerCls: Class<*>): Method? {
         if (queryWired) return queryMethod
-        synchronized(this) {
-            if (queryWired) return queryMethod
-            var best: Method? = null
-            for (m in providerCls.getMethods()) {
-                if ("query" != m.getName()) continue
-                if (m.getReturnType() != Cursor::class.java) continue
-                val p = m.getParameterTypes()
-                if (p.size < 4) continue
-                val n = p.size
-                if (p[n - 4] != Uri::class.java) continue
-                if (p[n - 3] != Array<String>::class.java) continue
-                if (p[n - 2] != Bundle::class.java) continue
-                if ("android.os.ICancellationSignal" != p[n - 1].getName()) continue
-                if (best == null || p.size < best.getParameterTypes().size) {
-                    // Prefer the *shortest* prefix — fewer mystery params.
-                    best = m
-                }
+        // No lock: racing callers compute the same overload; queryWired is published last.
+        var best: Method? = null
+        for (m in providerCls.getMethods()) {
+            if ("query" != m.getName()) continue
+            if (m.getReturnType() != Cursor::class.java) continue
+            val p = m.getParameterTypes()
+            if (p.size < 4) continue
+            val n = p.size
+            if (p[n - 4] != Uri::class.java) continue
+            if (p[n - 3] != Array<String>::class.java) continue
+            if (p[n - 2] != Bundle::class.java) continue
+            if ("android.os.ICancellationSignal" != p[n - 1].getName()) continue
+            if (best == null || p.size < best.getParameterTypes().size) {
+                // Prefer the *shortest* prefix — fewer mystery params.
+                best = m
             }
-            if (best != null) {
-                val pt = best.getParameterTypes()
-                val n = pt.size
-                uriSlot = n - 4
-                projSlot = n - 3
-                bundleSlot = n - 2
-                signalSlot = n - 1
-                queryPrefix = buildQueryPrefix(pt, n - 4)
-                queryMethod = best
-            }
-            queryWired = true
-            return queryMethod
         }
+        if (best != null) {
+            val pt = best.getParameterTypes()
+            val n = pt.size
+            uriSlot = n - 4
+            projSlot = n - 3
+            bundleSlot = n - 2
+            signalSlot = n - 1
+            queryPrefix = buildQueryPrefix(pt, n - 4)
+            queryMethod = best
+        }
+        queryWired = true
+        return queryMethod
     }
 
     private fun buildQueryArgs(uri: Uri?, proj: Array<String>?, qa: Bundle?): Array<Any?> {
