@@ -4,7 +4,6 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.DataOutputStream
 import java.io.IOException
 import java.nio.charset.StandardCharsets
 import kotlin.system.exitProcess
@@ -35,10 +34,7 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
                 }
                 val s = ready.await()
                 when (head) {
-                    "keyframe" -> {
-                        H264Streamer.requestKeyframeAll()
-                        c.send(Server.utf8("ok n=" + H264Streamer.activeCount()))
-                    }
+                    "keyframe" -> c.send(Server.utf8("ok n=" + Streams.requestKeyframeAll()))
                     "state_watch" -> { stateWatch(c, s.handlers().state); return }
                     "clip_watch" -> {
                         c.closeOnEof()
@@ -47,13 +43,7 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
                     }
                     "stream", "stream_h264", "stream_tilejpeg" -> {
                         c.closeOnEof()
-                        legacyOut(c) { out ->
-                            when (head) {
-                                "stream" -> s.runStream(cmd, out)
-                                "stream_h264" -> s.runH264Stream(cmd, out)
-                                else -> s.runTileStream(cmd, out)
-                            }
-                        }
+                        screenStream(c, s.handlers(), head, cmd)
                         return
                     }
                     "pull" -> transfers(s).pull(c, Server.parseFileArgs(cmd).path)
@@ -126,11 +116,31 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
 
     private fun unknown(head: String) = Server.errBytes("UNKNOWN_CMD:$head")
 
-    private suspend fun legacyOut(c: Conn, block: (DataOutputStream) -> Unit) {
-        withContext(LegacyIo.dispatcher) {
-            val out = LegacyIo.out(c)
-            block(out)
-            out.flush()
+    /** stream / stream_tilejpeg / stream_h264; all default to native resolution. */
+    private suspend fun screenStream(c: Conn, h: Server.Handlers, head: String, cmd: String) {
+        val prefix = when (head) { "stream" -> "stream-failed:"; "stream_tilejpeg" -> "tilejpeg-failed:"; else -> "h264-failed:" }
+        try {
+            val args = Server.parseScreenshotArgs(cmd)
+            if (args.longEdge == 0 && !args.max) args.max = true
+            when (head) {
+                "stream" -> {
+                    val mirror = withContext(Loop.Work) { h.shot.mirrorFor(args) }
+                    Streams.jpeg(c, mirror, Server.clampQuality(args.quality), args.fps)
+                }
+                "stream_tilejpeg" -> {
+                    val mirror = withContext(Loop.Work) { h.shot.mirrorFor(args) }
+                    Streams.tiles(c, mirror, Server.clampQuality(args.quality), if (args.tile > 0) args.tile else 128)
+                }
+                else -> {
+                    val src = h.shot.sourceSize()
+                    val srcLong = maxOf(src.x, src.y)
+                    val target = if (args.max) srcLong else if (args.longEdge > 0) minOf(args.longEdge, srcLong) else 768
+                    Streams.h264(c, h.shot.displayManager(), src, target, args.bitrateKbps, args.fps, args.gopSec)
+                }
+            }
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException || t is IOException) throw t
+            c.send(Server.errBytes(prefix + t.javaClass.simpleName + ":" + t.message))
         }
     }
 

@@ -186,72 +186,13 @@ public final class Server {
         return a;
     }
 
-    void runTileStream(String cmd, DataOutputStream out) {
-        try {
-            Screenshot.CaptureArgs args = parseScreenshotArgs(cmd);
-            if (args.longEdge == 0 && !args.max) args.max = true;  // default native
-            Screenshot.Mirror mirror = h.shot.mirrorFor(args);
-            int tile = args.tile > 0 ? args.tile : 128;
-            int q = clampQuality(args.quality);
-            TileStreamer s = new TileStreamer(mirror, q, tile, out);
-            s.serve();
-        } catch (Throwable t) {
-            try {
-                writeFrame(out, errBytes("tilejpeg-failed:" + t.getClass().getSimpleName()
-                        + ":" + t.getMessage()));
-            } catch (IOException ignored) {}
-        }
-    }
-
-    void runH264Stream(String cmd, DataOutputStream out) {
-        try {
-            Screenshot.CaptureArgs args = parseScreenshotArgs(cmd);
-            // H.264 stream defaults to native resolution like JPEG stream does.
-            if (args.longEdge == 0 && !args.max) args.max = true;
-            int srcLong = Math.max(h.shot.sourceSize().x, h.shot.sourceSize().y);
-            int targetLongEdge = args.max
-                    ? srcLong
-                    : (args.longEdge > 0 ? Math.min(args.longEdge, srcLong) : 768);
-            H264Streamer s = new H264Streamer(
-                    h.shot.displayManager(),
-                    h.shot.sourceSize(),
-                    targetLongEdge,
-                    args.bitrateKbps,
-                    args.fps,
-                    args.gopSec,
-                    out);
-            s.serve();
-        } catch (Throwable t) {
-            try {
-                writeFrame(out, errBytes("h264-failed:" + t.getClass().getSimpleName()
-                        + ":" + t.getMessage()));
-            } catch (IOException ignored) {}
-        }
-    }
-
-    void runStream(String cmd, DataOutputStream out) {
-        try {
-            Screenshot.CaptureArgs args = parseScreenshotArgs(cmd);
-            // Streams default to native resolution to match the snapshot users liked.
-            if (args.longEdge == 0 && !args.max) args.max = true;
-            Screenshot.Mirror mirror = h.shot.mirrorFor(args);
-            Streamer s = new Streamer(mirror, clampQuality(args.quality), args.fps, out);
-            s.serve();
-        } catch (Throwable t) {
-            try {
-                writeFrame(out, errBytes("stream-failed:" + t.getClass().getSimpleName()
-                        + ":" + t.getMessage()));
-            } catch (IOException ignored) {}
-        }
-    }
-
-    private static int clampQuality(int q) {
+    static int clampQuality(int q) {
         if (q <= 0) return 80;
         if (q > 100) return 100;
         return q;
     }
 
-    private static Screenshot.CaptureArgs parseScreenshotArgs(String cmd) {
+    static Screenshot.CaptureArgs parseScreenshotArgs(String cmd) {
         Screenshot.CaptureArgs a = new Screenshot.CaptureArgs();
         // cmd = "screenshot[ k=v[ k=v...]]"
         int sp = cmd.indexOf(' ');

@@ -175,6 +175,9 @@ class Conn(private val fd: FileDescriptor) {
         }
     }
 
+    /** Bytes still waiting to be written (a pending latest-slot frame counts as 1). */
+    val pendingBytes: Long get() = outBytes + (if (latest.isEmpty()) 0 else 1)
+
     /** Suspends until everything queued is written. */
     suspend fun flush() = awaitBelow(0)
 

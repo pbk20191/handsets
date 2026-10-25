@@ -10,7 +10,6 @@ import android.hardware.display.VirtualDisplay;
 import android.media.Image;
 import android.media.ImageReader;
 import android.os.Handler;
-import android.os.HandlerThread;
 import android.view.Display;
 
 import java.io.BufferedReader;
@@ -334,7 +333,6 @@ public final class Screenshot {
     static final class Mirror {
         final ImageReader reader;
         final VirtualDisplay vd;
-        final HandlerThread listenerThread;
         final int outW, outH;
         final Object lock = new Object();
         // COW so fanout doesn't need the lock and listeners can come and go safely.
@@ -363,11 +361,9 @@ public final class Screenshot {
         private Bitmap scratch;       // owned by listener thread; swapped in & out
         private int scratchRowPix;
 
-        private Mirror(ImageReader reader, VirtualDisplay vd, HandlerThread listenerThread,
-                       int outW, int outH) {
+        private Mirror(ImageReader reader, VirtualDisplay vd, int outW, int outH) {
             this.reader = reader;
             this.vd = vd;
-            this.listenerThread = listenerThread;
             this.outW = outW;
             this.outH = outH;
         }
@@ -397,9 +393,9 @@ public final class Screenshot {
                 flags = 16;
             }
 
-            HandlerThread ht = new HandlerThread("hs-mirror-listener-" + outW);
-            ht.start();
-            Handler handler = new Handler(ht.getLooper());
+            // Frame-available callbacks arrive on the main looper; the pixel
+            // copy (blocks on the GPU fence) runs on the Work pool.
+            Handler handler = Loop.INSTANCE.getMainHandler();
 
             // Build the mirror shell so we can register the listener before
             // the VirtualDisplay starts producing frames.
@@ -407,13 +403,7 @@ public final class Screenshot {
             reader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
                 @Override public void onImageAvailable(ImageReader r) {
                     Mirror mr = holder[0];
-                    if (mr == null) return;
-                    Image img;
-                    try { img = r.acquireLatestImage(); } catch (Throwable t) { return; }
-                    if (img == null) return;
-                    try { mr.absorb(img); }
-                    catch (Throwable ignored) {}
-                    finally { img.close(); }
+                    if (mr != null) mr.onImageAvailable();
                 }
             }, handler);
 
@@ -422,11 +412,10 @@ public final class Screenshot {
                     reader.getSurface(), flags);
             if (vd == null) {
                 reader.close();
-                ht.quitSafely();
                 throw new RuntimeException("createVirtualDisplay returned null");
             }
 
-            Mirror m = new Mirror(reader, vd, ht, outW, outH);
+            Mirror m = new Mirror(reader, vd, outW, outH);
             holder[0] = m;
 
             // Wait up to 1500 ms for the first frame so the very first capture
@@ -471,7 +460,35 @@ public final class Screenshot {
             }
         }
 
+        // Main thread only: one absorb in flight; frames arriving meanwhile
+        // collapse into a single re-acquire of the latest image.
+        private boolean absorbing;
+        private boolean absorbPending;
+        private final Object absorbLock = new Object();
+
+        void onImageAvailable() {
+            if (absorbing) { absorbPending = true; return; }
+            final Image img;
+            try { img = reader.acquireLatestImage(); } catch (Throwable t) { return; }
+            if (img == null) return;
+            absorbing = true;
+            Loop.INSTANCE.getWorkExecutor().execute(new Runnable() {
+                @Override public void run() {
+                    try { absorb(img); }
+                    catch (Throwable ignored) {}
+                    finally { img.close(); }
+                    Loop.INSTANCE.getMainHandler().post(new Runnable() {
+                        @Override public void run() {
+                            absorbing = false;
+                            if (absorbPending) { absorbPending = false; onImageAvailable(); }
+                        }
+                    });
+                }
+            });
+        }
+
         private void absorb(Image img) {
+          synchronized (absorbLock) {
             Image.Plane p = img.getPlanes()[0];
             int stride = p.getRowStride();
             int pixelStride = p.getPixelStride();
@@ -504,13 +521,13 @@ public final class Screenshot {
                     try { l.onFrame(); } catch (Throwable ignored) {}
                 }
             }
+          }
         }
 
         void close() {
             try { reader.setOnImageAvailableListener(null, null); } catch (Throwable ignored) {}
             try { vd.release(); } catch (Throwable ignored) {}
             try { reader.close(); } catch (Throwable ignored) {}
-            try { listenerThread.quitSafely(); } catch (Throwable ignored) {}
             synchronized (lock) {
                 if (cached != null) { cached.recycle(); cached = null; }
                 if (scratch != null) { scratch.recycle(); scratch = null; }

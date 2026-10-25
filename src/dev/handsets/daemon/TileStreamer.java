@@ -5,8 +5,6 @@ import android.graphics.Bitmap;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Tile-based JPEG-diff streamer.
@@ -23,8 +21,7 @@ import java.util.concurrent.TimeUnit;
  */
 final class TileStreamer {
 
-    private static final Object WAKE = new Object();
-    private static final long IDLE_INTERVAL_MS = 500L;
+    static final long IDLE_INTERVAL_MS = 500L;
     private static final int DEFAULT_TILE = 128;
     private static final byte TYPE_DELTA = 0;
     private static final byte TYPE_KEYFRAME = 1;
@@ -32,7 +29,6 @@ final class TileStreamer {
     private final Screenshot.Mirror mirror;
     private final int quality;
     private final int tileEdge;
-    private final DataOutputStream out;
 
     // Per-stream state, lazily sized in initIfNeeded().
     private int srcW = -1, srcH = -1;
@@ -46,48 +42,17 @@ final class TileStreamer {
     private final ByteArrayOutputStream packetBuf = new ByteArrayOutputStream(64 * 1024);
     private final ByteArrayOutputStream jpegScratch = new ByteArrayOutputStream(32 * 1024);
 
-    TileStreamer(Screenshot.Mirror mirror, int quality, int tileEdge, DataOutputStream out) {
+    TileStreamer(Screenshot.Mirror mirror, int quality, int tileEdge) {
         this.mirror = mirror;
         this.quality = (quality > 0 && quality <= 100) ? quality : 80;
         this.tileEdge = tileEdge > 0 ? tileEdge : DEFAULT_TILE;
-        this.out = out;
     }
 
-    void serve() {
-        final LinkedBlockingQueue<Object> wake = new LinkedBlockingQueue<>(1);
-        Screenshot.FrameListener listener = new Screenshot.FrameListener() {
-            @Override public void onFrame() { wake.offer(WAKE); }
-        };
-        mirror.subscribe(listener);
-        boolean firstFrame = true;
-        try {
-            while (true) {
-                if (!firstFrame) {
-                    wake.poll(IDLE_INTERVAL_MS, TimeUnit.MILLISECONDS);
-                }
-                sendOneFrame(firstFrame);
-                firstFrame = false;
-            }
-        } catch (IOException disconnected) {
-            // Normal: client closed the socket.
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-        } catch (Throwable t) {
-            t.printStackTrace();
-        } finally {
-            mirror.unsubscribe(listener);
-        }
-    }
-
-    private void sendOneFrame(boolean forceKeyframe) throws IOException {
-        byte[] body;
+    /** Next wire packet (Work thread). {@code forceKeyframe} for the first one. */
+    byte[] nextPacket(boolean forceKeyframe) {
         synchronized (mirror.lockObject()) {
-            body = buildPacketUnderLock(forceKeyframe);
+            return buildPacketUnderLock(forceKeyframe);
         }
-        if (body == null) return;
-        out.writeInt(body.length);
-        out.write(body);
-        out.flush();
     }
 
     /** Must be called while holding {@code mirror.lockObject()}. */

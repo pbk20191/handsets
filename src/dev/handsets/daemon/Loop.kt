@@ -12,6 +12,7 @@ import kotlinx.coroutines.android.asCoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
 import java.io.FileDescriptor
 import kotlin.coroutines.EmptyCoroutineContext
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicInteger
@@ -30,10 +31,13 @@ object Loop {
     lateinit var Main: CoroutineDispatcher
         private set
 
-    val Work: CoroutineDispatcher = Executors.newFixedThreadPool(
+    /** The Work pool as a plain Executor, for Java callers. */
+    val workExecutor: ExecutorService = Executors.newFixedThreadPool(
         minOf(4, Runtime.getRuntime().availableProcessors()).coerceAtLeast(2),
         daemonThreads("hs-work"),
-    ).asCoroutineDispatcher()
+    )
+
+    val Work: CoroutineDispatcher = workExecutor.asCoroutineDispatcher()
 
     lateinit var mainHandler: Handler
         private set
