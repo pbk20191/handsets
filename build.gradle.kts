@@ -62,6 +62,9 @@ kotlin {
         jvmTarget = JvmTarget.JVM_1_8
         // java.* comes from android.jar, not the host JDK.
         freeCompilerArgs.add("-no-jdk")
+        // Drop Intrinsics.checkNotNull* calls: R8 can't remove them, and the
+        // daemon has no Java callers that could pass unexpected nulls.
+        freeCompilerArgs.addAll("-Xno-param-assertions", "-Xno-call-assertions", "-Xno-receiver-assertions")
     }
 }
 
