@@ -8,7 +8,6 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Bundle
 import android.view.Surface
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -22,6 +21,23 @@ internal object Streams {
 
     private const val IDLE_INTERVAL_MS = 500L
 
+    private class Encoded(val seq: Long, val bytes: ByteArray)
+
+    /** Last JPEG per (mirror, quality); main thread only. */
+    private val jpegCache = HashMap<Pair<Screenshot.Mirror, Int>, Encoded>()
+
+    /** Latest frame as JPEG, encoded once per frame for every stream on the same mirror and quality. */
+    private suspend fun sharedJpeg(mirror: Screenshot.Mirror, quality: Int): ByteArray? {
+        val key = mirror to quality
+        val seq = mirror.frameSeq
+        jpegCache[key]?.let { if (it.seq == seq) return it.bytes }
+        val jpeg = withContext(Loop.Work) {
+            try { mirror.encodeLatest("jpeg", quality) } catch (_: IllegalStateException) { null }
+        } ?: return null
+        jpegCache[key] = Encoded(seq, jpeg)
+        return jpeg
+    }
+
     /** `stream`: one JPEG per mirror frame (or per fps tick); re-sends on idle. */
     suspend fun jpeg(c: Conn, mirror: Screenshot.Mirror, quality: Int, fps: Int) {
         val wake = Channel<Unit>(Channel.CONFLATED)
@@ -31,10 +47,7 @@ internal object Streams {
             suspend fun sendOne() {
                 // Skip encoding while the previous frame is still on its way.
                 if (c.pendingBytes > 0) return
-                val jpeg = withContext(Loop.Work) {
-                    try { mirror.encodeLatest("jpeg", quality) } catch (_: IllegalStateException) { null }
-                } ?: return
-                c.sendLatest(0, jpeg)
+                c.sendLatest(0, sharedJpeg(mirror, quality) ?: return)
             }
             val intervalMs = if (fps > 0) 1000L / fps else 0L
             sendOne()
@@ -53,6 +66,7 @@ internal object Streams {
             }
         } finally {
             mirror.unsubscribe(l)
+            if (!mirror.hasSubscribers()) jpegCache.keys.removeAll { it.first === mirror }
         }
     }
 
@@ -84,114 +98,200 @@ internal object Streams {
     /** Stock software AVC encoders cap at 2048 on both axes. */
     private const val ENCODER_MAX_DIM = 2048
 
-    /** Running encoders, for the out-of-band `keyframe` verb. Main thread only. */
-    private val active = LinkedHashSet<MediaCodec>()
+    private data class H264Key(val w: Int, val h: Int, val fps: Int, val kbps: Int, val gopSec: Int)
 
+    /** Live encoders by parameters; main thread only. */
+    private val hubs = HashMap<H264Key, H264Hub>()
+
+    /** `keyframe`: IDR from every encoder; answers the number of stream connections. */
     fun requestKeyframeAll(): Int {
-        for (enc in active) {
-            try {
-                enc.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
-            } catch (_: Throwable) {
-                // Transient encoder state; the next request will do.
-            }
-        }
-        return active.size
+        for (hub in hubs.values) hub.requestKeyframe()
+        return hubs.values.sumOf { it.subs.size }
     }
 
     /**
-     * `stream_h264`: a VirtualDisplay renders into the encoder's input
-     * surface; access units go out one frame each, in order, never dropped.
-     * An output buffer is released only after its frame is queued on the
-     * socket, so a slow client stalls just this encoder.
+     * `stream_h264`. Connections asking for the same output size, fps, bitrate
+     * and GOP share one encoder + VirtualDisplay; each access unit is copied
+     * once and the same bytes go to every subscriber. The hub keeps SPS/PPS
+     * and the frames since the last IDR, so a joiner (or a subscriber that
+     * fell a full queue behind) restarts from that IDR at once, even on a
+     * static screen where the encoder emits nothing new. The shared encoder
+     * never waits for one slow client.
      */
     suspend fun h264(
         c: Conn, dm: DisplayManager, sourceSize: Point,
         targetLongEdge: Int, bitrateKbps0: Int, fps0: Int, gopSec0: Int,
     ) {
-        val bitrateKbps = if (bitrateKbps0 > 0) bitrateKbps0 else 6000
-        val fps = if (fps0 > 0) fps0 else 60
-        val gopSec = if (gopSec0 > 0) gopSec0 else 1
         val srcW = sourceSize.x
         val srcH = sourceSize.y
         if (srcW <= 0 || srcH <= 0) return c.send(err("no-source-size"))
         var scale = minOf(1f, targetLongEdge.toFloat() / maxOf(srcW, srcH))
         scale = minOf(scale, minOf(ENCODER_MAX_DIM.toFloat() / srcW, ENCODER_MAX_DIM.toFloat() / srcH))
-        val outW = minOf(ENCODER_MAX_DIM, roundEven(maxOf(2, Math.round(srcW * scale))))
-        val outH = minOf(ENCODER_MAX_DIM, roundEven(maxOf(2, Math.round(srcH * scale))))
-
-        // (payload, output buffer index or -1 for codec config) in encoder order.
-        val frames = Channel<Pair<ByteArray, Int>>(Channel.UNLIMITED)
-        val failed = CompletableDeferred<Throwable>()
-        var encoder: MediaCodec? = null
-        var surface: Surface? = null
-        var vd: VirtualDisplay? = null
+        val key = H264Key(
+            minOf(ENCODER_MAX_DIM, roundEven(maxOf(2, Math.round(srcW * scale)))),
+            minOf(ENCODER_MAX_DIM, roundEven(maxOf(2, Math.round(srcH * scale)))),
+            if (fps0 > 0) fps0 else 60,
+            if (bitrateKbps0 > 0) bitrateKbps0 else 6000,
+            if (gopSec0 > 0) gopSec0 else 1,
+        )
+        val sub = H264Sub()
+        var hub = hubs[key]
+        if (hub == null) {
+            hub = H264Hub(key, dm)
+            hubs[key] = hub
+            hub.subs.add(sub)
+            try {
+                hub.start()
+            } catch (t: Throwable) {
+                hub.fail(t)
+                hub.release()
+            }
+        } else {
+            hub.join(sub)
+        }
         try {
-            val fmt = MediaFormat.createVideoFormat(MIME_AVC, outW, outH).apply {
+            for (frame in sub.ch) c.send(frame)
+            sub.error?.let { c.send(it) }
+        } finally {
+            hub.leave(sub)
+        }
+    }
+
+    private class H264Sub {
+        val ch = Channel<ByteArray>(SUB_QUEUE)
+        /** Skipping until the next IDR (no usable GOP when it joined or lagged). */
+        var waitingIdr = false
+        var error: ByteArray? = null
+    }
+
+    private class H264Hub(val key: H264Key, val dm: DisplayManager) {
+        val subs = LinkedHashSet<H264Sub>()
+        private var csd: ByteArray? = null
+        /** The last IDR and every frame after it; empty when unknown or too long. */
+        private val gop = ArrayList<ByteArray>()
+        private var encoder: MediaCodec? = null
+        private var surface: Surface? = null
+        private var vd: VirtualDisplay? = null
+        private var released = false
+
+        fun start() {
+            val fmt = MediaFormat.createVideoFormat(MIME_AVC, key.w, key.h).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, COLOR_FORMAT_SURFACE)
-                setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
-                setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, gopSec)
+                setInteger(MediaFormat.KEY_BIT_RATE, key.kbps * 1000)
+                setInteger(MediaFormat.KEY_FRAME_RATE, key.fps)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, key.gopSec)
                 // VBR: the emulator's Codec2 encoder wedges on CBR + low-latency
-                // flags. Prepend-SPS/PPS keys make it reject configure(); each
-                // session emits codec config before its first IDR anyway.
+                // flags. Prepend-SPS/PPS keys make it reject configure(); codec
+                // config is emitted before the first IDR and cached for joiners.
                 try { setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR) } catch (_: Throwable) {}
                 // No B-frames: decode order == display order.
                 try { setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0) } catch (_: Throwable) {}
             }
-            val enc = withContext(Loop.Work) { MediaCodec.createEncoderByType(MIME_AVC) }
+            val enc = MediaCodec.createEncoderByType(MIME_AVC)
             encoder = enc
             enc.setCallback(object : MediaCodec.Callback() {
                 override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {}
 
                 override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                    val buf = try { codec.getOutputBuffer(index) } catch (t: Throwable) { null }
-                    if (buf == null || info.size <= 0) {
+                    if (released) return
+                    var payload: ByteArray? = null
+                    try {
+                        val buf = codec.getOutputBuffer(index)
+                        if (buf != null && info.size > 0) {
+                            buf.position(info.offset)
+                            buf.limit(info.offset + info.size)
+                            payload = ByteArray(info.size).also { buf.get(it) }
+                        }
+                    } finally {
                         try { codec.releaseOutputBuffer(index, false) } catch (_: Throwable) {}
-                        return
                     }
-                    buf.position(info.offset)
-                    buf.limit(info.offset + info.size)
-                    val payload = ByteArray(info.size)
-                    buf.get(payload)
-                    frames.trySend(payload to index)
+                    if (payload == null) return
+                    if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) config(payload)
+                    else frame(payload, info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0)
                 }
 
                 // Some encoders deliver SPS/PPS here rather than as a CODEC_CONFIG buffer.
                 override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
-                    val csd = concat(format.getByteBuffer("csd-0"), format.getByteBuffer("csd-1"))
-                    if (csd.isNotEmpty()) frames.trySend(csd to -1)
+                    val b = concat(format.getByteBuffer("csd-0"), format.getByteBuffer("csd-1"))
+                    if (b.isNotEmpty() && !released) config(b)
                 }
 
                 override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
-                    failed.complete(e)
+                    fail(e)
+                    release()
                 }
             }, Loop.mainHandler)
-            withContext(Loop.Work) {
-                enc.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            }
-            surface = enc.createInputSurface()
+            enc.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val sf = enc.createInputSurface()
+            surface = sf
             enc.start()
-            active.add(enc)
+            vd = dm.createVirtualDisplay("hs-h264-${key.w}x${key.h}", key.w, key.h, 320, sf, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR)
+                ?: throw VdNull()
+            println("h264: started ${key.w}x${key.h} @ ${key.kbps} kbps  fps=${key.fps}")
+        }
 
-            vd = dm.createVirtualDisplay("hs-h264-${outW}x$outH", outW, outH, 320, surface, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR)
-                ?: return c.send(err("createVirtualDisplay-null"))
-            println("h264: started ${outW}x$outH @ $bitrateKbps kbps  fps=$fps")
+        private fun config(b: ByteArray) {
+            csd = b
+            for (s in subs) s.ch.trySend(b)
+        }
 
-            while (true) {
-                val (payload, index) = kotlinx.coroutines.selects.select<Pair<ByteArray, Int>?> {
-                    frames.onReceive { it }
-                    failed.onAwait { throw it }
-                } ?: break
-                c.send(payload)
-                if (index >= 0) try { enc.releaseOutputBuffer(index, false) } catch (_: Throwable) {}
+        private fun frame(b: ByteArray, idr: Boolean) {
+            if (idr) gop.clear()
+            if (idr || gop.isNotEmpty()) {
+                if (gop.size < GOP_MAX) gop.add(b) else { gop.clear(); requestKeyframe() }
             }
-        } catch (t: Throwable) {
-            if (t is kotlinx.coroutines.CancellationException || t is java.io.IOException) throw t
-            try { c.send(err("h264-failed:${t.javaClass.simpleName}:${t.message}")) } catch (_: Throwable) {}
-            t.printStackTrace()
-        } finally {
-            frames.close()
-            encoder?.let { active.remove(it) }
+            for (s in subs) {
+                if (s.waitingIdr) {
+                    if (!idr) continue
+                    s.waitingIdr = false
+                }
+                if (!s.ch.trySend(b).isSuccess) catchUp(s)
+            }
+        }
+
+        /** Restart [s] from the cached SPS/PPS + GOP (drops whatever it had queued). */
+        private fun catchUp(s: H264Sub) {
+            while (s.ch.tryReceive().isSuccess) { /* drop the backlog */ }
+            csd?.let { s.ch.trySend(it) }
+            if (gop.isNotEmpty()) {
+                for (f in gop) s.ch.trySend(f)
+                s.waitingIdr = false
+            } else {
+                s.waitingIdr = true
+                requestKeyframe()
+            }
+        }
+
+        fun join(s: H264Sub) {
+            subs.add(s)
+            catchUp(s)
+        }
+
+        fun leave(s: H264Sub) {
+            subs.remove(s)
+            s.ch.close()
+            if (subs.isEmpty()) release()
+        }
+
+        fun fail(t: Throwable) {
+            val e = if (t is VdNull) err("createVirtualDisplay-null")
+            else err("h264-failed:${t.javaClass.simpleName}:${t.message}").also { t.printStackTrace() }
+            for (s in subs) { s.error = e; s.ch.close() }
+        }
+
+        fun requestKeyframe() {
+            try {
+                encoder?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+            } catch (_: Throwable) {
+                // Transient encoder state; the next request will do.
+            }
+        }
+
+        fun release() {
+            if (released) return
+            released = true
+            if (hubs[key] === this) hubs.remove(key)
+            for (s in subs) s.ch.close()
             try { vd?.release() } catch (_: Throwable) {}
             encoder?.let { e ->
                 try { e.stop() } catch (_: Throwable) {}
@@ -200,6 +300,11 @@ internal object Streams {
             try { surface?.release() } catch (_: Throwable) {}
         }
     }
+
+    private const val GOP_MAX = 200
+    private const val SUB_QUEUE = GOP_MAX + 56
+
+    private class VdNull : RuntimeException("createVirtualDisplay-null")
 
     private fun concat(a: ByteBuffer?, b: ByteBuffer?): ByteArray {
         val out = ByteArray((a?.remaining() ?: 0) + (b?.remaining() ?: 0))

@@ -340,6 +340,7 @@ public final class Screenshot {
 
         void subscribe(FrameListener l) { subscribers.add(l); }
         void unsubscribe(FrameListener l) { subscribers.remove(l); }
+        boolean hasSubscribers() { return !subscribers.isEmpty(); }
 
         /** Lock guarding {@code cached}. Hold during pixel reads. */
         Object lockObject() { return lock; }
@@ -356,6 +357,8 @@ public final class Screenshot {
         // briefly takes the lock just to swap scratch <-> cached. Capture
         // threads only ever read `cached` under the lock and never wait on
         // GPU work.
+        /** Bumped each time {@code cached} is replaced; lets streams share one encode per frame. */
+        volatile long frameSeq;
         private Bitmap cached;        // most recent stable frame at stride width
         private int cachedRowPix;
         private Bitmap scratch;       // owned by listener thread; swapped in & out
@@ -512,6 +515,7 @@ public final class Screenshot {
                 cachedRowPix = scratchRowPix;
                 scratch = oldCached;       // reuse previous cached as next scratch
                 scratchRowPix = oldRowPix;
+                frameSeq++;
             }
 
             // Fan out to subscribers outside the lock. COW makes iteration safe.
