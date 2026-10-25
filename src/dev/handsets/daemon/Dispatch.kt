@@ -1,6 +1,8 @@
 package dev.handsets.daemon
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -38,14 +40,14 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
                         H264Streamer.requestKeyframeAll()
                         c.send(Server.utf8("ok n=" + H264Streamer.activeCount()))
                     }
-                    "stream", "stream_h264", "stream_tilejpeg", "state_watch", "clip_watch", "monitor" -> {
+                    "state_watch" -> { stateWatch(c, s.handlers().state); return }
+                    "stream", "stream_h264", "stream_tilejpeg", "clip_watch", "monitor" -> {
                         c.closeOnEof()
                         legacyOut(c) { out ->
                             when (head) {
                                 "stream" -> s.runStream(cmd, out)
                                 "stream_h264" -> s.runH264Stream(cmd, out)
                                 "stream_tilejpeg" -> s.runTileStream(cmd, out)
-                                "state_watch" -> s.runStateWatch(out)
                                 "clip_watch" -> s.runClipWatch(cmd, out)
                                 else -> s.runMonitor(out)
                             }
@@ -59,7 +61,7 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
                     "push" -> c.send(legacyIn(c) { s.runPush(cmd, it) })
                     "install" -> c.send(legacyIn(c) { s.runInstall(cmd, it) })
                     "install_multi" -> c.send(legacyIn(c) { s.runInstallMulti(cmd, it) })
-                    in BLOCKING_WAITS -> c.send(withContext(LegacyIo.dispatcher) { s.respond(head, cmd) })
+                    in GESTURES -> c.send(gestures(s).handle(head, cmd)!!)
                     in ON_MAIN -> c.send(s.respond(head, cmd) ?: unknown(head))
                     else -> c.send(withContext(Loop.Work) { s.respond(head, cmd) } ?: unknown(head))
                 }
@@ -70,6 +72,21 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
             if (t !is kotlinx.coroutines.CancellationException) t.printStackTrace()
         } finally {
             c.close()
+        }
+    }
+
+    private var gestures: Gestures? = null
+    private fun gestures(s: Server) = gestures ?: Gestures(s.handlers()).also { gestures = it }
+
+    /** Pushes every fresh device snapshot; only the newest unsent one is kept. */
+    private suspend fun stateWatch(c: Conn, state: State) {
+        c.closeOnEof()
+        val l = State.SnapshotListener { json -> c.scope.launch { c.sendLatest(0, json) } }
+        try {
+            withContext(Loop.Work) { state.subscribe(l) }
+            awaitCancellation()
+        } finally {
+            state.unsubscribe(l)
         }
     }
 
@@ -89,7 +106,8 @@ class Dispatch(private val ready: CompletableDeferred<Server>) {
     private companion object {
         val PONG = "pong".toByteArray()
         val BYE = "bye".toByteArray()
-        val BLOCKING_WAITS = setOf("wait_for_idle", "wait_for_text", "wait_for_activity", "tap_and_dump", "tap_and_settle")
+        val GESTURES = setOf("tap", "swipe", "down", "move", "up", "scroll", "key", "text", "swipe_dir",
+            "wait_for_idle", "wait_for_text", "wait_for_activity", "tap_and_dump", "tap_and_settle")
         /** Cheap, bounded calls answered straight from the looper. */
         val ON_MAIN = setOf("info", "getprop", "wm_info")
     }

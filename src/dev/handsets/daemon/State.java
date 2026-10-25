@@ -16,7 +16,6 @@ import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Handler;
-import android.os.HandlerThread;
 import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
 
@@ -72,9 +71,8 @@ final class State {
     private static final long DEBOUNCE_MS  = 50L;
     private final AtomicReference<byte[]> cachedDevice = new AtomicReference<>();
     private final AtomicReference<long[]> cachedDeviceStamp = new AtomicReference<>(new long[]{0L});
-    private final Object dirtyLock = new Object();
-    private volatile boolean dirty = true;
-    private volatile Thread refresher;
+    private final StateRefresher refresher = new StateRefresher(this, DEBOUNCE_MS, HEARTBEAT_MS);
+    private volatile boolean refresherStarted;
     private volatile boolean listenersRegistered;
 
     /** Push-mode subscribers. Invoked on every fresh snapshot. */
@@ -230,58 +228,34 @@ final class State {
         return snap;
     }
 
+    /** Starts listeners + refresher on the main looper (any thread, idempotent). */
     private synchronized void ensureRefresher() {
-        if (refresher != null && refresher.isAlive()) return;
-        registerListeners();
-        Thread t = new Thread(new Runnable() {
+        if (refresherStarted) return;
+        refresherStarted = true;
+        Loop.INSTANCE.getMainHandler().post(new Runnable() {
             @Override public void run() {
-                while (!Thread.currentThread().isInterrupted()) {
-                    // Block until something flags dirty, or HEARTBEAT_MS goes by.
-                    synchronized (dirtyLock) {
-                        while (!dirty) {
-                            try { dirtyLock.wait(HEARTBEAT_MS); }
-                            catch (InterruptedException ie) { return; }
-                            // Heartbeat wake: also treat as dirty so battery
-                            // level / charging stay reasonably current.
-                            break;
-                        }
-                        dirty = false;
-                    }
-                    // Brief debounce to coalesce bursts (e.g. one app launch
-                    // generates multiple TYPE_WINDOW_* events in <50ms).
-                    try { Thread.sleep(DEBOUNCE_MS); }
-                    catch (InterruptedException ie) { return; }
-                    // Drain anything that came in during the debounce window.
-                    synchronized (dirtyLock) { dirty = false; }
-                    try {
-                        byte[] s = computeDevice();
-                        cachedDevice.set(s);
-                        cachedDeviceStamp.set(new long[]{System.currentTimeMillis()});
-                        // Fan-out to push-mode subscribers. COW list, so no
-                        // lock; listeners must be non-blocking.
-                        if (!subs.isEmpty()) {
-                            for (SnapshotListener l : subs) {
-                                try { l.onSnapshot(s); } catch (Throwable ignored2) {}
-                            }
-                        }
-                    } catch (Throwable ignored) {}
-                }
+                registerListeners();
+                refresher.start();
             }
-        }, "hs-state-refresh");
-        t.setDaemon(true);
-        t.start();
-        refresher = t;
+        });
     }
 
-    /** Mark the snapshot stale; wakes the refresh thread. */
-    private void markDirty() {
-        synchronized (dirtyLock) {
-            dirty = true;
-            dirtyLock.notifyAll();
+    /** Main thread: store a fresh snapshot and push it to subscribers. */
+    void publish(byte[] s) {
+        cachedDevice.set(s);
+        cachedDeviceStamp.set(new long[]{System.currentTimeMillis()});
+        for (SnapshotListener l : subs) {
+            try { l.onSnapshot(s); } catch (Throwable ignored) {}
         }
     }
 
-    private synchronized void registerListeners() {
+    /** Main thread: something changed; refresh soon. */
+    private void markDirty() {
+        refresher.mark();
+    }
+
+    /** Main thread. */
+    private void registerListeners() {
         if (listenersRegistered) return;
         listenersRegistered = true;
 
@@ -305,10 +279,7 @@ final class State {
             pkgFilter.addAction(android.content.Intent.ACTION_PACKAGE_REMOVED);
             pkgFilter.addAction(android.content.Intent.ACTION_PACKAGE_REPLACED);
             pkgFilter.addDataScheme("package");
-            HandlerThread pkgT = new HandlerThread("hs-state-pkg");
-            pkgT.setDaemon(true);
-            pkgT.start();
-            Handler pkgH = new Handler(pkgT.getLooper());
+            Handler pkgH = Loop.INSTANCE.getMainHandler();
             android.content.BroadcastReceiver pkgR = new android.content.BroadcastReceiver() {
                 @Override public void onReceive(Context c, android.content.Intent i) {
                     System.err.println("hs: pkg broadcast " + i.getAction()
@@ -337,10 +308,7 @@ final class State {
 
         // 2. Display state changes → screen on/off.
         try {
-            HandlerThread ht = new HandlerThread("hs-state-display");
-            ht.setDaemon(true);
-            ht.start();
-            Handler handler = new Handler(ht.getLooper());
+            Handler handler = Loop.INSTANCE.getMainHandler();
             displayMgr.registerDisplayListener(new DisplayManager.DisplayListener() {
                 @Override public void onDisplayAdded(int id)   { markDirty(); }
                 @Override public void onDisplayRemoved(int id) { markDirty(); }
@@ -359,10 +327,7 @@ final class State {
         try {
             android.content.IntentFilter cfgFilter = new android.content.IntentFilter(
                     android.content.Intent.ACTION_CONFIGURATION_CHANGED);
-            HandlerThread cfgT = new HandlerThread("hs-state-cfg");
-            cfgT.setDaemon(true);
-            cfgT.start();
-            Handler cfgH = new Handler(cfgT.getLooper());
+            Handler cfgH = Loop.INSTANCE.getMainHandler();
             android.content.BroadcastReceiver cfgR = new android.content.BroadcastReceiver() {
                 @Override public void onReceive(Context c, android.content.Intent i) {
                     markDirty();
@@ -454,7 +419,7 @@ final class State {
 
     private void invalidateAppCounts() { appCounts = null; }
 
-    private byte[] computeDevice() {
+    byte[] computeDevice() {
         StringBuilder sb = new StringBuilder(1024);
         sb.append('{');
 

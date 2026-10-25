@@ -42,6 +42,8 @@ public final class Server {
         this.h = h;
     }
 
+    Handlers handlers() { return h; }
+
     /**
      * Synchronous verbs: returns the single response frame, or null when
      * {@code head} is not one of them (streams, transfers and waits are
@@ -57,15 +59,6 @@ public final class Server {
                 return utf8(h.shot.sourceSize().x + " " + h.shot.sourceSize().y);
             case "screenshot":
                 return safeScreenshot(cmd);
-            case "tap":
-            case "swipe":
-            case "down":
-            case "move":
-            case "up":
-            case "scroll":
-            case "key":
-            case "text":
-                return runInput(head, cmd);
             case "pm_list":
                 return runPmList(cmd);
             case "pm_path":
@@ -83,8 +76,6 @@ public final class Server {
                 return runAmKill(cmd);
             case "am_broadcast":
                 return runAmBroadcast(cmd);
-            case "swipe_dir":
-                return runSwipeDir(cmd);
             case "getprop":
                 return runGetProp(cmd);
             case "setprop":
@@ -99,16 +90,6 @@ public final class Server {
                 return runWmRotation(cmd);
             case "state":
                 return runState(cmd);
-            case "wait_for_idle":
-                return runWaitForIdle(cmd);
-            case "wait_for_text":
-                return runWaitForText(cmd);
-            case "wait_for_activity":
-                return runWaitForActivity(cmd);
-            case "tap_and_dump":
-                return runTapAndDump(cmd);
-            case "tap_and_settle":
-                return runTapAndSettle(cmd);
             case "node_click":
                 return runNodeClick(cmd, false);
             case "node_long_click":
@@ -171,73 +152,13 @@ public final class Server {
         }
     }
 
-    private byte[] runInput(String head, String cmd) {
-        try {
-            // `text` is special-cased so spaces inside the typed string survive.
-            if ("text".equals(head)) {
-                String body = cmd.length() > 5 ? cmd.substring(5) : "";
-                h.input.text(body);
-                return "ok".getBytes(StandardCharsets.UTF_8);
-            }
-            InputArgs a = parseInputArgs(cmd);
-            switch (head) {
-                case "tap": {
-                    // Reject coordinates outside the display. Off-screen taps
-                    // dispatch into nothing but the kernel input layer happily
-                    // accepts them and we'd return "ok" — the worst failure
-                    // mode for a UI driver. Callers that match an a11y node
-                    // whose post-scroll bounds went stale should see an
-                    // explicit OFF_SCREEN and retry/refresh.
-                    android.graphics.Point sz = h.shot.sourceSize();
-                    if (sz.x > 0 && sz.y > 0
-                            && (a.x < 0 || a.x >= sz.x || a.y < 0 || a.y >= sz.y)) {
-                        return errBytes("OFF_SCREEN:x=" + a.x + " y=" + a.y
-                                + " display=" + sz.x + "x" + sz.y);
-                    }
-                    h.input.tap(a.x, a.y);
-                    break;
-                }
-                case "swipe":
-                    h.input.swipe(a.x1, a.y1, a.x2, a.y2, a.dur > 0 ? a.dur : 300);
-                    break;
-                case "down":
-                    h.input.pointerDown(a.x, a.y);
-                    break;
-                case "move":
-                    h.input.pointerMove(a.x, a.y);
-                    break;
-                case "up":
-                    h.input.pointerUp(a.x, a.y);
-                    break;
-                case "scroll":
-                    h.input.scroll(a.x, a.y, a.dy);
-                    break;
-                case "key":
-                    if (a.code != 0) {
-                        h.input.key(a.code);
-                    } else if (a.keyName != null) {
-                        h.input.keyByName(a.keyName);
-                    } else {
-                        return errBytes("key-needs-name-or-code");
-                    }
-                    break;
-                default:
-                    return errBytes("unknown-input:" + head);
-            }
-            return "ok".getBytes(StandardCharsets.UTF_8);
-        } catch (Throwable t) {
-            return errBytes(head + "-failed:" + t.getClass().getSimpleName()
-                    + ":" + t.getMessage());
-        }
-    }
-
-    private static final class InputArgs {
+    static final class InputArgs {
         int x, y, x1, y1, x2, y2, dur, dy, code;
         String keyName;
     }
 
     /** Parse k=v tokens plus a single positional name (for `key BACK`). */
-    private static InputArgs parseInputArgs(String cmd) {
+    static InputArgs parseInputArgs(String cmd) {
         InputArgs a = new InputArgs();
         int sp = cmd.indexOf(' ');
         if (sp < 0) return a;
@@ -486,42 +407,6 @@ public final class Server {
      * dimensions come from the existing Screenshot mirror so we don't
      * round-trip another binder call per swipe.
      */
-    private byte[] runSwipeDir(String cmd) {
-        String dir = positional(cmd);
-        if (dir == null) return errBytes("swipe_dir-needs-direction");
-        // 500 ms over 60% of the screen reads as a deliberate drag to
-        // launchers + ListView/RecyclerView. Override with `dur=N` for flings.
-        int dur = (int) longArg(cmd, "dur", 500);
-        android.graphics.Point sz = h.shot.sourceSize();
-        int w = sz.x, ht = sz.y;
-        if (w <= 0 || ht <= 0) return errBytes("swipe_dir-no-display-size");
-        int hi = 8, lo = 2;   // tenths of the screen: 0.8 → 0.2 = 60% travel
-        // Horizontal swipes need a small Y drift, otherwise they stay
-        // inside the row's bounds on vertical-scroll lists and Android's
-        // default View.onTouchEvent fires onClick on ACTION_UP (the row's
-        // pointInView check only cancels the click when the touch leaves
-        // the view's bounds + touch-slop). 12% of screen-height (~370 px
-        // on a 3120 px display) is several rows tall — enough to cancel.
-        int drift = ht * 12 / 100;
-        int x1, y1, x2, y2;
-        switch (dir.toLowerCase()) {
-            case "left":  x1 = w * hi / 10; y1 = ht / 2 - drift / 2; x2 = w * lo / 10; y2 = ht / 2 + drift / 2; break;
-            case "right": x1 = w * lo / 10; y1 = ht / 2 + drift / 2; x2 = w * hi / 10; y2 = ht / 2 - drift / 2; break;
-            case "up":    x1 = w / 2;       y1 = ht * hi / 10;       x2 = w / 2;       y2 = ht * lo / 10;       break;
-            case "down":  x1 = w / 2;       y1 = ht * lo / 10;       x2 = w / 2;       y2 = ht * hi / 10;       break;
-            default: return errBytes("swipe_dir-bad-direction:" + dir);
-        }
-        try {
-            h.input.swipe(x1, y1, x2, y2, dur);
-            return utf8("ok dir=" + dir.toLowerCase()
-                    + " x1=" + x1 + " y1=" + y1
-                    + " x2=" + x2 + " y2=" + y2
-                    + " dur=" + dur);
-        } catch (Throwable t) {
-            return errBytes("swipe-failed:" + t.getClass().getSimpleName() + ":" + t.getMessage());
-        }
-    }
-
     // ---------- arg parsers for the new commands ----------
 
     private static final class FileArgs {
@@ -589,7 +474,7 @@ public final class Server {
     }
 
     /** Return the first whitespace-separated token after the command head. */
-    private static String positional(String cmd) {
+    static String positional(String cmd) {
         int sp = cmd.indexOf(' ');
         if (sp < 0) return null;
         String tail = cmd.substring(sp + 1).trim();
@@ -694,92 +579,9 @@ public final class Server {
 
     // ---------- wait-for / composite handlers ----------
 
-    private static final long DEFAULT_IDLE_MS = 200;
-    private static final long DEFAULT_TIMEOUT_MS = 5000;
-    private static final long DEFAULT_TAP_TIMEOUT_MS = 2000;
-
-    private byte[] runWaitForIdle(String cmd) {
-        long idle    = longArg(cmd, "idle_ms", DEFAULT_IDLE_MS);
-        long timeout = longArg(cmd, "timeout_ms", DEFAULT_TIMEOUT_MS);
-        long elapsed = h.uiEvents.waits().awaitIdle(idle, timeout);
-        if (elapsed < 0) return errBytes("TIMEOUT:wait_for_idle:idle_ms=" + idle + " timeout_ms=" + timeout);
-        return utf8("ok elapsed=" + elapsed);
-    }
-
-    private byte[] runWaitForText(String cmd) {
-        final String text = strArg(cmd, "text");
-        if (text == null || text.isEmpty()) return errBytes("wait_for_text-needs-text");
-        final String mode = strArgOr(cmd, "match", "sub");
-        long timeout = longArg(cmd, "timeout_ms", DEFAULT_TIMEOUT_MS);
-        final NodeActions.Selector sel = textSelector(text, mode);
-        final android.view.accessibility.AccessibilityNodeInfo[] found = new android.view.accessibility.AccessibilityNodeInfo[1];
-        long elapsed = h.uiEvents.waits().awaitPredicate(new WaitRegistry.Predicate() {
-            @Override public boolean check() {
-                found[0] = h.nodes.find(sel);
-                return found[0] != null;
-            }
-        }, timeout);
-        if (elapsed < 0) return errBytes("TIMEOUT:wait_for_text:" + text);
-        android.graphics.Rect r = new android.graphics.Rect();
-        found[0].getBoundsInScreen(r);
-        return utf8("ok x=" + r.left + " y=" + r.top
-                + " w=" + r.width() + " h=" + r.height()
-                + " elapsed=" + elapsed);
-    }
-
-    private byte[] runWaitForActivity(String cmd) {
-        final String component = strArg(cmd, "n");
-        if (component == null) return errBytes("wait_for_activity-needs-n");
-        long timeout = longArg(cmd, "timeout_ms", DEFAULT_TIMEOUT_MS);
-        // Match policy:
-        //   1. exact match against the live topActivity flatten string
-        //   2. or package-prefix match: "com.foo/.X" matches any top
-        //      activity starting with "com.foo/", since Android often
-        //      resolves the alias the caller asked for to a different
-        //      concrete component (e.g. .Settings → .homepage.SettingsHomepageActivity).
-        final String pkgPrefix;
-        int slash = component.indexOf('/');
-        pkgPrefix = slash >= 0 ? component.substring(0, slash + 1) : component + "/";
-        long elapsed = h.uiEvents.waits().awaitPredicate(new WaitRegistry.Predicate() {
-            @Override public boolean check() {
-                byte[] top = h.state.topActivity();
-                if (top.length == 0 || (top.length >= 4 && top[0]=='E' && top[1]=='R' && top[2]=='R' && top[3]==':')) {
-                    return false;
-                }
-                String s = new String(top, StandardCharsets.UTF_8);
-                return s.equals(component) || s.startsWith(pkgPrefix);
-            }
-        }, timeout);
-        if (elapsed < 0) return errBytes("TIMEOUT:wait_for_activity:" + component);
-        return utf8("ok elapsed=" + elapsed);
-    }
-
-    private byte[] runTapAndDump(String cmd) {
-        int x = (int) longArg(cmd, "x", -1);
-        int y = (int) longArg(cmd, "y", -1);
-        if (x < 0 || y < 0) return errBytes("tap_and_dump-needs-x-y");
-        long idle    = longArg(cmd, "idle_ms", DEFAULT_IDLE_MS);
-        long timeout = longArg(cmd, "timeout_ms", DEFAULT_TAP_TIMEOUT_MS);
-        h.uiEvents.waits().touch();   // measure idle from after the tap
-        h.input.tap(x, y);
-        long el = h.uiEvents.waits().awaitIdle(idle, timeout);
-        if (el < 0) return errBytes("TIMEOUT:tap_and_dump");
-        try { return utf8(h.dumper.dumpActive()); }
-        catch (Throwable t) { return errBytes("INTERNAL:dump-failed:" + t.getMessage()); }
-    }
-
-    private byte[] runTapAndSettle(String cmd) {
-        int x = (int) longArg(cmd, "x", -1);
-        int y = (int) longArg(cmd, "y", -1);
-        if (x < 0 || y < 0) return errBytes("tap_and_settle-needs-x-y");
-        long idle    = longArg(cmd, "idle_ms", DEFAULT_IDLE_MS);
-        long timeout = longArg(cmd, "timeout_ms", DEFAULT_TAP_TIMEOUT_MS);
-        h.uiEvents.waits().touch();   // measure idle from after the tap
-        h.input.tap(x, y);
-        long el = h.uiEvents.waits().awaitIdle(idle, timeout);
-        if (el < 0) return errBytes("tap-then-timeout");
-        return utf8("ok elapsed=" + el);
-    }
+    static final long DEFAULT_IDLE_MS = 200;
+    static final long DEFAULT_TIMEOUT_MS = 5000;
+    static final long DEFAULT_TAP_TIMEOUT_MS = 2000;
 
     // ---------- node_* handlers ----------
 
@@ -877,7 +679,7 @@ public final class Server {
 
     // ---------- key=value arg helpers ----------
 
-    private static NodeActions.Selector textSelector(String text, String mode) {
+    static NodeActions.Selector textSelector(String text, String mode) {
         NodeActions.Selector s = new NodeActions.Selector();
         if ("exact".equalsIgnoreCase(mode)) s.textExact = text;
         else                                s.textSub = text;
@@ -885,11 +687,11 @@ public final class Server {
     }
 
     /** Parse {@code key=value} from a whitespace-tokenised string. */
-    private static String strArg(String cmd, String key) {
+    static String strArg(String cmd, String key) {
         return strArgOr(cmd, key, null);
     }
 
-    private static String strArgOr(String cmd, String key, String dflt) {
+    static String strArgOr(String cmd, String key, String dflt) {
         int sp = cmd.indexOf(' ');
         if (sp < 0) return dflt;
         String tail = cmd.substring(sp + 1);
@@ -912,7 +714,7 @@ public final class Server {
         return dflt;
     }
 
-    private static long longArg(String cmd, String key, long dflt) {
+    static long longArg(String cmd, String key, long dflt) {
         String v = strArg(cmd, key);
         if (v == null) return dflt;
         try { return Long.parseLong(v); }
@@ -966,38 +768,6 @@ public final class Server {
      * thread re-fires every HEARTBEAT_MS even if nothing changed, so a
      * write failure surfaces a dead client within that window.
      */
-    void runStateWatch(DataOutputStream out) {
-        final java.util.concurrent.LinkedBlockingQueue<byte[]> q =
-                new java.util.concurrent.LinkedBlockingQueue<>(8);
-        final State.SnapshotListener listener = new State.SnapshotListener() {
-            @Override public void onSnapshot(byte[] json) {
-                if (!q.offer(json)) {
-                    q.poll();          // drop oldest, keep latest
-                    q.offer(json);
-                }
-            }
-        };
-        h.state.subscribe(listener);
-        try {
-            while (true) {
-                byte[] frame;
-                try { frame = q.take(); }
-                catch (InterruptedException ie) { return; }
-                try {
-                    synchronized (out) {
-                        out.writeInt(frame.length);
-                        out.write(frame);
-                        out.flush();
-                    }
-                } catch (IOException ioe) {
-                    return;           // client gone
-                }
-            }
-        } finally {
-            h.state.unsubscribe(listener);
-        }
-    }
-
     private byte[] runState(String cmd) {
         String field = positional(cmd);
         if (field == null) return errBytes("state-needs-field");

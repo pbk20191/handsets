@@ -41,46 +41,7 @@ final class Input {
         this.virtualKeyMap = kcm;
     }
 
-    // ---------- single gestures ----------
-
-    void tap(int x, int y) {
-        // Hold for one 60 Hz frame interval — long enough for Android's input
-        // dispatcher and gesture detectors to treat it as a real tap (down +
-        // up in the same vsync looks like a flicker to some widgets), short
-        // enough to keep click-to-visible latency low.
-        long t = SystemClock.uptimeMillis();
-        motion(t, t, MotionEvent.ACTION_DOWN, x, y);
-        try { Thread.sleep(16); } catch (InterruptedException ignored) {}
-        motion(t, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y);
-    }
-
-    void swipe(int x1, int y1, int x2, int y2, int durMs) {
-        // Default 500 ms reads to launcher / ViewPager / ListView as a drag
-        // rather than a fling. Callers wanting a fling pass durMs explicitly.
-        if (durMs <= 0) durMs = 500;
-        // One MOVE per 60 Hz frame. Always include the endpoint as the last
-        // MOVE so ACTION_UP fires at the same coords (no positional jump).
-        int steps = Math.max(2, durMs / 16);
-        long t0 = SystemClock.uptimeMillis();
-        motion(t0, t0, MotionEvent.ACTION_DOWN, x1, y1);
-        for (int i = 1; i <= steps; i++) {
-            long when = t0 + (long) i * durMs / steps;
-            float f = (float) i / (float) steps;
-            int x = Math.round(x1 + (x2 - x1) * f);
-            int y = Math.round(y1 + (y2 - y1) * f);
-            sleepUntil(when);
-            motion(t0, when, MotionEvent.ACTION_MOVE, x, y);
-        }
-        // ACTION_UP at the final coords — same eventTime as the last MOVE
-        // so the dispatcher treats them as the same vsync frame.
-        motion(t0, t0 + durMs, MotionEvent.ACTION_UP, x2, y2);
-    }
-
-    void scroll(int x, int y, int dy) {
-        // Positive dy → swipe up → content scrolls up.
-        int dy0 = dy == 0 ? 1 : dy;
-        swipe(x, y, x, y - dy0, 120);
-    }
+    // ---------- single gestures: timing lives in Gestures.kt ----------
 
     // ---------- streamed pointer ----------
 
@@ -167,7 +128,7 @@ final class Input {
 
     // ---------- low-level helpers ----------
 
-    private void motion(long downTime, long eventTime, int action, int x, int y) {
+    void motion(long downTime, long eventTime, int action, int x, int y) {
         // Build a full-fidelity MotionEvent so gesture detectors that check
         // toolType + pressure (launcher swipes, ViewPager flings, AndroidX
         // GestureDetector) treat it as a real finger. The 6-arg
@@ -206,14 +167,6 @@ final class Input {
                 KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
                 KeyEvent.FLAG_FROM_SYSTEM, InputDevice.SOURCE_KEYBOARD);
         ua.injectInputEvent(ev, true);
-    }
-
-    private static void sleepUntil(long uptimeMs) {
-        long now = SystemClock.uptimeMillis();
-        long delta = uptimeMs - now;
-        if (delta > 0) {
-            try { Thread.sleep(delta); } catch (InterruptedException ignored) {}
-        }
     }
 
     private static Integer keycodeForName(String raw) {
