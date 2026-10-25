@@ -59,7 +59,8 @@ kotlin {
         main { kotlin.setSrcDirs(listOf("src")) }
     }
     compilerOptions {
-        jvmTarget = JvmTarget.JVM_1_8
+        // R8 desugars Java 17 bytecode (indy string concat, etc.) for --min-api 28.
+        jvmTarget = JvmTarget.JVM_17
         // java.* comes from android.jar, not the host JDK.
         freeCompilerArgs.add("-no-jdk")
         // Drop Intrinsics.checkNotNull* calls: R8 can't remove them, and the
@@ -69,9 +70,11 @@ kotlin {
 }
 
 java {
-    // -bootclasspath is only accepted with target 8.
-    sourceCompatibility = JavaVersion.VERSION_1_8
-    targetCompatibility = JavaVersion.VERSION_1_8
+    // Sources are Kotlin; this only has to match jvmTarget. A Java source
+    // added later can't use -bootclasspath (android.jar) above target 8 and
+    // would need android.jar on the classpath instead.
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
 }
 
 dependencies {
