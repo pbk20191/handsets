@@ -3,15 +3,11 @@ package dev.handsets.daemon;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.net.InetAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class Server {
 
-    private static final int MAX_CMD = 256;
+    static final int MAX_CMD = 256;
 
     /** Bag of handler classes wired up in {@link Main}; lets the constructor
      *  stay legible as we grow the command surface. */
@@ -41,252 +37,112 @@ public final class Server {
     }
 
     private final Handlers h;
-    private final int port;
-    private final AtomicBoolean running = new AtomicBoolean(true);
 
-    public Server(Handlers h, int port) {
+    public Server(Handlers h) {
         this.h = h;
-        this.port = port;
     }
 
-    public void serve() throws IOException {
-        ServerSocket ss = new ServerSocket(port, 8, InetAddress.getByName("127.0.0.1"));
-        ss.setReuseAddress(true);
-        System.out.println("hsd listening on 127.0.0.1:" + port);
-        while (running.get()) {
-            final Socket s = ss.accept();
-            Thread t = new Thread(new Runnable() {
-                @Override public void run() { handle(s); }
-            }, "hs-conn");
-            t.setDaemon(true);
-            t.start();
-        }
-        ss.close();
-    }
-
-    private void handle(Socket s) {
-        try {
-            s.setTcpNoDelay(true);
-            DataInputStream in = new DataInputStream(s.getInputStream());
-            DataOutputStream out = new DataOutputStream(s.getOutputStream());
-            while (!s.isClosed()) {
-                int len;
-                try {
-                    len = in.readInt();
-                } catch (IOException eof) {
-                    break;
-                }
-                if (len <= 0 || len > MAX_CMD) {
-                    writeFrame(out, errBytes("BAD_ARG:bad-length:" + len));
-                    break;
-                }
-                byte[] buf = new byte[len];
-                in.readFully(buf);
-                // UTF-8 (was US_ASCII): keeps backward-compat for the
-                // all-ASCII verb syntax and lets `clip_set <CJK>` /
-                // `text <CJK>` / `node_set_text value="<CJK>"` round-trip
-                // properly.
-                String cmd = new String(buf, StandardCharsets.UTF_8).trim();
-
-                byte[] resp;
-                String head = cmd;
-                int sp = cmd.indexOf(' ');
-                if (sp >= 0) head = cmd.substring(0, sp);
-                switch (head) {
-                    case "ping":
-                        resp = "pong".getBytes(StandardCharsets.UTF_8);
-                        break;
-                    case "dump":
-                        resp = utf8(safeDumpAll());
-                        break;
-                    case "dump_active":
-                        resp = utf8(safeDumpActive());
-                        break;
-                    case "info":
-                        resp = utf8(h.shot.sourceSize().x + " " + h.shot.sourceSize().y);
-                        break;
-                    case "screenshot":
-                        resp = safeScreenshot(cmd);
-                        break;
-                    case "stream":
-                        runStream(cmd, out);
-                        return;     // socket is single-purpose once streaming
-                    case "stream_h264":
-                        runH264Stream(cmd, out);
-                        return;
-                    case "stream_tilejpeg":
-                        runTileStream(cmd, out);
-                        return;
-                    case "keyframe":
-                        H264Streamer.requestKeyframeAll();
-                        resp = utf8("ok n=" + H264Streamer.activeCount());
-                        break;
-                    case "tap":
-                    case "swipe":
-                    case "down":
-                    case "move":
-                    case "up":
-                    case "scroll":
-                    case "key":
-                    case "text":
-                        resp = runInput(head, cmd);
-                        break;
-                    case "pull":
-                        runPull(cmd, out);
-                        continue;     // pull writes its own frames + terminator
-                    case "push":
-                        resp = runPush(cmd, in);
-                        break;
-                    case "install":
-                        resp = runInstall(cmd, in);
-                        break;
-                    case "pm_list":
-                        resp = runPmList(cmd);
-                        break;
-                    case "pm_path":
-                        resp = runPmPath(cmd);
-                        break;
-                    case "pm_uninstall":
-                        resp = runPmUninstall(cmd);
-                        break;
-                    case "pm_grant":
-                    case "pm_revoke":
-                        resp = runPmPerm(head, cmd);
-                        break;
-                    case "am_start":
-                        resp = runAmStart(cmd);
-                        break;
-                    case "am_force_stop":
-                        resp = runAmForceStop(cmd);
-                        break;
-                    case "am_kill":
-                        resp = runAmKill(cmd);
-                        break;
-                    case "am_broadcast":
-                        resp = runAmBroadcast(cmd);
-                        break;
-                    case "swipe_dir":
-                        resp = runSwipeDir(cmd);
-                        break;
-                    case "getprop":
-                        resp = runGetProp(cmd);
-                        break;
-                    case "setprop":
-                        resp = runSetProp(cmd);
-                        break;
-                    case "dumpsys":
-                        runDumpsys(cmd, out);
-                        continue;     // streams its own frames + terminator
-                    case "logcat":
-                        runLogcat(cmd, out);
-                        continue;
-                    case "settings_get":
-                        resp = runSettingsGet(cmd);
-                        break;
-                    case "settings_put":
-                        resp = runSettingsPut(cmd);
-                        break;
-                    case "shell":
-                        runShell(cmd, out);
-                        continue;
-                    case "wm_info":
-                        resp = h.wm.info();
-                        break;
-                    case "wm_rotation":
-                        resp = runWmRotation(cmd);
-                        break;
-                    case "install_multi":
-                        resp = runInstallMulti(cmd, in);
-                        break;
-                    case "monitor":
-                        runMonitor(out);
-                        continue;
-                    case "state":
-                        resp = runState(cmd);
-                        break;
-                    case "state_watch":
-                        runStateWatch(out);
-                        continue;
-                    case "wait_for_idle":
-                        resp = runWaitForIdle(cmd);
-                        break;
-                    case "wait_for_text":
-                        resp = runWaitForText(cmd);
-                        break;
-                    case "wait_for_activity":
-                        resp = runWaitForActivity(cmd);
-                        break;
-                    case "tap_and_dump":
-                        resp = runTapAndDump(cmd);
-                        break;
-                    case "tap_and_settle":
-                        resp = runTapAndSettle(cmd);
-                        break;
-                    case "node_click":
-                        resp = runNodeClick(cmd, false);
-                        break;
-                    case "node_long_click":
-                        resp = runNodeClick(cmd, true);
-                        break;
-                    case "node_set_text":
-                        resp = runNodeSetText(cmd);
-                        break;
-                    case "node_scroll":
-                        resp = runNodeScroll(cmd);
-                        break;
-                    case "node_focus":
-                        resp = runNodeFocus(cmd);
-                        break;
-                    case "submit":
-                        resp = runSubmit(cmd);
-                        break;
-                    case "paste":
-                        resp = runPaste(cmd);
-                        break;
-                    case "deeplinks":
-                        resp = runDeeplinks(cmd);
-                        break;
-                    case "sms":
-                        resp = runSms(cmd);
-                        break;
-                    case "calls":
-                        resp = runCalls(cmd);
-                        break;
-                    case "contacts":
-                        resp = runContacts(cmd);
-                        break;
-                    case "calendar":
-                        resp = runCalendar(cmd);
-                        break;
-                    case "location":
-                        resp = h.location.last();
-                        break;
-                    case "notifications":
-                        resp = runNotifications(cmd);
-                        break;
-                    case "clip_get":
-                        resp = h.clip.get();
-                        break;
-                    case "clip_set":
-                        resp = h.clip.set(afterHead(cmd));
-                        break;
-                    case "clip_watch":
-                        runClipWatch(cmd, out);
-                        continue;
-                    case "quit":
-                        writeFrame(out, "bye".getBytes(StandardCharsets.UTF_8));
-                        running.set(false);
-                        System.exit(0);
-                        return;
-                    default:
-                        resp = errBytes("UNKNOWN_CMD:" + head);
-                }
-                writeFrame(out, resp);
-            }
-        } catch (Throwable t) {
-            t.printStackTrace();
-        } finally {
-            try { s.close(); } catch (IOException ignored) {}
+    /**
+     * Synchronous verbs: returns the single response frame, or null when
+     * {@code head} is not one of them (streams, transfers and waits are
+     * driven by {@link Dispatch}). Thread-safe; callers pick the thread.
+     */
+    byte[] respond(String head, String cmd) {
+        switch (head) {
+            case "dump":
+                return utf8(safeDumpAll());
+            case "dump_active":
+                return utf8(safeDumpActive());
+            case "info":
+                return utf8(h.shot.sourceSize().x + " " + h.shot.sourceSize().y);
+            case "screenshot":
+                return safeScreenshot(cmd);
+            case "tap":
+            case "swipe":
+            case "down":
+            case "move":
+            case "up":
+            case "scroll":
+            case "key":
+            case "text":
+                return runInput(head, cmd);
+            case "pm_list":
+                return runPmList(cmd);
+            case "pm_path":
+                return runPmPath(cmd);
+            case "pm_uninstall":
+                return runPmUninstall(cmd);
+            case "pm_grant":
+            case "pm_revoke":
+                return runPmPerm(head, cmd);
+            case "am_start":
+                return runAmStart(cmd);
+            case "am_force_stop":
+                return runAmForceStop(cmd);
+            case "am_kill":
+                return runAmKill(cmd);
+            case "am_broadcast":
+                return runAmBroadcast(cmd);
+            case "swipe_dir":
+                return runSwipeDir(cmd);
+            case "getprop":
+                return runGetProp(cmd);
+            case "setprop":
+                return runSetProp(cmd);
+            case "settings_get":
+                return runSettingsGet(cmd);
+            case "settings_put":
+                return runSettingsPut(cmd);
+            case "wm_info":
+                return h.wm.info();
+            case "wm_rotation":
+                return runWmRotation(cmd);
+            case "state":
+                return runState(cmd);
+            case "wait_for_idle":
+                return runWaitForIdle(cmd);
+            case "wait_for_text":
+                return runWaitForText(cmd);
+            case "wait_for_activity":
+                return runWaitForActivity(cmd);
+            case "tap_and_dump":
+                return runTapAndDump(cmd);
+            case "tap_and_settle":
+                return runTapAndSettle(cmd);
+            case "node_click":
+                return runNodeClick(cmd, false);
+            case "node_long_click":
+                return runNodeClick(cmd, true);
+            case "node_set_text":
+                return runNodeSetText(cmd);
+            case "node_scroll":
+                return runNodeScroll(cmd);
+            case "node_focus":
+                return runNodeFocus(cmd);
+            case "submit":
+                return runSubmit(cmd);
+            case "paste":
+                return runPaste(cmd);
+            case "deeplinks":
+                return runDeeplinks(cmd);
+            case "sms":
+                return runSms(cmd);
+            case "calls":
+                return runCalls(cmd);
+            case "contacts":
+                return runContacts(cmd);
+            case "calendar":
+                return runCalendar(cmd);
+            case "location":
+                return h.location.last();
+            case "notifications":
+                return runNotifications(cmd);
+            case "clip_get":
+                return h.clip.get();
+            case "clip_set":
+                return h.clip.set(afterHead(cmd));
+            default:
+                return null;
         }
     }
 
@@ -415,7 +271,7 @@ public final class Server {
         return a;
     }
 
-    private void runTileStream(String cmd, DataOutputStream out) {
+    void runTileStream(String cmd, DataOutputStream out) {
         try {
             Screenshot.CaptureArgs args = parseScreenshotArgs(cmd);
             if (args.longEdge == 0 && !args.max) args.max = true;  // default native
@@ -432,7 +288,7 @@ public final class Server {
         }
     }
 
-    private void runH264Stream(String cmd, DataOutputStream out) {
+    void runH264Stream(String cmd, DataOutputStream out) {
         try {
             Screenshot.CaptureArgs args = parseScreenshotArgs(cmd);
             // H.264 stream defaults to native resolution like JPEG stream does.
@@ -458,7 +314,7 @@ public final class Server {
         }
     }
 
-    private void runStream(String cmd, DataOutputStream out) {
+    void runStream(String cmd, DataOutputStream out) {
         try {
             Screenshot.CaptureArgs args = parseScreenshotArgs(cmd);
             // Streams default to native resolution to match the snapshot users liked.
@@ -533,11 +389,11 @@ public final class Server {
         return a;
     }
 
-    private static byte[] utf8(String s) {
+    static byte[] utf8(String s) {
         return s.getBytes(StandardCharsets.UTF_8);
     }
 
-    private static byte[] errBytes(String tail) {
+    static byte[] errBytes(String tail) {
         return ("ERR:" + tail).getBytes(StandardCharsets.UTF_8);
     }
 
@@ -549,7 +405,7 @@ public final class Server {
 
     // ---------- adb-like command handlers ----------
 
-    private void runPull(String cmd, DataOutputStream out) throws IOException {
+    void runPull(String cmd, DataOutputStream out) throws IOException {
         FileArgs a = parseFileArgs(cmd);
         if (a.path == null) {
             writeFrame(out, errBytes("pull-needs-path"));
@@ -565,13 +421,13 @@ public final class Server {
         }
     }
 
-    private byte[] runPush(String cmd, DataInputStream in) {
+    byte[] runPush(String cmd, DataInputStream in) {
         FileArgs a = parseFileArgs(cmd);
         if (a.path == null) return errBytes("push-needs-path");
         return h.files.push(a.path, a.mode, a.size, in);
     }
 
-    private byte[] runInstall(String cmd, DataInputStream in) {
+    byte[] runInstall(String cmd, DataInputStream in) {
         FileArgs a = parseFileArgs(cmd);
         return h.installer.install(a.size, a.reinstall, a.grant, in);
     }
@@ -756,7 +612,7 @@ public final class Server {
         return h.props.doSet(pair[0], pair[1]);
     }
 
-    private void runDumpsys(String cmd, DataOutputStream out) {
+    void runDumpsys(String cmd, DataOutputStream out) {
         String tail = afterHead(cmd);
         if (tail == null || tail.isEmpty()) {
             writeErrAndTerminator(out, "dumpsys-needs-service");
@@ -769,7 +625,7 @@ public final class Server {
         h.dumpsys.dump(svc, args, out);
     }
 
-    private void runLogcat(String cmd, DataOutputStream out) {
+    void runLogcat(String cmd, DataOutputStream out) {
         String tail = afterHead(cmd);
         java.util.List<String> args = new java.util.ArrayList<>();
         if (tail != null && !tail.isEmpty()) {
@@ -793,7 +649,7 @@ public final class Server {
         return h.settings.put(parts[0], parts[1], parts[2]);
     }
 
-    private void runShell(String cmd, DataOutputStream out) {
+    void runShell(String cmd, DataOutputStream out) {
         String tail = afterHead(cmd);
         if (tail == null || tail.isEmpty()) {
             writeErrAndTerminator(out, "shell-needs-argv");
@@ -811,7 +667,7 @@ public final class Server {
         catch (NumberFormatException nf) { return errBytes("bad-rotation:" + v); }
     }
 
-    private byte[] runInstallMulti(String cmd, DataInputStream in) {
+    byte[] runInstallMulti(String cmd, DataInputStream in) {
         // install_multi sizes=N0,N1,N2 [reinstall=1] [grant=1]
         FileArgs base = parseFileArgs(cmd);
         long[] sizes = null;
@@ -832,7 +688,7 @@ public final class Server {
         return h.installer.installMulti(sizes, base.reinstall, base.grant, in);
     }
 
-    private void runMonitor(DataOutputStream out) {
+    void runMonitor(DataOutputStream out) {
         h.lifecycle.monitor(out);
     }
 
@@ -1014,7 +870,7 @@ public final class Server {
         return h.notifs.dump(pkg, limit, history);
     }
 
-    private void runClipWatch(String cmd, java.io.DataOutputStream out) {
+    void runClipWatch(String cmd, java.io.DataOutputStream out) {
         long interval = longArg(cmd, "interval_ms", 500);
         h.clip.watch(out, interval);
     }
@@ -1110,7 +966,7 @@ public final class Server {
      * thread re-fires every HEARTBEAT_MS even if nothing changed, so a
      * write failure surfaces a dead client within that window.
      */
-    private void runStateWatch(DataOutputStream out) {
+    void runStateWatch(DataOutputStream out) {
         final java.util.concurrent.LinkedBlockingQueue<byte[]> q =
                 new java.util.concurrent.LinkedBlockingQueue<>(8);
         final State.SnapshotListener listener = new State.SnapshotListener() {

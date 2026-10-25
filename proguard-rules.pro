@@ -10,8 +10,6 @@
 # classes that implement framework interfaces (OnImageAvailableListener,
 # FrameListener, Runnable) keep their override method names automatically.
 -dontwarn **
-# kotlinx-coroutines: atomic field updaters and the Main dispatcher service.
+# kotlinx-coroutines: atomic field updaters 
 -keepclassmembers class kotlinx.coroutines.** { volatile <fields>; }
--keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
--keepnames class kotlinx.coroutines.android.AndroidDispatcherFactory {}
 -keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
