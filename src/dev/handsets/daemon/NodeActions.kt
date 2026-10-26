@@ -3,6 +3,7 @@ package dev.handsets.daemon
 import android.app.UiAutomation
 import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import java.nio.charset.StandardCharsets
 import java.util.ArrayDeque
 import java.util.Deque
@@ -155,14 +156,19 @@ internal class NodeActions(private val ua: UiAutomation) {
         return Selector.Companion.parse(s)
     }
 
-    /** Locate the first node matching `sel`, or null.  */
-    fun find(sel: Selector): AccessibilityNodeInfo? {
-        val windows = ua.windows
+    /**
+     * Locate the first node matching `sel`, or null. Windows are searched
+     * topmost first; `scope` is "all" (every window), "app" (the app's
+     * windows: activity, dialogs, popups) or "active" (the focused one).
+     */
+    fun find(sel: Selector, scope: String = "all"): AccessibilityNodeInfo? {
+        val windows = if (scope == "active") null else ua.windows
         if (windows == null || windows.isEmpty()) {
             val root = ua.rootInActiveWindow
             return if (root == null) null else bfs(root, sel)
         }
         for (w in windows) {
+            if (scope == "app" && w.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
             val root = w.root ?: continue
             val hit: AccessibilityNodeInfo? = bfs(root, sel)
             if (hit != null) return hit

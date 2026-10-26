@@ -84,6 +84,8 @@ struct SeeOpts {
     size: Option<u32>,
     native: bool,
     secure_check: bool,
+    /// .json / .xml: every window instead of the focused one (as `hs ui --all`).
+    all_windows: bool,
 }
 
 #[derive(Debug)]
@@ -313,6 +315,7 @@ fn parse_see(rest: &[&str]) -> Result<SeeOpts, String> {
             }
             "--native" | "--max" => opts.native = true,
             "--secure-check" | "--secure" => opts.secure_check = true,
+            "--all" => opts.all_windows = true,
             path if path.starts_with('-') => return Err(format!("unknown see arg: {path}")),
             path => {
                 if opts.path.is_some() {
@@ -326,7 +329,7 @@ fn parse_see(rest: &[&str]) -> Result<SeeOpts, String> {
     if opts.native && opts.size.is_some() {
         return Err("see: --native and --size are mutually exclusive".into());
     }
-    if opts.path.is_none() && (opts.size.is_some() || opts.native || opts.secure_check) {
+    if opts.path.is_none() && (opts.size.is_some() || opts.native || opts.secure_check || opts.all_windows) {
         return Err("see: capture flags need a PATH; bare `hs see` opens the viewer".into());
     }
     Ok(opts)
@@ -398,9 +401,9 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     let selects_device = matches!(positional.first(), Some(&"use") | Some(&"drop"));
     if !selects_device {
         if let Some(serial) = device_serial.as_deref() {
-            match resolve_device_port(serial) {
-                Ok(p) => port = p,
-                Err(e) => return Err(e),
+            {
+                let p = resolve_device_port(serial)?;
+                port = p
             }
         }
     }
@@ -1069,7 +1072,7 @@ fn run_submit(opts: &Opts, sel: Option<&str>, flags: &flags::ActionFlags) -> io:
             }
             return Err(reporter.fail("submit", e));
         }
-        return reporter.ok("submit", &String::from_utf8_lossy(&body).trim_end(),
+        return reporter.ok("submit", String::from_utf8_lossy(&body).trim_end(),
             json_out::Obj::new().opt_s("selector", sel));
     }
 }
@@ -1092,7 +1095,7 @@ fn run_paste(opts: &Opts, sel: Option<&str>, flags: &flags::ActionFlags) -> io::
             }
             return Err(reporter.fail("paste", e));
         }
-        return reporter.ok("paste", &String::from_utf8_lossy(&body).trim_end(),
+        return reporter.ok("paste", String::from_utf8_lossy(&body).trim_end(),
             json_out::Obj::new().opt_s("selector", sel));
     }
 }
@@ -1104,7 +1107,7 @@ fn run_type_focused(opts: &Opts, text: &str, flags: &flags::ActionFlags) -> io::
     if let Some(e) = errors::parse_err(&body) {
         return Err(reporter.fail("type", e));
     }
-    reporter.ok("type", &String::from_utf8_lossy(&body).trim_end(),
+    reporter.ok("type", String::from_utf8_lossy(&body).trim_end(),
         json_out::Obj::new().s("text", text))
 }
 
@@ -1290,7 +1293,7 @@ fn run_type_into(
             }
             return Err(reporter.fail("type", e));
         }
-        return reporter.ok("type", &String::from_utf8_lossy(&body).trim_end(),
+        return reporter.ok("type", String::from_utf8_lossy(&body).trim_end(),
             json_out::Obj::new()
                 .s("selector", &resolved)
                 .s("query", selector)
@@ -1344,31 +1347,36 @@ fn run_ui(host: &str, port: u16, format: UiFormat, windows: UiWindows) -> io::Re
 }
 
 fn ui_roots(dump: &json::Value, windows: UiWindows) -> Vec<&json::Value> {
-    if windows == UiWindows::All { ui_dump::collect_roots(dump) } else { json::app_roots(dump) }
+    if windows == UiWindows::All { json::all_roots(dump) } else { json::app_roots(dump) }
 }
 
 /// `hs see [PATH]` — bare opens the viewer; otherwise extension picks
 /// the format (jpg/webp/png screenshot, xml/json UI hierarchy).
 fn run_see(host: &str, port: u16, opts: &SeeOpts) -> io::Result<()> {
     let Some(path) = opts.path.as_deref() else {
-        return mirror::run(host, port, mirror::Args::default());
+        return mirror::run(host, port, mirror::Args);
     };
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default();
+    let is_tree = matches!(ext.as_str(), "json" | "xml");
+    if opts.all_windows && !is_tree {
+        return Err(io::Error::other("see: --all only applies to .json/.xml"));
+    }
+    let dump_wire = if opts.all_windows { "dump" } else { "dump_active" };
     let mut conn = Conn::connect(host, port)?;
     let bytes: Vec<u8> = match ext.as_str() {
         "jpg" | "jpeg" => conn.call(&see_screenshot_wire(opts, "jpeg"))?,
         "webp"         => conn.call(&see_screenshot_wire(opts, "webp"))?,
         "png"          => conn.call(&see_screenshot_wire(opts, "png"))?,
-        "json"         => conn.call("dump_active")?,
+        "json"         => conn.call(dump_wire)?,
         "xml" => {
             if opts.size.is_some() || opts.native || opts.secure_check {
                 return Err(io::Error::other("see: screenshot flags only apply to jpg/webp/png"));
             }
-            let body = conn.call("dump_active")?;
+            let body = conn.call(dump_wire)?;
             let text = std::str::from_utf8(&body)
                 .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
             let json = json::parse(text)
@@ -1443,7 +1451,9 @@ fn run_wait(
     } else if is_component(spec) || is_pkg(spec) {
         format!("wait_for_activity n={spec} timeout_ms={timeout_ms}")
     } else {
-        format!("wait_for_text text={spec:?} timeout_ms={timeout_ms}")
+        // Same windows as tap / find: the app's, or the focused one.
+        let scope = if f.active_window { "active" } else { "app" };
+        format!("wait_for_text text={spec:?} scope={scope} timeout_ms={timeout_ms}")
     };
     // Retry layer: timeout exhaustion gets retried `retries` additional
     // times. For most waits this is a no-op (retries=0), but it lets RPA
@@ -1459,7 +1469,7 @@ fn run_wait(
             }
             return Err(reporter.fail("wait", e));
         }
-        return reporter.ok("wait", &String::from_utf8_lossy(&body).trim_end(),
+        return reporter.ok("wait", String::from_utf8_lossy(&body).trim_end(),
             json_out::Obj::new().s("spec", spec).n("timeout_ms", timeout_ms as i64));
     }
 }
@@ -1599,7 +1609,7 @@ pub(crate) fn dispatch_session_verb(
             if let Some(e) = errors::parse_err(&body) {
                 return Err(reporter.fail("tap", e));
             }
-            reporter.ok("tap", &String::from_utf8_lossy(&body).trim_end(),
+            reporter.ok("tap", String::from_utf8_lossy(&body).trim_end(),
                 json_out::Obj::new().n("x", x as i64).n("y", y as i64))
         }
         Cmd::Wait { spec, mut flags } => {
@@ -1623,7 +1633,7 @@ pub(crate) fn dispatch_session_verb(
             if let Some(e) = errors::parse_err(&body) {
                 return Err(reporter.fail("submit", e));
             }
-            reporter.ok("submit", &String::from_utf8_lossy(&body).trim_end(),
+            reporter.ok("submit", String::from_utf8_lossy(&body).trim_end(),
                 json_out::Obj::new().opt_s("selector", sel.as_deref()))
         }
         Cmd::Paste { sel, mut flags } => {
@@ -1637,7 +1647,7 @@ pub(crate) fn dispatch_session_verb(
             if let Some(e) = errors::parse_err(&body) {
                 return Err(reporter.fail("paste", e));
             }
-            reporter.ok("paste", &String::from_utf8_lossy(&body).trim_end(),
+            reporter.ok("paste", String::from_utf8_lossy(&body).trim_end(),
                 json_out::Obj::new().opt_s("selector", sel.as_deref()))
         }
         Cmd::TypeFocused { text, mut flags } => {
@@ -1647,7 +1657,7 @@ pub(crate) fn dispatch_session_verb(
             if let Some(e) = errors::parse_err(&body) {
                 return Err(reporter.fail("type", e));
             }
-            reporter.ok("type", &String::from_utf8_lossy(&body).trim_end(),
+            reporter.ok("type", String::from_utf8_lossy(&body).trim_end(),
                 json_out::Obj::new().s("text", &text))
         }
         Cmd::TypeInto { selector, text, mut flags } => {
@@ -1658,7 +1668,7 @@ pub(crate) fn dispatch_session_verb(
             if let Some(e) = errors::parse_err(&body) {
                 return Err(reporter.fail("type", e));
             }
-            reporter.ok("type", &String::from_utf8_lossy(&body).trim_end(),
+            reporter.ok("type", String::from_utf8_lossy(&body).trim_end(),
                 json_out::Obj::new()
                     .s("selector", &resolved)
                     .s("query", &selector)
@@ -1935,7 +1945,7 @@ fn run_show_pkg(host: &str, port: u16, pkg: &str) -> io::Result<()> {
     // Try a short dumpsys package — the first few lines usually cover
     // versionName / versionCode / firstInstallTime.
     let info = conn.call(&format!("dumpsys package {pkg}"));
-    if let Ok(_) = info {
+    if info.is_ok() {
         // dumpsys returns chunked frames; for now skip detailed parsing.
         // The path alone is the most-asked-for field.
     }
