@@ -119,13 +119,11 @@ fn draw_bezel(grid: &mut [Vec<char>]) {
     grid[0][last_col] = '╮';
     grid[last_row][0] = '╰';
     grid[last_row][last_col] = '╯';
-    for c in 1..last_col {
-        grid[0][c] = '─';
-        grid[last_row][c] = '─';
-    }
-    for r in 1..last_row {
-        grid[r][0] = '│';
-        grid[r][last_col] = '│';
+    grid[0][1..last_col].fill('─');
+    grid[last_row][1..last_col].fill('─');
+    for row in &mut grid[1..last_row] {
+        row[0] = '│';
+        row[last_col] = '│';
     }
 }
 

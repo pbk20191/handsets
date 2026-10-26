@@ -63,6 +63,22 @@ pub fn as_arr(v: &Value) -> Option<&[Value]> {
     }
 }
 
+/// Every window root in a dump, in the daemon's order (topmost first).
+/// Unwraps both envelopes: `dump_active` = `{"root": …}`, `dump` =
+/// `{"windows": [{…, "root": …}, …]}`; a bare node passes through.
+pub fn all_roots(dump: &Value) -> Vec<&Value> {
+    if let Some(root) = obj_get(dump, "root") {
+        return vec![root];
+    }
+    if let Some(windows) = obj_get(dump, "windows").and_then(as_arr) {
+        return windows.iter().filter_map(|w| obj_get(w, "root")).collect();
+    }
+    if obj_get(dump, "cls").is_some() {
+        return vec![dump];
+    }
+    Vec::new()
+}
+
 /// Roots of the app's own windows in a dump, bottom (activity) first.
 /// `dump` lists every window; this keeps TYPE_APPLICATION ones (activity,
 /// dialogs, popups, bottom sheets) and drops the status bar, IME and other
@@ -340,5 +356,14 @@ mod tests {
         assert_eq!(cls, ["Activity", "Popup"]);
         let active = parse(r#"{"root":{"cls":"Only"}}"#).unwrap();
         assert_eq!(app_roots(&active).len(), 1);
+    }
+
+    #[test]
+    fn all_roots_unwraps_every_envelope() {
+        let dump = parse(r#"{"windows":[{"type":3,"root":{"cls":"A"}},{"type":1,"root":{"cls":"B"}}]}"#).unwrap();
+        assert_eq!(all_roots(&dump).len(), 2);
+        assert_eq!(all_roots(&parse(r#"{"ts":1,"root":{"cls":"A"}}"#).unwrap()).len(), 1);
+        assert_eq!(all_roots(&parse(r#"{"cls":"A"}"#).unwrap()).len(), 1);
+        assert!(all_roots(&parse(r#"{"ts":1}"#).unwrap()).is_empty());
     }
 }

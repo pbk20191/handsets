@@ -20,8 +20,8 @@ const DEFAULT_PORT: u16 = 9008;
 ///   1. $HANDSETS_JAR  (or legacy $A11YDUMP_JAR)
 ///   2. <exe_dir>/hs.jar          — release tarball layout
 ///   3. <exe_dir>/../build/hs.jar (and ../../, ../../../)
-///   4. ~/.handsets/hs.jar        — curl-installer layout (resolved even when
-///                                  <exe_dir> points at a /usr/local/bin symlink)
+///   4. ~/.handsets/hs.jar        — curl-installer layout (found even when
+///      <exe_dir> is the /usr/local/bin a symlink points from)
 ///   5. ./build/hs.jar            — dev checkout
 pub(crate) fn locate_jar() -> io::Result<PathBuf> {
     for var in ["HANDSETS_JAR", "A11YDUMP_JAR"] {

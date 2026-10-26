@@ -413,7 +413,7 @@ pub(crate) struct MatchCtx<'a> {
 
 impl<'a> MatchCtx<'a> {
     pub fn new(dump: &'a Value) -> Self {
-        Self::from_roots(collect_roots(dump))
+        Self::from_roots(crate::json::all_roots(dump))
     }
 
     /// Match over the given window roots only, in that order.
@@ -594,28 +594,3 @@ mod tests {
     }
 }
 
-fn collect_roots<'a>(v: &'a Value) -> Vec<&'a Value> {
-    let mut out = Vec::new();
-    if let Value::Obj(fields) = v {
-        for (k, val) in fields {
-            if k == "root" {
-                out.push(val);
-            } else if k == "windows" {
-                if let Value::Arr(arr) = val {
-                    for w in arr {
-                        if let Value::Obj(wf) = w {
-                            for (k2, v2) in wf {
-                                if k2 == "root" { out.push(v2); }
-                            }
-                        }
-                    }
-                }
-            } else if k == "cls" {
-                // The value passed in *is* a node already (rare path —
-                // someone passing a sub-tree directly).
-                return vec![v];
-            }
-        }
-    }
-    out
-}

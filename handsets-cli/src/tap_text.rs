@@ -410,12 +410,12 @@ where
 /// but the daemon can't use the faster `node_click id=…` shortcut and the
 /// reported flags lie about what got tapped. Walking up to the first
 /// clickable ancestor gives both: accurate logs and the click-by-id path.
-fn promote_to_clickable<'a>(
+fn promote_to_clickable(
     bounds: (i32, i32, i32, i32),
     rid: &str,
     cls: &str,
     flag_str: &str,
-    ancestors: &[&'a Value],
+    ancestors: &[&Value],
     screen_area: i64,
 ) -> ((i32, i32, i32, i32), String, String, String) {
     if flag_str.contains('c') {

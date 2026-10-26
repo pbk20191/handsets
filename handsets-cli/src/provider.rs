@@ -175,7 +175,7 @@ fn format_cell(col: &str, v: &json::Value, type_maps: &[TypeMap]) -> String {
             if let Some(label) = lookup_type(col, s.parse::<i64>().ok(), type_maps) {
                 return label.to_string();
             }
-            s.replace('\n', " ").replace('\r', " ")
+            s.replace(['\n', '\r'], " ")
         }
         json::Value::Num(n) => {
             if is_date_col(col) && *n > 0 {

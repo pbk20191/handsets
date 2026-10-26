@@ -375,7 +375,7 @@ mod tests {
                 ]
             }
         }"#).unwrap();
-        let out = render_interactive(&collect_roots(&dump));
+        let out = render_interactive(&json::all_roots(&dump));
         let lines: Vec<&str> = out.trim_end().lines().collect();
         assert_eq!(lines.len(), 3, "expected 3 actionable rows, got:\n{out}");
 
@@ -438,7 +438,7 @@ mod tests {
                 ]
             }
         }"#).unwrap();
-        let out = render_interactive(&collect_roots(&dump));
+        let out = render_interactive(&json::all_roots(&dump));
         let lines: Vec<&str> = out.trim_end().lines().collect();
 
         // Only the clickable icon surfaces — non-clickable anonymous
@@ -473,7 +473,7 @@ mod tests {
                 ]
             }
         }"#).unwrap();
-        let out = render_interactive(&collect_roots(&dump));
+        let out = render_interactive(&json::all_roots(&dump));
         let lines: Vec<&str> = out.trim_end().lines().collect();
         assert_eq!(lines.len(), 3, "got:\n{out}");
         assert!(lines[0].starts_with("tap") && lines[0].contains("ViewGroup")
@@ -499,7 +499,7 @@ mod tests {
                 ]
             }
         }"#).unwrap();
-        let out = render_interactive(&collect_roots(&dump));
+        let out = render_interactive(&json::all_roots(&dump));
         let lines: Vec<&str> = out.trim_end().lines().collect();
         assert_eq!(lines.len(), 1, "only the OK button has visible bounds, got:\n{out}");
         assert!(lines[0].contains("\"OK\""));
@@ -522,29 +522,7 @@ mod tests {
                 ]
             }
         }"#).unwrap();
-        print!("\n--- hs ui (verb-led) ---\n{}", render_interactive(&collect_roots(&dump)));
+        print!("\n--- hs ui (verb-led) ---\n{}", render_interactive(&json::all_roots(&dump)));
     }
 }
 
-/// Unwrap the dump envelope (dump_active = `{"root": …}`, dump = `{"windows": [...]}`).
-pub(crate) fn collect_roots(v: &Value) -> Vec<&Value> {
-    let mut out = Vec::new();
-    if let Value::Obj(fields) = v {
-        for (k, val) in fields {
-            if k == "root" {
-                out.push(val);
-            } else if k == "windows" {
-                if let Value::Arr(arr) = val {
-                    for w in arr {
-                        if let Value::Obj(wf) = w {
-                            for (k2, v2) in wf {
-                                if k2 == "root" { out.push(v2); }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}

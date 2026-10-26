@@ -178,7 +178,7 @@ fn pad_display(s: &str, w: usize) -> String {
     let count = s.chars().count();
     if count >= w { s.to_string() }
     else {
-        let pad: String = std::iter::repeat(' ').take(w - count).collect();
+        let pad: String = std::iter::repeat_n(' ', w - count).collect();
         format!("{s}{pad}")
     }
 }

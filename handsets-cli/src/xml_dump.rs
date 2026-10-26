@@ -26,32 +26,11 @@ pub(crate) fn render(dump_json: &Value, rotation: i64) -> String {
     // The dump_active payload is `{ "root": <node> }`. The dump (all windows)
     // payload is `{ "windows": [ { "id": …, "root": <node> }, … ] }`. We
     // unwrap both shapes into a sequence of root nodes.
-    let roots = collect_roots(dump_json);
+    let roots = crate::json::all_roots(dump_json);
     for (i, root) in roots.iter().enumerate() {
         emit_node(root, i as i64, 1, &mut out);
     }
     out.push_str("</hierarchy>\n");
-    out
-}
-
-fn collect_roots(v: &Value) -> Vec<&Value> {
-    let mut out = Vec::new();
-    if let Value::Obj(fields) = v {
-        for (k, v) in fields {
-            if k == "root" { out.push(v); }
-            if k == "windows" {
-                if let Value::Arr(arr) = v {
-                    for w in arr {
-                        if let Value::Obj(wf) = w {
-                            for (k2, v2) in wf {
-                                if k2 == "root" { out.push(v2); }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
     out
 }
 
@@ -90,7 +69,7 @@ fn emit_node(n: &Value, index: i64, depth: usize, out: &mut String) {
     }
 
     let kids = selector::children(n);
-    if kids.map_or(true, |k| k.is_empty()) {
+    if kids.is_none_or(|k| k.is_empty()) {
         out.push_str(" />\n");
     } else {
         out.push_str(">\n");

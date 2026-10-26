@@ -495,11 +495,9 @@ mod tests {
 
     #[test]
     fn cursor_preserves_key_across_refresh() {
-        let before = vec![
-            stub_el("tap",  "Continue", "com.foo:id/continue", 540, 860),
+        let before = [stub_el("tap",  "Continue", "com.foo:id/continue", 540, 860),
             stub_el("fill", "Email",    "com.foo:id/email",    540, 540),
-            stub_el("fill", "Password", "com.foo:id/password", 540, 640),
-        ];
+            stub_el("fill", "Password", "com.foo:id/password", 540, 640)];
         let key = before[1].key();
         let after = vec![
             stub_el("fill", "Email",    "com.foo:id/email",    540, 540),
@@ -510,7 +508,7 @@ mod tests {
 
     #[test]
     fn cursor_falls_back_when_key_missing() {
-        let before = vec![stub_el("tap", "OK", "com.foo:id/ok", 100, 100)];
+        let before = [stub_el("tap", "OK", "com.foo:id/ok", 100, 100)];
         let key = before[0].key();
         let after = vec![stub_el("tap", "Cancel", "com.foo:id/cancel", 200, 200)];
         assert_eq!(pick_cursor(&after, Some(key), Some(0)), Some(0));
@@ -521,10 +519,8 @@ mod tests {
         // A live counter widget whose label updates between snapshots but
         // whose resource-id stays put. Without rid-only fallback the cursor
         // would snap back to row 0 every frame.
-        let before = vec![
-            stub_el("tap", "Item A", "com.foo:id/item_a", 100, 100),
-            stub_el("-",   "Count: 41", "com.foo:id/counter", 100, 200),
-        ];
+        let before = [stub_el("tap", "Item A", "com.foo:id/item_a", 100, 100),
+            stub_el("-",   "Count: 41", "com.foo:id/counter", 100, 200)];
         let key = before[1].key();
         let after = vec![
             stub_el("tap", "Item A", "com.foo:id/item_a", 100, 100),
