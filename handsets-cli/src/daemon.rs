@@ -166,8 +166,11 @@ pub(crate) fn connect(opts: &ConnectOpts) -> io::Result<u16> {
     // Fast path: if the chosen port is already forwarded to this serial AND
     // the daemon answers `ping`, we're done. This is the common case when
     // RPA scripts re-invoke `hs use` defensively before each step.
+    // Matching the device side too means a daemon from an older hs (which
+    // listened on TCP) is restarted rather than reused.
     let already_forwarded = forwards.iter().any(|f|
-        f.serial == serial && f.host_spec == format!("tcp:{port}"));
+        f.serial == serial && f.host_spec == format!("tcp:{port}")
+            && f.remote_spec == device_socket(port));
     if already_forwarded && ping_daemon(port).is_ok() {
         let _ = state_cache::spawn_detached("127.0.0.1", port);
         return Ok(port);
@@ -201,7 +204,7 @@ pub(crate) fn connect(opts: &ConnectOpts) -> io::Result<u16> {
     let _ = adb(Some(&serial), &["forward", "--remove", &format!("tcp:{port}")]);
     adb_ok(
         Some(&serial),
-        &["forward", &format!("tcp:{port}"), &format!("tcp:{port}")],
+        &["forward", &format!("tcp:{port}"), &device_socket(port)],
         "forward",
     )?;
 
@@ -368,6 +371,14 @@ pub(crate) fn devices() -> io::Result<Vec<DeviceRow>> {
 struct ForwardEntry {
     serial: String,
     host_spec: String,
+    remote_spec: String,
+}
+
+/// The daemon listens on an abstract Unix socket, not a device TCP port, so
+/// it can check the peer uid and keep other apps out. Must match
+/// HsServer.socketName.
+fn device_socket(port: u16) -> String {
+    format!("localabstract:hsd_{port}")
 }
 
 fn list_forwards() -> io::Result<Vec<ForwardEntry>> {
@@ -378,7 +389,8 @@ fn list_forwards() -> io::Result<Vec<ForwardEntry>> {
         let mut it = line.split_whitespace();
         let serial = match it.next() { Some(s) => s.to_string(), None => continue };
         let host = match it.next() { Some(s) => s.to_string(), None => continue };
-        out.push(ForwardEntry { serial, host_spec: host });
+        let remote = it.next().unwrap_or("").to_string();
+        out.push(ForwardEntry { serial, host_spec: host, remote_spec: remote });
     }
     Ok(out)
 }
@@ -572,7 +584,8 @@ fn adb_server_list_forwards() -> io::Result<Vec<ForwardEntry>> {
         let mut it = line.split_whitespace();
         let serial = match it.next() { Some(s) => s.to_string(), None => continue };
         let host = match it.next() { Some(s) => s.to_string(), None => continue };
-        out.push(ForwardEntry { serial, host_spec: host });
+        let remote = it.next().unwrap_or("").to_string();
+        out.push(ForwardEntry { serial, host_spec: host, remote_spec: remote });
     }
     Ok(out)
 }

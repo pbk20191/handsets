@@ -3,7 +3,7 @@
 ```
 host                                  device (shell UID, app_process)
 ─────                                  ──────────────────────────────
-hs <verb> ──► TCP forward ────►     HsServer → Dispatch (one coroutine per connection)
+hs <verb> ──► adb forward ────►     HsServer → Dispatch (one coroutine per connection)
                                        ├─ Server.respond     sync verbs (Pm Am Wm Props Providers …)
                                        ├─ Gestures           input, wait_for_*, tap_and_*
                                        ├─ Transfers          push/pull, install, uninstall
@@ -14,8 +14,10 @@ hs <verb> ──► TCP forward ────►     HsServer → Dispatch (one c
 ```
 
 The daemon runs as the shell UID via `app_process` with hidden-API
-restrictions lifted. The host runs a background `state-daemon` that
-subscribes to `state_watch` and atomically rewrites
+restrictions lifted. It listens on the abstract Unix socket `@hsd_<port>`
+(host side: `adb forward tcp:<port> localabstract:hsd_<port>`) and refuses
+any peer whose `SO_PEERCRED` uid isn't shell or root. The host runs a
+background `state-daemon` that subscribes to `state_watch` and atomically rewrites
 `~/.handsets/state-<port>.json` on every event-driven refresh. `hs info` /
 `hs info` / `hs show` all read straight out of that file.
 

@@ -13,7 +13,11 @@ import kotlin.system.exitProcess
  * thread-per-connection server: read a length-prefixed command, answer it,
  * repeat. Stream verbs own the socket until the client goes away.
  */
-internal class Dispatch(private val ready: CompletableDeferred<Server>) {
+internal class Dispatch(
+    private val ready: CompletableDeferred<Server>,
+    /** Runs before `quit` exits the process. */
+    private val onQuit: () -> Unit,
+) {
 
     suspend fun session(c: Conn) {
         try {
@@ -30,7 +34,7 @@ internal class Dispatch(private val ready: CompletableDeferred<Server>) {
                 val head = if (sp >= 0) cmd.substring(0, sp) else cmd
                 when (head) {
                     "ping" -> { c.send(PONG); continue }
-                    "quit" -> { c.send(BYE); c.flush(); exitProcess(0) }
+                    "quit" -> { onQuit(); c.send(BYE); c.flush(); exitProcess(0) }
                 }
                 val s = ready.await()
                 when (head) {

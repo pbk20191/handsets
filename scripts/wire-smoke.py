@@ -258,7 +258,7 @@ def start_daemon(jar):
     adb("shell", "pkill -f hsd")
     time.sleep(0.3)
     adb("push", jar, "/data/local/tmp/hs.jar")
-    adb("forward", f"tcp:{PORT}", f"tcp:{PORT}")
+    adb("forward", f"tcp:{PORT}", f"localabstract:hsd_{PORT}")
     adb("shell", f"CLASSPATH=/data/local/tmp/hs.jar nohup app_process /system/bin --nice-name=hsd "
                  f"dev.handsets.daemon.Main --port={PORT} > /data/local/tmp/hsd.log 2>&1 &")
     t0 = time.time()

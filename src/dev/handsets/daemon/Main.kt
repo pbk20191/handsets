@@ -38,7 +38,9 @@ data object Main {
             val sysCtx = Binders.systemContext()!!
 
             val ready = CompletableDeferred<Server>()
-            HsServer(port, Dispatch(ready)).start()
+            lateinit var hs: HsServer
+            hs = HsServer(port, Dispatch(ready, onQuit = { hs.close() }))
+            hs.start()
             Loop.scope.launch {
                 try {
                     ready.complete(initDaemon(sysCtx))

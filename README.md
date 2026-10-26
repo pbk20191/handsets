@@ -87,13 +87,15 @@ Vocabulary: `[a=v]` `[a~=sub]` `[a^=pre]` `[a$=suf]` · `:visible :clickable :en
 ```
 host                                  device (shell UID via app_process)
 ─────                                  ─────────────────────────────────
-  hs ─── adb forward ────► tcp:9008 ─► Server.java
+  hs ─── adb forward ────► @hsd_9008 ─► Server.java
                                          ├─ accessibility dump
                                          ├─ binder reflection (Pm/Am/Wm/Settings)
                                          └─ screenshots + state mirror
 ```
 
-Length-prefixed binary frames over `adb forward`:
+The daemon listens on an abstract Unix socket (`@hsd_<port>`) and only accepts
+adbd (shell) or root, so other apps on the device can't reach it.
+Length-prefixed binary frames over `adb forward tcp:<port> localabstract:hsd_<port>`:
 
 ```
 host → device:   [u32 BE len][ascii: verb [k=v ...]]
