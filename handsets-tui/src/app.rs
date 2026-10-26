@@ -5,14 +5,17 @@
 //                       on each tick it drains the watcher channel, handles
 //                       any pending key, and redraws.
 //
-//   - Watcher thread    owns its own daemon socket. Loops calling `dump_active`
+//   - Watcher thread    owns its own daemon socket. Loops calling `dump`
 //                       at ~10 fps, parses the JSON, and posts a snapshot of
 //                       interactive elements to the main thread via mpsc.
+//                       `dump` (every window) rather than `dump_active`, so
+//                       popups and bottom sheets in their own non-focusable
+//                       window are listed too; `--active` switches back.
 //                       This is the video-stream model — we never block the
 //                       UI waiting for idle, the latest snapshot is always on
 //                       screen, and animations don't freeze anything.
 //
-// Two daemon sockets keep dump_active off the action socket; otherwise a
+// Two daemon sockets keep the dump off the action socket; otherwise a
 // long-tail dump would block a tap and vice versa.
 
 use std::io;
@@ -72,7 +75,9 @@ pub enum WatcherMsg {
 }
 
 impl App {
-    pub fn new(host: String, port: u16) -> io::Result<Self> {
+    /// `active`: list only the focused window (`dump_active`) instead of
+    /// every app window (`dump`).
+    pub fn new(host: String, port: u16, active: bool) -> io::Result<Self> {
         // Open the action socket on the main thread so a connect failure
         // surfaces before we enter the alternate screen.
         let main_conn = Conn::connect(&host, port)?;
@@ -81,7 +86,8 @@ impl App {
         // can reconnect if the daemon restarts.
         let (tx, rx) = mpsc::channel();
         let host_clone = host.clone();
-        thread::spawn(move || run_watcher(host_clone, port, tx));
+        let wire = if active { "dump_active" } else { "dump" };
+        thread::spawn(move || run_watcher(host_clone, port, wire, tx));
 
         Ok(Self {
             host, port, main_conn, watcher_rx: rx,
@@ -344,8 +350,8 @@ impl App {
     }
 }
 
-fn run_watcher(host: String, port: u16, tx: Sender<WatcherMsg>) {
-    // Target ~10 fps. dump_active itself usually takes 5-30ms; we sleep the
+fn run_watcher(host: String, port: u16, wire: &str, tx: Sender<WatcherMsg>) {
+    // Target ~10 fps. A dump itself usually takes 5-30ms; we sleep the
     // remainder of the 100ms slot. If a dump runs long (heavy app, many
     // nodes) we just emit fewer fps — never blocks the UI thread.
     const FRAME: Duration = Duration::from_millis(100);
@@ -357,7 +363,7 @@ fn run_watcher(host: String, port: u16, tx: Sender<WatcherMsg>) {
 
     loop {
         let start = Instant::now();
-        match conn.call_str("dump_active") {
+        match conn.call_str(wire) {
             Ok(body) if body.starts_with("ERR:") => {
                 if tx.send(WatcherMsg::Error(body.trim_end().to_string())).is_err() { return; }
             }

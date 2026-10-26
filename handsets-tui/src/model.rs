@@ -46,11 +46,18 @@ impl Verb {
 pub fn parse_dump(dump: &Value) -> Vec<Element> {
     let mut out = Vec::new();
     for root in collect_roots(dump) {
-        walk(root, &mut out);
+        walk(root, None, &mut out);
     }
     out
 }
 
+/// AccessibilityWindowInfo.TYPE_APPLICATION: the activity plus its own
+/// popups, dialogs and bottom sheets. System bars are other types.
+const TYPE_APPLICATION: i64 = 1;
+
+/// Roots to list, in screen order. `dump_active` has one `root`; `dump`
+/// lists every window topmost first, so app windows are reordered bottom
+/// layer first (activity, then anything floating over it).
 fn collect_roots(v: &Value) -> Vec<&Value> {
     let mut out = Vec::new();
     if let Value::Obj(fields) = v {
@@ -59,7 +66,11 @@ fn collect_roots(v: &Value) -> Vec<&Value> {
                 out.push(val);
             } else if k == "windows" {
                 if let Value::Arr(arr) = val {
-                    for w in arr {
+                    let mut apps: Vec<&Value> = arr.iter()
+                        .filter(|w| json::get_num(w, "type") == Some(TYPE_APPLICATION))
+                        .collect();
+                    apps.sort_by_key(|w| json::get_num(w, "layer").unwrap_or(0));
+                    for w in apps {
                         if let Value::Obj(wf) = w {
                             for (k2, v2) in wf {
                                 if k2 == "root" { out.push(v2); }
@@ -73,16 +84,22 @@ fn collect_roots(v: &Value) -> Vec<&Value> {
     out
 }
 
-fn walk(node: &Value, out: &mut Vec<Element>) {
+/// `slot`: nearest ancestor with a resource id, and which of its children
+/// this branch hangs off — names anonymous cells like `#rv_cards[3]`.
+fn walk(node: &Value, slot: Option<(&str, usize)>, out: &mut Vec<Element>) {
     // Off-screen / negative-bounds nodes get skipped — they're noise in the
     // list (can't be tapped; the daemon rejects off-screen taps anyway) and
     // would confuse the cursor on recycled views. Still descend into
     // children: a recycler with degenerate own-bounds can wrap valid rows.
     if is_interactive(node) && has_visible_bounds(node) {
-        out.push(build(node));
+        out.push(build(node, slot));
     }
+    let rid = json::get_str(node, "rid").unwrap_or("");
+    let rid_short = rid.rsplit('/').next().unwrap_or(rid);
     if let Some(kids) = json::children(node) {
-        for c in kids { walk(c, out); }
+        for (i, c) in kids.iter().enumerate() {
+            walk(c, if rid_short.is_empty() { slot } else { Some((rid_short, i)) }, out);
+        }
     }
 }
 
@@ -109,12 +126,12 @@ fn is_interactive(node: &Value) -> bool {
         return true;
     }
 
-    let rid = json::get_str(node, "rid").unwrap_or("");
-    let flags = json::get_str(node, "flags").unwrap_or("");
-    !rid.is_empty() && flags.contains('c')
+    // Clickable even with no text, desc or id: grid and list cells are often
+    // a bare ViewGroup of images.
+    json::get_str(node, "flags").unwrap_or("").contains('c')
 }
 
-fn build(node: &Value) -> Element {
+fn build(node: &Value, slot: Option<(&str, usize)>) -> Element {
     let cls_full = json::get_str(node, "cls").unwrap_or("");
     let cls_short = cls_full.rsplit('.').next().unwrap_or(cls_full).to_string();
     let rid_full  = json::get_str(node, "rid").unwrap_or("").to_string();
@@ -133,6 +150,9 @@ fn build(node: &Value) -> Element {
     let label = if !text.is_empty()       { text.clone() }
                 else if !desc.is_empty()  { desc.clone() }
                 else if !rid_short.is_empty() { format!("#{rid_short}") }
+                // Display only: the tap selector uses `text`/`desc`, never the label.
+                else if let Some(l) = descendant_label(node) { l }
+                else if let Some((parent, i)) = slot { format!("#{parent}[{i}]") }
                 else                      { String::new() };
 
     let verb = if is_input_widget(&cls_short)     { Verb::Fill }
@@ -140,6 +160,19 @@ fn build(node: &Value) -> Element {
                else                               { Verb::Info };
 
     Element { verb, cls_short, label, rid_full, rid_short, cx, cy, text, desc, flags }
+}
+
+/// First text or desc in the subtree, the way TalkBack names a button that
+/// has none of its own.
+fn descendant_label(node: &Value) -> Option<String> {
+    for c in json::children(node)? {
+        for key in ["text", "desc"] {
+            let s = strip_invisible(json::get_str(c, key).unwrap_or(""));
+            if !s.is_empty() { return Some(s); }
+        }
+        if let Some(l) = descendant_label(c) { return Some(l); }
+    }
+    None
 }
 
 fn is_input_widget(simple: &str) -> bool {
@@ -210,6 +243,55 @@ mod tests {
         let els = parse_dump(&v);
         assert_eq!(els.len(), 1);
         assert_eq!(els[0].label, "OK");
+    }
+
+    #[test]
+    fn includes_app_popups_below_the_activity_and_skips_system_windows() {
+        // Shape of `dump`: topmost layer first. A PopupWindow is its own
+        // TYPE_APPLICATION (1) window; the status bar is TYPE_SYSTEM (3).
+        let v = json::parse(r#"{
+            "windows": [
+                {"id":1,"type":3,"layer":2,"bounds":[0,0,1080,63],"root":
+                    {"cls":"android.widget.FrameLayout","children":[
+                        {"cls":"android.widget.Button","text":"Clock","flags":"ce","bounds":[0,0,100,63],"children":[]}]}},
+                {"id":2,"type":1,"layer":1,"bounds":[0,1517,1080,2337],"root":
+                    {"cls":"android.widget.FrameLayout","children":[
+                        {"cls":"android.widget.Button","text":"Popup","flags":"ce","bounds":[0,1600,500,1700],"children":[]}]}},
+                {"id":3,"type":1,"active":true,"focused":true,"layer":0,"bounds":[0,0,1080,2400],"root":
+                    {"cls":"android.widget.FrameLayout","children":[
+                        {"cls":"android.widget.Button","text":"Activity","flags":"ce","bounds":[0,400,500,500],"children":[]}]}}
+            ]
+        }"#).unwrap();
+        let labels: Vec<String> = parse_dump(&v).into_iter().map(|e| e.label).collect();
+        assert_eq!(labels, vec!["Activity", "Popup"]);
+    }
+
+    #[test]
+    fn anonymous_grid_items_are_listed_by_collection_id_and_index() {
+        // A GridView/RecyclerView cell: clickable, but no text, desc or id of
+        // its own — only images inside.
+        let cell = |x: i64| format!(r#"{{"cls":"android.view.ViewGroup","flags":"cfev","bounds":[{x},640,{},918],"children":[
+            {{"cls":"android.widget.ImageView","rid":"com.foo:id/image_character","flags":"ev","bounds":[{x},660,{},780],"children":[]}}]}}"#, x + 179, x + 100);
+        let v = json::parse(&format!(r#"{{"root":
+            {{"cls":"android.widget.GridView","rid":"com.foo:id/rv_cards","flags":"sfev","bounds":[131,640,950,1703],"children":[{},{}]}}}}"#,
+            cell(168), cell(354))).unwrap();
+        let els = parse_dump(&v);
+        let labels: Vec<&str> = els.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, vec!["#rv_cards[0]", "#rv_cards[1]"]);
+        assert!(els.iter().all(|e| e.verb == Verb::Tap && e.rid_full.is_empty()));
+    }
+
+    #[test]
+    fn anonymous_clickable_takes_its_label_from_descendant_text() {
+        let v = json::parse(r#"{"root":
+            {"cls":"android.widget.LinearLayout","children":[
+                {"cls":"android.view.ViewGroup","flags":"cfev","bounds":[0,100,1080,200],"children":[
+                    {"cls":"android.widget.TextView","text":"Settings","flags":"ev","bounds":[40,120,400,180],"children":[]}]}]}}"#).unwrap();
+        let els = parse_dump(&v);
+        assert_eq!(els[0].label, "Settings");
+        assert_eq!(els[0].verb, Verb::Tap);
+        // Only for display: the tap selector must not treat it as the row's own text.
+        assert!(els[0].text.is_empty());
     }
 
     #[test]

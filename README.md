@@ -65,6 +65,10 @@ idle, no race between tap and re-dump.
 - **Works on animated pages.** No `wait_for_idle` blocking — even constantly
   animating screens render smoothly at 10–20 fps.
 
+- **Sees popups.** Lists every app window, so popups and bottom sheets that
+  live in their own window show up too. `hs tui --active` lists only the
+  focused window.
+
 Open it with `hs tui` after `hs use`. Built as a sibling crate
 (`handsets-tui`, [ratatui](https://ratatui.rs) + crossterm) so the core `hs`
 binary stays zero-dep.

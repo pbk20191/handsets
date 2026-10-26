@@ -126,7 +126,7 @@ enum Cmd {
     Location { json: bool },
     Notif { pkg: Option<String>, history: bool, limit: u32, json: bool },
     Clip { text: Option<String>, watch: bool, interval_ms: u64 },
-    Tui,
+    Tui { active: bool },
 }
 
 // SMS type codes — Android Telephony.TextBasedSmsColumns.
@@ -422,12 +422,11 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         Some((&"see", rest)) => Cmd::See(parse_see(rest)?),
 
         // ─── TUI — keyboard-driven inspector ─────────────────────────
-        Some((&"tui", rest)) => {
-            if !rest.is_empty() {
-                return Err(format!("tui takes no positional args (got: {})", rest.join(" ")));
-            }
-            Cmd::Tui
-        }
+        Some((&"tui", rest)) => match rest {
+            [] => Cmd::Tui { active: false },
+            ["--active"] => Cmd::Tui { active: true },
+            _ => return Err(format!("tui takes only --active (got: {})", rest.join(" "))),
+        },
 
         // ─── Apps ─────────────────────────────────────────────────────
         Some((&"apps", rest)) => {
@@ -902,7 +901,7 @@ fn run(opts: &Opts) -> io::Result<()> {
         Cmd::ShowPkg(pkg) => run_show_pkg(&opts.host, opts.port, pkg),
         Cmd::Info => run_info(&opts.host, opts.port),
         Cmd::Ui { format, all } => run_ui(&opts.host, opts.port, *format, *all),
-        Cmd::Tui => tui::run(&opts.host, opts.port),
+        Cmd::Tui { active } => tui::run(&opts.host, opts.port, *active),
         Cmd::SettingsListAll => {
             // Three Shell-passthrough calls glued client-side with header
             // lines — keeps the daemon's shell command simple (no quote
@@ -2437,6 +2436,17 @@ mod parse_use_tests {
             Some("SERIAL".into()));
         assert_eq!(selected_serial(&["use", "--device", "SERIAL"]),
             Some("SERIAL".into()));
+    }
+
+    #[test]
+    fn tui_takes_an_optional_active_flag() {
+        let parse = |args: &[&str]| {
+            let args = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+            parse_args(&args).map(|opts| opts.cmd)
+        };
+        assert!(matches!(parse(&["tui"]), Ok(Cmd::Tui { active: false })));
+        assert!(matches!(parse(&["tui", "--active"]), Ok(Cmd::Tui { active: true })));
+        assert!(parse(&["tui", "--bogus"]).is_err());
     }
 
     #[test]
