@@ -304,9 +304,11 @@ internal class Screenshot(private val ua: UiAutomation) {
         /**
          * Copies through the HardwareBuffer on the GPU instead of CPU-locking
          * the image. Locking it (Image.getPlanes) leaks one sync_file fd per
-         * frame on some gralloc implementations (API 37 emulator: ~60/s, so
-         * the daemon hit EMFILE after ~9 min and stalled), and closing
-         * Image.getFence() ourselves doesn't stop it.
+         * frame on some gralloc implementations (API 36 and 37 emulators,
+         * with -gpu host and SwiftShader alike: ~60/s, so the daemon hit
+         * EMFILE after ~9 min and stalled). The lock alone leaks, with or
+         * without CPU usage flags on the reader; closing Image.getFence()
+         * ourselves doesn't stop it.
          */
         private suspend fun absorbHardware(img: Image) {
             val hb = img.hardwareBuffer ?: return
@@ -326,7 +328,11 @@ internal class Screenshot(private val ua: UiAutomation) {
             }
         }
 
-        /** API 28: no wrapHardwareBuffer, so lock and copy on the CPU (no leak seen there). */
+        /**
+         * API 28: no wrapHardwareBuffer, so lock and copy on the CPU. Rarely
+         * runs: API 28 refuses shell a mirror VirtualDisplay (no
+         * CAPTURE_VIDEO_OUTPUT), so screenshots there take another path.
+         */
         private suspend fun absorbLocked(img: Image) {
             val p = img.planes[0]
             val rowPix = p.rowStride / max(1, p.pixelStride)
