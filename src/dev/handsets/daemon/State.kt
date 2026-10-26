@@ -1,9 +1,7 @@
 package dev.handsets.daemon
 
-import android.app.ActivityManager
 import android.app.ActivityManager.RunningAppProcessInfo
 import android.app.ActivityManager.RunningTaskInfo
-import android.app.UiAutomation
 import android.app.UiModeManager
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -50,17 +48,15 @@ import kotlin.concurrent.Volatile
  */
 internal class State(
     private val ctx: Context, // for accessibility events
-    private val ua: UiAutomation?, private val uiEvents: UiEvents
+    private val uiEvents: UiEvents
 ) {
-    private val bm: BatteryManager
-    private val am: ActivityManager?
-    private val displayMgr: DisplayManager // for screen state changes
+    private val bm: BatteryManager = ctx.getSystemService(BatteryManager::class.java)
+    private val displayMgr: DisplayManager =
+        ctx.getSystemService(DisplayManager::class.java) // for screen state changes
 
     // Cached binders/methods so the hot path doesn't pay reflective lookup
     // each call. All set lazily on first use; null means "not available on
     // this SDK level / not yet probed".
-    @Volatile
-    private var iPowerManager: Any? = null
 
     @Volatile
     private var isInteractive1: Method? = null // (int displayId)
@@ -68,20 +64,16 @@ internal class State(
     @Volatile
     private var isInteractive0: Method? = null // ()
 
-    @Volatile
-    private var iActivityTaskManager: Any? = null
 
     @Volatile
     private var getTasks: Method? = null
 
-    @Volatile
-    private var iActivityManager: Any? = null
 
     @Volatile
     private var getRunningAppProcesses: Method? = null
 
     private val cachedDevice = AtomicReference<ByteArray?>()
-    private val cachedDeviceStamp = AtomicReference<LongArray?>(longArrayOf(0L))
+    private val cachedDeviceStamp = AtomicReference(longArrayOf(0L))
     private val refresher = StateRefresher(this, DEBOUNCE_MS, HEARTBEAT_MS)
 
     private val refresherStarted = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -131,10 +123,10 @@ internal class State(
     }
 
     fun batteryCharging(): ByteArray {
-        try {
-            return bytes(bm.isCharging().toString())
+        return try {
+            bytes(bm.isCharging.toString())
         } catch (t: Throwable) {
-            return err("battery-charging-failed:" + t.message)
+            err("battery-charging-failed:" + t.message)
         }
     }
 
@@ -142,7 +134,7 @@ internal class State(
     fun topActivity(): ByteArray {
         try {
             val cn = resolveTopComponent()
-            return bytes(if (cn == null) "null" else cn.flattenToShortString())
+            return bytes(cn?.flattenToShortString() ?: "null")
         } catch (t: Throwable) {
             return err("top-failed:" + t.message)
         }
@@ -150,10 +142,8 @@ internal class State(
 
     @Throws(Exception::class)
     private fun resolveTopComponent(): ComponentName? {
-        val iatm = activityTaskBinder()
-        if (iatm == null) return null
-        val gt = getTasks
-        if (gt == null) return null
+        val iatm = activityTaskBinder() ?: return null
+        val gt = getTasks ?: return null
         val p = gt.getParameterTypes()
         val args = arrayOfNulls<Any>(p.size)
         // First arg is maxNum: 1. Remaining bool/int slots: false/0.
@@ -166,8 +156,8 @@ internal class State(
         @Suppress("UNCHECKED_CAST") // reflective IActivityTaskManager.getTasks
         val tasks =
             gt.invoke(iatm, *args) as MutableList<RunningTaskInfo?>?
-        if (tasks == null || tasks.isEmpty()) return null
-        return tasks.get(0)!!.topActivity
+        if (tasks.isNullOrEmpty()) return null
+        return tasks[0]!!.topActivity
     }
 
     // ---------- running processes ----------
@@ -249,16 +239,14 @@ internal class State(
         // 1. Accessibility events → top-activity change detection. Route
         //    through the shared UiEvents dispatcher so wait-for-* primitives
         //    can subscribe to the same stream.
-        uiEvents.subscribe(object : UiEvents.Consumer {
-            override fun onEvent(ev: AccessibilityEvent) {
-                val t = ev.getEventType()
-                if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-                    || t == AccessibilityEvent.TYPE_WINDOWS_CHANGED
-                ) {
-                    markDirty()
-                }
+        uiEvents.subscribe { ev ->
+            val t = ev.eventType
+            if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                || t == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+            ) {
+                markDirty()
             }
-        })
+        }
 
         // 1b. Package install/remove → invalidate app counts.
         try {
@@ -270,7 +258,7 @@ internal class State(
             val pkgH = mainHandler
             val pkgR: BroadcastReceiver = object : BroadcastReceiver() {
                 override fun onReceive(c: Context?, i: Intent) {
-                    Logx.i("pkg broadcast ${i.getAction()} data=${i.getDataString()}")
+                    Logx.i("pkg broadcast ${i.action} data=${i.dataString}")
                     invalidateAppCounts()
                     markDirty()
                 }
@@ -287,7 +275,7 @@ internal class State(
                     String::class.java, Handler::class.java, Int::class.javaPrimitiveType
                 )
                 m.invoke(ctx, pkgR, pkgFilter, null, pkgH,  /* RECEIVER_EXPORTED */2)
-            } catch (noFlagOverload: Throwable) {
+            } catch (_: Throwable) {
                 ctx.registerReceiver(pkgR, pkgFilter, null, pkgH)
             }
         } catch (t: Throwable) {
@@ -338,7 +326,7 @@ internal class State(
                     String::class.java, Handler::class.java, Int::class.javaPrimitiveType
                 )
                 m.invoke(ctx, cfgR, cfgFilter, null, cfgH,  /* RECEIVER_EXPORTED */2)
-            } catch (noFlagOverload: Throwable) {
+            } catch (_: Throwable) {
                 ctx.registerReceiver(cfgR, cfgFilter, null, cfgH)
             }
         } catch (t: Throwable) {
@@ -349,7 +337,7 @@ internal class State(
     /** Static fields — props, total RAM/storage, CPU model. Computed once.  */
     private val staticJsonLazy: String by lazy { computeStaticJson() }
 
-    private fun staticJson(): String? = staticJsonLazy
+    private fun staticJson(): String = staticJsonLazy
 
     private fun computeStaticJson(): String {
         val sb = StringBuilder(512)
@@ -391,14 +379,14 @@ internal class State(
         var total: Long = 0
         var third: Long = 0
         try {
-            for (p in ctx.getPackageManager().getInstalledPackages(0)) {
+            for (p in ctx.packageManager.getInstalledPackages(0)) {
                 total++
                 val ai = p.applicationInfo
                 if (ai != null && (ai.flags and ApplicationInfo.FLAG_SYSTEM) == 0) {
                     third++
                 }
             }
-        } catch (ignored: Throwable) {
+        } catch (_: Throwable) {
         }
         appCounts = longArrayOf(total, third)
         appCountsAt = System.currentTimeMillis()
@@ -426,7 +414,7 @@ internal class State(
             sb.append("\"top_activity\":")
                 .append(if (top == null) "null" else ("\"" + top.flattenToShortString() + "\""))
                 .append(',')
-        } catch (ignored: Throwable) {
+        } catch (_: Throwable) {
             sb.append("\"top_activity\":null,")
         }
 
@@ -456,17 +444,11 @@ internal class State(
         d.getRealSize(sz)
         sb.append("\"width\":").append(sz.x).append(',')
         sb.append("\"height\":").append(sz.y).append(',')
-        sb.append("\"rotation\":").append(d.getRotation()).append(',')
+        sb.append("\"rotation\":").append(d.rotation).append(',')
 
         sb.append("\"computed_at_ms\":").append(System.currentTimeMillis())
         sb.append('}')
         return sb.toString().toByteArray(StandardCharsets.UTF_8)
-    }
-
-    init {
-        this.bm = ctx.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        this.am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager?
-        this.displayMgr = ctx.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     }
 
     private fun readTheme(): String {
@@ -478,26 +460,26 @@ internal class State(
         // UiModeManagerService itself writes to: 1=NO, 2=YES, 0/3=AUTO/CUSTOM.
         try {
             val v = Settings.Secure.getInt(
-                ctx.getContentResolver(), "ui_night_mode", -1
+                ctx.contentResolver, "ui_night_mode", -1
             )
             if (v == 2) return "dark"
             if (v == 1) return "light"
-        } catch (ignored: Throwable) {
+        } catch (_: Throwable) {
         }
         try {
-            val uim = ctx.getSystemService<UiModeManager?>(UiModeManager::class.java)
+            val uim = ctx.getSystemService(UiModeManager::class.java)
             if (uim != null) {
-                val mode = uim.getNightMode()
+                val mode = uim.nightMode
                 if (mode == UiModeManager.MODE_NIGHT_YES) return "dark"
                 if (mode == UiModeManager.MODE_NIGHT_NO) return "light"
             }
-        } catch (ignored: Throwable) {
+        } catch (_: Throwable) {
         }
         try {
-            val night = (ctx.getResources().getConfiguration().uiMode
+            val night = (ctx.resources.configuration.uiMode
                     and Configuration.UI_MODE_NIGHT_MASK)
             return if (night == Configuration.UI_MODE_NIGHT_YES) "dark" else "light"
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
             return ""
         }
     }
@@ -508,8 +490,8 @@ internal class State(
      * a null active network from ConnectivityManager.  */
     private fun readNetworkType(): String {
         try {
-            val cm = ctx.getSystemService<ConnectivityManager>(ConnectivityManager::class.java)
-            val active = cm.getActiveNetwork()
+            val cm = ctx.getSystemService(ConnectivityManager::class.java)
+            val active = cm.activeNetwork
             if (active != null) {
                 val caps = cm.getNetworkCapabilities(active)
                 if (caps != null) {
@@ -520,7 +502,7 @@ internal class State(
                     return "other"
                 }
             }
-        } catch (ignored: Throwable) {
+        } catch (_: Throwable) {
         }
         // Fallback: pick the first non-loopback interface that has an IPv4.
         try {
@@ -528,16 +510,16 @@ internal class State(
                 NetworkInterface.getNetworkInterfaces()
             while (ifs.hasMoreElements()) {
                 val ni = ifs.nextElement()
-                if (!ni.isUp() || ni.isLoopback()) continue
+                if (!ni.isUp() || ni.isLoopback) continue
                 if (!has4(ni)) continue
-                val n = ni.getName()
+                val n = ni.name
                 if (n.startsWith("wlan")) return "wifi"
                 if (n.startsWith("eth")) return "ethernet"
                 if (n.startsWith("rmnet")) return "cellular"
                 if (n.startsWith("tun") || n.startsWith("ppp")) return "vpn"
                 return n
             }
-        } catch (ignored: Throwable) {
+        } catch (_: Throwable) {
         }
         return ""
     }
@@ -546,20 +528,20 @@ internal class State(
     private fun readIp(): String {
         // ConnectivityManager first (cleaner attribution).
         try {
-            val cm = ctx.getSystemService<ConnectivityManager>(ConnectivityManager::class.java)
-            val active = cm.getActiveNetwork()
+            val cm = ctx.getSystemService(ConnectivityManager::class.java)
+            val active = cm.activeNetwork
             if (active != null) {
                 val lp = cm.getLinkProperties(active)
                 if (lp != null) {
-                    for (la in lp.getLinkAddresses()) {
-                        val a = la.getAddress()
+                    for (la in lp.linkAddresses) {
+                        val a = la.address
                         if (a is Inet4Address && !a.isLoopbackAddress() && !a.isLinkLocalAddress()) {
                             a.hostAddress?.let { return it }
                         }
                     }
                 }
             }
-        } catch (ignored: Throwable) {
+        } catch (_: Throwable) {
         }
         // Fallback: walk NetworkInterface — works on the emulator where
         // ConnectivityManager returns no active network even though
@@ -569,7 +551,7 @@ internal class State(
                 NetworkInterface.getNetworkInterfaces()
             while (ifs.hasMoreElements()) {
                 val ni = ifs.nextElement()
-                if (!ni.isUp() || ni.isLoopback()) continue
+                if (!ni.isUp() || ni.isLoopback) continue
                 val a = ni.getInetAddresses()
                 while (a.hasMoreElements()) {
                     val addr = a.nextElement()
@@ -578,7 +560,7 @@ internal class State(
                     }
                 }
             }
-        } catch (ignored: Throwable) {
+        } catch (_: Throwable) {
         }
         return ""
     }
@@ -586,17 +568,16 @@ internal class State(
     /** Connected wifi SSID, stripped of WifiInfo's surrounding quotes.  */
     private fun readWifiSsid(): String {
         try {
-            val wm = ctx.getSystemService<WifiManager?>(WifiManager::class.java)
-            if (wm == null) return ""
-            @Suppress("deprecation") val info = wm.getConnectionInfo()
-            if (info == null) return ""
+            val wm = ctx.getSystemService(WifiManager::class.java) ?: return ""
+            @Suppress("DEPRECATION") // WifiManager.getConnectionInfo: the replacement needs a network callback
+            val info = wm.connectionInfo ?: return ""
             var s = info.getSSID()
             if (s == null || s == "<unknown ssid>") return ""
-            if (s.length >= 2 && s.get(0) == '"' && s.get(s.length - 1) == '"') {
+            if (s.length >= 2 && s[0] == '"' && s[s.length - 1] == '"') {
                 s = s.substring(1, s.length - 1)
             }
             return s
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
             return ""
         }
     }
@@ -605,11 +586,11 @@ internal class State(
     /** Resolved once (thread-safe `lazy`); also wires the methods it probes. */
     private val powerBinderLazy: Any? by lazy {
             val svc = asInterface(
-                "android.os.IPowerManager\$Stub", service("power")
+                $$"android.os.IPowerManager$Stub", service("power")
             )
             // Probe both overloads exactly once.
             for (m in svc!!.javaClass.getMethods()) {
-                if ("isInteractive" != m.getName()) continue
+                if ("isInteractive" != m.name) continue
                 val pt = m.getParameterTypes()
                 if (pt.size == 1 && pt[0] == Int::class.javaPrimitiveType && isInteractive1 == null) {
                     isInteractive1 = m
@@ -624,12 +605,11 @@ internal class State(
 
     /** Resolved once (thread-safe `lazy`); also wires the methods it probes. */
     private val activityTaskBinderLazy: Any? by lazy {
-            val svc = iActivityTaskManagerOrNull()
-            if (svc == null) return@lazy null
-            // Pick the widest `getTasks` overload — first arg is max task count.
+        val svc = iActivityTaskManagerOrNull() ?: return@lazy null
+        // Pick the widest `getTasks` overload — first arg is max task count.
             var best: Method? = null
             for (m in svc.javaClass.getMethods()) {
-                if ("getTasks" != m.getName()) continue
+                if ("getTasks" != m.name) continue
                 val pt = m.getParameterTypes()
                 if (pt.size >= 1 && pt[0] == Int::class.javaPrimitiveType && (best == null || pt.size > best.getParameterTypes().size)) {
                     best = m
@@ -645,7 +625,7 @@ internal class State(
     private val activityBinderLazy: Any? by lazy {
             val svc = iActivityManager()
             for (m in svc!!.javaClass.getMethods()) {
-                if ("getRunningAppProcesses" == m.getName()
+                if ("getRunningAppProcesses" == m.name
                     && m.getParameterTypes().size == 0
                 ) {
                     getRunningAppProcesses = m
@@ -680,20 +660,20 @@ internal class State(
         // SettingsProvider), so we *also* TTL the cache as a safety net.
         // Slightly under the heartbeat so every heartbeat-driven snapshot
         // refresh re-counts and picks up any silent install / uninstall.
-        private val APP_COUNT_TTL_MS: Long = HEARTBEAT_MS - 500
+        private const val APP_COUNT_TTL_MS: Long = HEARTBEAT_MS - 500
 
         // ---------- field readers ----------
         @Volatile
         private var spGet: Method? = null
-        private fun getprop(key: String?): String? {
+        private fun getprop(key: String?): String {
             try {
                 if (spGet == null) {
                     spGet = Class.forName("android.os.SystemProperties")
                         .getDeclaredMethod("get", String::class.java)
                 }
                 val v: Any? = spGet!!.invoke(null, key)
-                return if (v == null) "" else v.toString()
-            } catch (t: Throwable) {
+                return v?.toString() ?: ""
+            } catch (_: Throwable) {
                 return ""
             }
         }
@@ -706,7 +686,7 @@ internal class State(
                     while ((r.readLine().also { line = it }) != null) sb.append(line).append('\n')
                     return sb.toString()
                 }
-            } catch (t: Throwable) {
+            } catch (_: Throwable) {
                 return ""
             }
         }
@@ -753,7 +733,7 @@ internal class State(
                     if (toks.size >= 2) {
                         try {
                             return toks[1]!!.toLong()
-                        } catch (ignored: NumberFormatException) {
+                        } catch (_: NumberFormatException) {
                         }
                     }
                 }
@@ -775,7 +755,7 @@ internal class State(
             try {
                 return raw.split("\\s+".toRegex()).dropLastWhile { it.isEmpty() }
                     .toTypedArray()[0].toDouble().toLong()
-            } catch (t: Throwable) {
+            } catch (_: Throwable) {
                 return 0
             }
         }
@@ -783,8 +763,8 @@ internal class State(
         private fun readStorageTotalKb(): Long {
             try {
                 val sf = StatFs("/data")
-                return sf.getTotalBytes() / 1024
-            } catch (t: Throwable) {
+                return sf.totalBytes / 1024
+            } catch (_: Throwable) {
                 return 0
             }
         }
@@ -792,20 +772,20 @@ internal class State(
         private fun readStorageFreeKb(): Long {
             try {
                 val sf = StatFs("/data")
-                return sf.getAvailableBytes() / 1024
-            } catch (t: Throwable) {
+                return sf.availableBytes / 1024
+            } catch (_: Throwable) {
                 return 0
             }
         }
 
         /** Battery temperature in °C (driver value is tenths-of-a-degree).  */
-        private fun readBatteryTempC(): String? {
+        private fun readBatteryTempC(): String {
             val raw = readFile("/sys/class/power_supply/battery/temp").trim { it <= ' ' }
             if (raw.isEmpty()) return "null"
             try {
                 val tenths = raw.toInt()
                 return (tenths / 10.0).toString()
-            } catch (nf: NumberFormatException) {
+            } catch (_: NumberFormatException) {
                 return "null"
             }
         }
@@ -846,7 +826,7 @@ internal class State(
         }
 
         private fun err(tail: String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
 }

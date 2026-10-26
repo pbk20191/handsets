@@ -40,7 +40,7 @@ internal class Server(private val h: Handlers) {
      */
     fun respond(head: String, cmd: String): ByteArray? {
         when (head) {
-            "info" -> return utf8(h.shot!!.sourceSize().x.toString() + " " + h.shot!!.sourceSize().y)
+            "info" -> return utf8(h.shot.sourceSize().x.toString() + " " + h.shot.sourceSize().y)
             "pm_list" -> return runPmList(cmd)
             "pm_path" -> return runPmPath(cmd)
             "pm_grant", "pm_revoke" -> return runPmPerm(head, cmd)
@@ -52,7 +52,7 @@ internal class Server(private val h: Handlers) {
             "setprop" -> return runSetProp(cmd)
             "settings_get" -> return runSettingsGet(cmd)
             "settings_put" -> return runSettingsPut(cmd)
-            "wm_info" -> return h.wm!!.info()
+            "wm_info" -> return h.wm.info()
             "wm_rotation" -> return runWmRotation(cmd)
             "state" -> return runState(cmd)
             "node_click" -> return runNodeClick(cmd, false)
@@ -67,10 +67,10 @@ internal class Server(private val h: Handlers) {
             "calls" -> return runCalls(cmd)
             "contacts" -> return runContacts(cmd)
             "calendar" -> return runCalendar(cmd)
-            "location" -> return h.location!!.last()
+            "location" -> return h.location.last()
             "notifications" -> return runNotifications(cmd)
-            "clip_get" -> return h.clip!!.get()
-            "clip_set" -> return h.clip!!.set(afterHead(cmd))
+            "clip_get" -> return h.clip.get()
+            "clip_set" -> return h.clip.set(afterHead(cmd))
             else -> return null
         }
     }
@@ -80,7 +80,7 @@ internal class Server(private val h: Handlers) {
         when (head) {
             "dump" -> utf8(h.dumper.dumpAll())
             "dump_active" -> utf8(h.dumper.dumpActive())
-            else -> h.shot.capture(parseScreenshotArgs(cmd)) ?: errBytes("screenshot-failed:null")
+            else -> h.shot.capture(parseScreenshotArgs(cmd))
         }
     } catch (t: Throwable) {
         if (t is kotlinx.coroutines.CancellationException) throw t
@@ -105,43 +105,39 @@ internal class Server(private val h: Handlers) {
     private fun runPmList(cmd: String): ByteArray {
         val thirdParty = cmd.contains(" 3") || cmd.contains("third=1")
         val systemOnly = cmd.contains(" s") || cmd.contains("system=1")
-        return h.pm!!.list(thirdParty, systemOnly)
+        return h.pm.list(thirdParty, systemOnly)
     }
 
-    private fun runPmPath(cmd: String): ByteArray? {
-        val pkg: String? = positional(cmd)
-        if (pkg == null) return errBytes("pm_path-needs-pkg")
-        return h.pm!!.path(pkg)
+    private fun runPmPath(cmd: String): ByteArray {
+        val pkg: String = positional(cmd) ?: return errBytes("pm_path-needs-pkg")
+        return h.pm.path(pkg)
     }
 
-    private fun runPmPerm(head: String?, cmd: String): ByteArray? {
-        val parts = positionalPair(cmd)
-        if (parts == null) return errBytes(head + "-needs-pkg-and-perm")
-        if ("pm_grant" == head) return h.pm!!.grant(parts[0], parts[1])
-        return h.pm!!.revoke(parts[0], parts[1])
+    private fun runPmPerm(head: String?, cmd: String): ByteArray {
+        val parts = positionalPair(cmd) ?: return errBytes("$head-needs-pkg-and-perm")
+        if ("pm_grant" == head) return h.pm.grant(parts[0], parts[1])
+        return h.pm.revoke(parts[0], parts[1])
     }
 
-    private fun runAmStart(cmd: String): ByteArray? {
+    private fun runAmStart(cmd: String): ByteArray {
         val a: AmArgs = parseAmArgs(cmd)
         if (a.component == null) return errBytes("am_start-needs-n=pkg/.Class")
-        return h.am!!.start(a.component, a.action, a.data, a.flags)
+        return h.am.start(a.component, a.action, a.data, a.flags)
     }
 
-    private fun runAmForceStop(cmd: String): ByteArray? {
-        val pkg: String? = positional(cmd)
-        if (pkg == null) return errBytes("am_force_stop-needs-pkg")
-        return h.am!!.forceStop(pkg)
+    private fun runAmForceStop(cmd: String): ByteArray {
+        val pkg: String = positional(cmd) ?: return errBytes("am_force_stop-needs-pkg")
+        return h.am.forceStop(pkg)
     }
 
-    private fun runAmKill(cmd: String): ByteArray? {
-        val pkg: String? = positional(cmd)
-        if (pkg == null) return errBytes("am_kill-needs-pkg")
-        return h.am!!.kill(pkg)
+    private fun runAmKill(cmd: String): ByteArray {
+        val pkg: String = positional(cmd) ?: return errBytes("am_kill-needs-pkg")
+        return h.am.kill(pkg)
     }
 
     private fun runAmBroadcast(cmd: String): ByteArray {
         val a: AmArgs = parseAmArgs(cmd)
-        return h.am!!.broadcast(a.action, a.component, a.data)
+        return h.am.broadcast(a.action, a.component, a.data)
     }
 
     /**
@@ -167,128 +163,122 @@ internal class Server(private val h: Handlers) {
     }
 
     // ---------- second-wave command handlers ----------
-    private fun runGetProp(cmd: String): ByteArray? {
-        val key: String? = positional(cmd)
-        if (key == null) return errBytes("getprop-needs-key")
+    private fun runGetProp(cmd: String): ByteArray {
+        val key: String = positional(cmd) ?: return errBytes("getprop-needs-key")
         return h.props!!.doGet(key)
     }
 
-    private fun runSetProp(cmd: String): ByteArray? {
-        val pair = positionalPair(cmd)
-        if (pair == null) return errBytes("setprop-needs-key-and-value")
+    private fun runSetProp(cmd: String): ByteArray {
+        val pair = positionalPair(cmd) ?: return errBytes("setprop-needs-key-and-value")
         return h.props!!.doSet(pair[0], pair[1])
     }
 
-    private fun runSettingsGet(cmd: String): ByteArray? {
-        val parts = positionalPair(cmd)
-        if (parts == null) return errBytes("settings_get-needs-namespace-and-key")
-        return h.settings!!.get(parts[0], parts[1])
+    private fun runSettingsGet(cmd: String): ByteArray {
+        val parts = positionalPair(cmd) ?: return errBytes("settings_get-needs-namespace-and-key")
+        return h.settings.get(parts[0], parts[1])
     }
 
-    private fun runSettingsPut(cmd: String): ByteArray? {
+    private fun runSettingsPut(cmd: String): ByteArray {
         // Need namespace + key + value (3 positional tokens).
-        val tail: String? = afterHead(cmd)
-        if (tail == null) return errBytes("settings_put-needs-namespace-key-value")
+        val tail: String =
+            afterHead(cmd) ?: return errBytes("settings_put-needs-namespace-key-value")
         val parts = tail.split("\\s+".toRegex(), limit = 3).toTypedArray()
         if (parts.size < 3) return errBytes("settings_put-needs-namespace-key-value")
-        return h.settings!!.put(parts[0], parts[1], parts[2])
+        return h.settings.put(parts[0], parts[1], parts[2])
     }
 
-    private fun runWmRotation(cmd: String): ByteArray? {
-        val v: String? = positional(cmd)
-        if (v == null) return errBytes("wm_rotation-needs-value")
-        try {
-            return h.wm!!.setRotation(v.toInt())
-        } catch (nf: NumberFormatException) {
-            return errBytes("bad-rotation:" + v)
+    private fun runWmRotation(cmd: String): ByteArray {
+        val v: String = positional(cmd) ?: return errBytes("wm_rotation-needs-value")
+        return try {
+            h.wm.setRotation(v.toInt())
+        } catch (_: NumberFormatException) {
+            errBytes("bad-rotation:$v")
         }
     }
 
     // ---------- node_* handlers ----------
     private fun runNodeClick(cmd: String, longClick: Boolean): ByteArray? {
-        val sel: String? = afterHead(cmd)
-        if (sel == null) return errBytes((if (longClick) "node_long_click" else "node_click") + "-needs-selector")
-        return if (longClick) h.nodes!!.longClick(sel) else h.nodes!!.click(sel)
+        val sel: String = afterHead(cmd)
+            ?: return errBytes((if (longClick) "node_long_click" else "node_click") + "-needs-selector")
+        return if (longClick) h.nodes.longClick(sel) else h.nodes.click(sel)
     }
 
     private fun runNodeSetText(cmd: String): ByteArray? {
-        val tail: String? = afterHead(cmd)
-        if (tail == null) return errBytes("node_set_text-needs-selector-and-value")
+        val tail: String =
+            afterHead(cmd) ?: return errBytes("node_set_text-needs-selector-and-value")
         // Pull value= out, treat the rest as the selector.
-        val value: String? = extractKey(tail, "value")
-        if (value == null) return errBytes("node_set_text-needs-value=")
+        val value: String =
+            extractKey(tail, "value") ?: return errBytes("node_set_text-needs-value=")
         // Empty selector is intentional: NodeActions.setText handles it by
         // targeting whichever EditText currently has input focus. Kept
         // explicit here so callers don't need a sentinel value — they just
         // omit the selector and `node_set_text value="..."` writes to the
         // focused field, which is what hs tui needs after a tap-to-focus.
-        return h.nodes!!.setText(removeKey(tail, "value").trim { it <= ' ' }, value)
+        return h.nodes.setText(removeKey(tail, "value").trim { it <= ' ' }, value)
     }
 
     private fun runNodeScroll(cmd: String): ByteArray? {
-        val tail: String? = afterHead(cmd)
-        if (tail == null) return errBytes("node_scroll-needs-selector-and-dir")
+        val tail: String = afterHead(cmd) ?: return errBytes("node_scroll-needs-selector-and-dir")
         var dir: String? = extractKey(tail, "dir")
         if (dir == null) dir = "forward"
         val sel: String = removeKey(tail, "dir")
         if (sel.isEmpty()) return errBytes("node_scroll-needs-selector")
-        return h.nodes!!.scroll(sel, dir)
+        return h.nodes.scroll(sel, dir)
     }
 
     private fun runNodeFocus(cmd: String): ByteArray? {
-        val sel: String? = afterHead(cmd)
-        if (sel == null) return errBytes("node_focus-needs-selector")
-        return h.nodes!!.focus(sel)
+        val sel: String = afterHead(cmd) ?: return errBytes("node_focus-needs-selector")
+        return h.nodes.focus(sel)
     }
 
     private fun runSubmit(cmd: String): ByteArray? {
         // `submit` with no args targets the focused EditText. A trailing
         // selector overrides that — `submit text~=Email`.
-        return h.nodes!!.imeAction(afterHead(cmd))
+        return h.nodes.imeAction(afterHead(cmd))
     }
 
     private fun runPaste(cmd: String): ByteArray? {
         // `paste` with no args inserts the system clipboard into the
         // focused EditText. Trailing selector overrides — `paste id=...`.
-        return h.nodes!!.pasteAction(afterHead(cmd))
+        return h.nodes.pasteAction(afterHead(cmd))
     }
 
-    private fun runDeeplinks(cmd: String): ByteArray? {
+    private fun runDeeplinks(cmd: String): ByteArray {
         val pkg: String? = positional(cmd)
         return h.manifest.deeplinks(pkg)
     }
 
     // ---------- user-data ContentProvider verbs ----------
-    private fun runSms(cmd: String): ByteArray? {
+    private fun runSms(cmd: String): ByteArray {
         val kind: String? = strArgOr(cmd, "type", "inbox")
         val limit = longArg(cmd, "limit", 50).toInt()
         return h.providers.sms(kind, limit)
     }
 
-    private fun runCalls(cmd: String): ByteArray? {
+    private fun runCalls(cmd: String): ByteArray {
         val kind: String? = strArgOr(cmd, "type", "all")
         val limit = longArg(cmd, "limit", 50).toInt()
-        return h.providers!!.calls(kind, limit)
+        return h.providers.calls(kind, limit)
     }
 
-    private fun runContacts(cmd: String): ByteArray? {
+    private fun runContacts(cmd: String): ByteArray {
         val limit = longArg(cmd, "limit", 50).toInt()
-        return h.providers!!.contacts(limit)
+        return h.providers.contacts(limit)
     }
 
-    private fun runCalendar(cmd: String): ByteArray? {
+    private fun runCalendar(cmd: String): ByteArray {
         val now = System.currentTimeMillis()
         val from: Long = longArg(cmd, "from", now)
         val to: Long = longArg(cmd, "to", now + 7L * 24 * 60 * 60 * 1000)
         val limit = longArg(cmd, "limit", 50).toInt()
-        return h.providers!!.calendar(from, to, limit)
+        return h.providers.calendar(from, to, limit)
     }
 
-    private fun runNotifications(cmd: String): ByteArray? {
+    private fun runNotifications(cmd: String): ByteArray {
         val pkg: String? = strArg(cmd, "pkg")
         val limit = longArg(cmd, "limit", 50).toInt()
         val history = longArg(cmd, "history", 0) != 0L
-        return h.notifs!!.dump(pkg, limit, history)
+        return h.notifs.dump(pkg, limit, history)
     }
 
     /**
@@ -301,18 +291,17 @@ internal class Server(private val h: Handlers) {
      * thread re-fires every HEARTBEAT_MS even if nothing changed, so a
      * write failure surfaces a dead client within that window.
      */
-    private fun runState(cmd: String): ByteArray? {
-        val field: String? = positional(cmd)
-        if (field == null) return errBytes("state-needs-field")
-        when (field) {
-            "interactive" -> return h.state!!.interactive()
-            "battery_level" -> return h.state!!.batteryLevel()
-            "battery_charging" -> return h.state!!.batteryCharging()
-            "top" -> return h.state!!.topActivity()
-            "procs" -> return h.state!!.procs()
-            "device" -> return h.state!!.device()
-            "device_fresh" -> return h.state!!.deviceFresh()
-            else -> return errBytes("unknown-state-field:" + field)
+    private fun runState(cmd: String): ByteArray {
+        val field: String = positional(cmd) ?: return errBytes("state-needs-field")
+        return when (field) {
+            "interactive" -> h.state.interactive()
+            "battery_level" -> h.state.batteryLevel()
+            "battery_charging" -> h.state.batteryCharging()
+            "top" -> h.state.topActivity()
+            "procs" -> h.state.procs()
+            "device" -> h.state.device()
+            "device_fresh" -> h.state.deviceFresh()
+            else -> errBytes("unknown-state-field:$field")
         }
     }
 
@@ -349,7 +338,7 @@ internal class Server(private val h: Handlers) {
                         "code" -> a.code = v.toInt()
                         else -> {}
                     }
-                } catch (ignored: NumberFormatException) {
+                } catch (_: NumberFormatException) {
                 }
             }
             return a
@@ -389,7 +378,7 @@ internal class Server(private val h: Handlers) {
 
                         else -> {}
                     }
-                } catch (ignored: NumberFormatException) {
+                } catch (_: NumberFormatException) {
                 }
             }
             return a
@@ -400,7 +389,7 @@ internal class Server(private val h: Handlers) {
         }
 
         fun errBytes(tail: String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
 
         fun parseFileArgs(cmd: String): FileArgs {
@@ -424,7 +413,7 @@ internal class Server(private val h: Handlers) {
                         "grant" -> a.grant = "0" != v
                         else -> {}
                     }
-                } catch (ignored: NumberFormatException) {
+                } catch (_: NumberFormatException) {
                 }
             }
             return a
@@ -450,7 +439,7 @@ internal class Server(private val h: Handlers) {
                         "f" -> a.flags = Integer.decode(v)
                         else -> {}
                     }
-                } catch (ignored: NumberFormatException) {
+                } catch (_: NumberFormatException) {
                 }
             }
             return a
@@ -488,18 +477,18 @@ internal class Server(private val h: Handlers) {
             val sp = cmd.indexOf(' ')
             if (sp < 0) return dflt
             val tail = cmd.substring(sp + 1)
-            val pat = key + "="
+            val pat = "$key="
             var i = 0
             while ((tail.indexOf(pat, i).also { i = it }) >= 0) {
-                if (i == 0 || Character.isWhitespace(tail.get(i - 1))) {
+                if (i == 0 || Character.isWhitespace(tail[i - 1])) {
                     val start = i + pat.length
-                    if (start < tail.length && tail.get(start) == '"') {
+                    if (start < tail.length && tail[start] == '"') {
                         val end = tail.indexOf('"', start + 1)
                         if (end > 0) return tail.substring(start + 1, end)
                         return dflt
                     }
                     var end = start
-                    while (end < tail.length && !Character.isWhitespace(tail.get(end))) end++
+                    while (end < tail.length && !Character.isWhitespace(tail[end])) end++
                     return tail.substring(start, end)
                 }
                 i += pat.length
@@ -508,18 +497,17 @@ internal class Server(private val h: Handlers) {
         }
 
         fun longArg(cmd: String, key: String?, dflt: Long): Long {
-            val v: String? = strArg(cmd, key)
-            if (v == null) return dflt
-            try {
-                return v.toLong()
-            } catch (nf: NumberFormatException) {
-                return dflt
+            val v: String = strArg(cmd, key) ?: return dflt
+            return try {
+                v.toLong()
+            } catch (_: NumberFormatException) {
+                dflt
             }
         }
 
         /** Same as strArg but works on an arbitrary token string (no command head).  */
         private fun extractKey(tail: String, key: String?): String? {
-            val fakeCmd = "_ " + tail
+            val fakeCmd = "_ $tail"
             return strArg(fakeCmd, key)
         }
 
@@ -530,13 +518,13 @@ internal class Server(private val h: Handlers) {
             var inQuote = false
             val tok = StringBuilder()
             while (i < tail.length) {
-                val c = tail.get(i)
+                val c = tail[i]
                 if (c == '"') inQuote = !inQuote
                 if (Character.isWhitespace(c) && !inQuote) {
                     val t = tok.toString()
-                    if (!t.isEmpty()) {
-                        if (!t.startsWith(key + "=")) {
-                            if (out.length > 0) out.append(' ')
+                    if (t.isNotEmpty()) {
+                        if (!t.startsWith("$key=")) {
+                            if (out.isNotEmpty()) out.append(' ')
                             out.append(t)
                         }
                         tok.setLength(0)
@@ -547,8 +535,8 @@ internal class Server(private val h: Handlers) {
                 i++
             }
             val t = tok.toString()
-            if (!t.isEmpty() && !t.startsWith(key + "=")) {
-                if (out.length > 0) out.append(' ')
+            if (t.isNotEmpty() && !t.startsWith("$key=")) {
+                if (out.isNotEmpty()) out.append(' ')
                 out.append(t)
             }
             return out.toString()
@@ -559,7 +547,7 @@ internal class Server(private val h: Handlers) {
             val sp = cmd.indexOf(' ')
             if (sp < 0) return null
             val tail = cmd.substring(sp + 1).trim { it <= ' ' }
-            return if (tail.isEmpty()) null else tail
+            return tail.ifEmpty { null }
         }
 
         private fun positionalPair(cmd: String): Array<String>? {

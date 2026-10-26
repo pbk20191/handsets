@@ -65,7 +65,7 @@ internal class Location {
         } finally {
             try {
                 p.destroy()
-            } catch (ignored: Throwable) {
+            } catch (_: Throwable) {
             }
         }
 
@@ -109,7 +109,7 @@ internal class Location {
                 if (m.group(1) == key) {
                     try {
                         return m.group(2)!!.toDouble()
-                    } catch (ignored: NumberFormatException) {
+                    } catch (_: NumberFormatException) {
                         return Double.NaN
                     }
                 }
@@ -123,7 +123,7 @@ internal class Location {
         }
 
         private fun err(tail: String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
 }

@@ -42,9 +42,8 @@ internal class NodeActions(private val ua: UiAutomation) {
         // a tapped-to-focus field that has no resource-id without inventing
         // a brittle selector. ACTION_SET_TEXT replaces the field's contents
         // wholesale, so this also covers the "clear before update" case.
-        if (selectorStr == null || selectorStr.isEmpty()) {
-            val target = findInputFocus()
-            if (target == null) return err("no-focused-input")
+        if (selectorStr.isNullOrEmpty()) {
+            val target = findInputFocus() ?: return err("no-focused-input")
             val ok: Boolean
             try {
                 ok = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
@@ -61,7 +60,7 @@ internal class NodeActions(private val ua: UiAutomation) {
             AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
         else
             AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-        return perform(selectorStr, action, null, "scroll_" + dir)
+        return perform(selectorStr, action, null, "scroll_$dir")
     }
 
     /**
@@ -73,18 +72,18 @@ internal class NodeActions(private val ua: UiAutomation) {
      */
     fun pasteAction(selectorStr: String?): ByteArray? {
         val target: AccessibilityNodeInfo?
-        if (selectorStr == null || selectorStr.isEmpty()) {
+        if (selectorStr.isNullOrEmpty()) {
             target = findInputFocus()
             if (target == null) return err("no-focused-input")
         } else {
             val sel: Selector?
             try {
-                sel = Selector.Companion.parse(selectorStr)
+                sel = Selector.parse(selectorStr)
             } catch (e: IllegalArgumentException) {
                 return err("bad-selector:" + e.message)
             }
             target = find(sel)
-            if (target == null) return err("not-found:" + sel)
+            if (target == null) return err("not-found:$sel")
         }
         val ok: Boolean
         try {
@@ -105,22 +104,22 @@ internal class NodeActions(private val ua: UiAutomation) {
      */
     fun imeAction(selectorStr: String?): ByteArray? {
         val target: AccessibilityNodeInfo?
-        if (selectorStr == null || selectorStr.isEmpty()) {
+        if (selectorStr.isNullOrEmpty()) {
             target = findInputFocus()
             if (target == null) return err("no-focused-input")
         } else {
             val sel: Selector?
             try {
-                sel = Selector.Companion.parse(selectorStr)
+                sel = Selector.parse(selectorStr)
             } catch (e: IllegalArgumentException) {
                 return err("bad-selector:" + e.message)
             }
             target = find(sel)
-            if (target == null) return err("not-found:" + sel)
+            if (target == null) return err("not-found:$sel")
         }
         val actionId: Int
         try {
-            actionId = AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId()
+            actionId = AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
         } catch (t: Throwable) {
             // ACTION_IME_ENTER is API 30+. Older devices need to send
             // a KEYCODE_ENTER via the input service instead.
@@ -141,19 +140,13 @@ internal class NodeActions(private val ua: UiAutomation) {
         val windows = ua.getWindows()
         if (windows != null) {
             for (w in windows) {
-                val root = w.getRoot()
-                if (root == null) continue
+                val root = w.root ?: continue
                 val f = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
                 if (f != null) return f
             }
         }
         val root = ua.rootInActiveWindow
         return if (root == null) null else root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-    }
-
-    // ---------- selector-based finder (also reusable by wait_for_text) ----------
-    fun parseSelector(s: String): Selector {
-        return Selector.Companion.parse(s)
     }
 
     /**
@@ -163,7 +156,7 @@ internal class NodeActions(private val ua: UiAutomation) {
      */
     fun find(sel: Selector, scope: String = "all"): AccessibilityNodeInfo? {
         val windows = if (scope == "active") null else ua.windows
-        if (windows == null || windows.isEmpty()) {
+        if (windows.isNullOrEmpty()) {
             val root = ua.rootInActiveWindow
             return if (root == null) null else bfs(root, sel)
         }
@@ -184,20 +177,19 @@ internal class NodeActions(private val ua: UiAutomation) {
     ): ByteArray? {
         val sel: Selector?
         try {
-            sel = Selector.Companion.parse(selectorStr)
+            sel = Selector.parse(selectorStr)
         } catch (e: IllegalArgumentException) {
             return err("bad-selector:" + e.message)
         }
 
-        val n = find(sel)
-        if (n == null) return err("not-found:" + sel)
+        val n = find(sel) ?: return err("not-found:$sel")
         val ok: Boolean
         try {
             ok = n.performAction(action, args)
         } catch (t: Throwable) {
             return err(opName + "-threw:" + t.message)
         }
-        return if (ok) ok("ok " + opName) else err(opName + "-rejected")
+        return if (ok) ok("ok $opName") else err("$opName-rejected")
     }
 
     // ---------- selector model ----------
@@ -221,28 +213,27 @@ internal class NodeActions(private val ua: UiAutomation) {
                 if (t == null || !t.toString().contains(textSub!!)) return false
             }
             if (descExact != null) {
-                val d = n.getContentDescription()
+                val d = n.contentDescription
                 if (d == null || !descExact.contentEquals(d)) return false
             }
             if (descSub != null) {
-                val d = n.getContentDescription()
+                val d = n.contentDescription
                 if (d == null || !d.toString().contains(descSub!!)) return false
             }
             if (idExact != null) {
-                val id = n.getViewIdResourceName()
+                val id = n.viewIdResourceName
                 if (id == null || idExact != id) return false
             }
             if (classExact != null) {
-                val c = n.getClassName()
-                if (c == null) return false
+                val c = n.className ?: return false
                 val s = c.toString()
                 // Allow simple-name match: `EditText` matches
                 // `android.widget.EditText`. Exact-equals path keeps the
                 // unambiguous `class=android.widget.EditText` form working.
-                if (classExact != s && !s.endsWith("." + classExact)) return false
+                if (classExact != s && !s.endsWith(".$classExact")) return false
             }
             if (pkgExact != null) {
-                val p = n.getPackageName()
+                val p = n.packageName
                 if (p == null || !pkgExact.contentEquals(p)) return false
             }
             return true
@@ -257,12 +248,12 @@ internal class NodeActions(private val ua: UiAutomation) {
             if (idExact != null) sb.append(" id=").append(idExact)
             if (classExact != null) sb.append(" class=").append(classExact)
             if (pkgExact != null) sb.append(" pkg=").append(pkgExact)
-            return if (sb.length > 0) sb.substring(1) else ""
+            return if (sb.isNotEmpty()) sb.substring(1) else ""
         }
 
         companion object {
             fun parse(s: String): Selector {
-                require(!(s.isEmpty())) { "empty" }
+                require(s.isNotEmpty()) { "empty" }
                 val sel = Selector()
                 // Split on whitespace but respect quoted values.
                 val toks: MutableList<String> = tokenize(s)
@@ -274,7 +265,7 @@ internal class NodeActions(private val ua: UiAutomation) {
                         sel.classExact = unquote(tok)
                         continue
                     }
-                    val sub = tok.get(eq - 1) == '~'
+                    val sub = tok[eq - 1] == '~'
                     val keyEnd = if (sub) eq - 1 else eq
                     val k = tok.substring(0, keyEnd)
                     val v: String = unquote(tok.substring(eq + 1))
@@ -284,7 +275,7 @@ internal class NodeActions(private val ua: UiAutomation) {
                         "id" -> sel.idExact = v
                         "class" -> sel.classExact = v
                         "pkg" -> sel.pkgExact = v
-                        else -> throw IllegalArgumentException("unknown selector key: " + k)
+                        else -> throw IllegalArgumentException("unknown selector key: $k")
                     }
                 }
                 return sel
@@ -294,13 +285,12 @@ internal class NodeActions(private val ua: UiAutomation) {
 
     companion object {
         private fun bfs(root: AccessibilityNodeInfo?, sel: Selector): AccessibilityNodeInfo? {
-            val q: Deque<AccessibilityNodeInfo> = ArrayDeque<AccessibilityNodeInfo>()
+            val q: Deque<AccessibilityNodeInfo> = ArrayDeque()
             q.add(root)
             while (!q.isEmpty()) {
-                val n = q.removeFirst()
-                if (n == null) continue
+                val n = q.removeFirst() ?: continue
                 if (sel.matches(n)) return n
-                val kids = n.getChildCount()
+                val kids = n.childCount
                 for (i in 0..<kids) {
                     val c = n.getChild(i)
                     if (c != null) q.add(c)
@@ -311,16 +301,16 @@ internal class NodeActions(private val ua: UiAutomation) {
 
         /** Whitespace-split that keeps "quoted strings" together.  */
         private fun tokenize(s: String): MutableList<String> {
-            val out: MutableList<String> = ArrayList<String>()
+            val out: MutableList<String> = ArrayList()
             val cur = StringBuilder()
             var inQuote = false
-            for (i in 0..<s.length) {
-                val c = s.get(i)
+            for (i in s.indices) {
+                val c = s[i]
                 if (c == '"') {
                     inQuote = !inQuote
                     cur.append(c)
                 } else if (Character.isWhitespace(c) && !inQuote) {
-                    if (cur.length > 0) {
+                    if (cur.isNotEmpty()) {
                         out.add(cur.toString())
                         cur.setLength(0)
                     }
@@ -328,12 +318,12 @@ internal class NodeActions(private val ua: UiAutomation) {
                     cur.append(c)
                 }
             }
-            if (cur.length > 0) out.add(cur.toString())
+            if (cur.isNotEmpty()) out.add(cur.toString())
             return out
         }
 
         private fun unquote(v: String): String {
-            if (v.length >= 2 && v.get(0) == '"' && v.get(v.length - 1) == '"') {
+            if (v.length >= 2 && v[0] == '"' && v[v.length - 1] == '"') {
                 return v.substring(1, v.length - 1)
             }
             return v
@@ -344,7 +334,7 @@ internal class NodeActions(private val ua: UiAutomation) {
         }
 
         private fun err(tail: String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
 }

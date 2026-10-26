@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Event-driven refresh of [State]'s device snapshot: a short debounce after
@@ -40,9 +41,9 @@ internal class StateRefresher(private val state: State, private val debounceMs: 
      */
     private suspend fun run() {
         while (true) {
-            val marked = withTimeoutOrNull(heartbeatMs) { marks.receive() } != null
+            val marked = withTimeoutOrNull(heartbeatMs.milliseconds) { marks.receive() } != null
             if (marked) {
-                delay(debounceMs)
+                delay(debounceMs.milliseconds)
                 marks.tryReceive()
             }
             try {

@@ -51,7 +51,7 @@ internal class HsServer(private val port: Int, private val dispatch: Dispatch) {
                 }
                 return
             }
-            val uid = try { socket.peerCredentials.uid } catch (e: IOException) { -1 }
+            val uid = try { socket.peerCredentials.uid } catch (_: IOException) { -1 }
             if (uid !in ALLOWED_UIDS) {
                 Logx.w("refused connection from uid $uid")
                 try { socket.close() } catch (_: Throwable) {}
@@ -59,7 +59,7 @@ internal class HsServer(private val port: Int, private val dispatch: Dispatch) {
             }
             try {
                 nonBlocking(socket.fileDescriptor)
-            } catch (e: ErrnoException) {
+            } catch (_: ErrnoException) {
                 try { socket.close() } catch (_: Throwable) {}
                 continue
             }

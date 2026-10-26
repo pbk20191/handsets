@@ -1,5 +1,6 @@
 package dev.handsets.daemon
 
+import android.annotation.TargetApi
 import android.app.UiAutomation
 import android.content.Context
 import android.content.ContextWrapper
@@ -13,7 +14,6 @@ import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
-import android.media.ImageReader.OnImageAvailableListener
 import android.os.Build
 import android.view.Display
 import dev.handsets.daemon.Binders.systemContext
@@ -32,6 +32,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Fast screenshot via a VirtualDisplay that mirrors the default display into
@@ -45,7 +46,7 @@ import kotlin.math.roundToInt
  * changes (quality, format) are free.
  */
 internal class Screenshot(private val ua: UiAutomation) {
-    private val sourceSize: Point // (0,0) if lookup failed
+    private val sourceSize: Point = lookupSourceSize() // (0,0) if lookup failed
     private val displayManager: DisplayManager? // null if framework init failed
     private var mirrorAvailable = false
     private val mirrorsMutex = Mutex()
@@ -72,7 +73,6 @@ internal class Screenshot(private val ua: UiAutomation) {
     }
 
     init {
-        this.sourceSize = lookupSourceSize()
         var dm: DisplayManager? = null
         try {
             dm = initDisplayManager()
@@ -99,7 +99,7 @@ internal class Screenshot(private val ua: UiAutomation) {
         this.mirrorAvailable = ok
     }
 
-    suspend fun capture(args: CaptureArgs): ByteArray? {
+    suspend fun capture(args: CaptureArgs): ByteArray {
         val longEdge = resolveLongEdge(args)
         val quality: Int = clampQuality(args.quality)
         val png: Boolean = isPng(args.format)
@@ -270,15 +270,15 @@ internal class Screenshot(private val ua: UiAutomation) {
          * dumps on the Work pool.
          */
         private val copier = Loop.scope.launch(Loop.FrameCopy) {
-            for (signal in frameSignals) {
+            while (frameSignals.receiveCatching().isSuccess) {
                 val img = try {
                     reader.acquireLatestImage()
-                } catch (t: Throwable) {
+                } catch (_: Throwable) {
                     null
                 } ?: continue
                 try {
                     absorb(img)
-                } catch (ignored: Throwable) {
+                } catch (_: Throwable) {
                 } finally {
                     img.close()
                 }
@@ -296,7 +296,7 @@ internal class Screenshot(private val ua: UiAutomation) {
             for (l in subscribers) {
                 try {
                     l.onFrame()
-                } catch (ignored: Throwable) {
+                } catch (_: Throwable) {
                 }
             }
         }
@@ -310,13 +310,12 @@ internal class Screenshot(private val ua: UiAutomation) {
          * without CPU usage flags on the reader; closing Image.getFence()
          * ourselves doesn't stop it.
          */
+        @TargetApi(Build.VERSION_CODES.Q)
         private suspend fun absorbHardware(img: Image) {
             val hb = img.hardwareBuffer ?: return
-            val frame = try {
+            val frame = hb.use { hb ->
                 val hw = Bitmap.wrapHardwareBuffer(hb, ColorSpace.get(ColorSpace.Named.SRGB)) ?: return
                 try { hw.copy(Bitmap.Config.ARGB_8888, false) } finally { hw.recycle() }
-            } finally {
-                hb.close()
             } ?: return
             // A fresh bitmap per frame; readers only touch `cached` under
             // frameMutex, so the previous one can be freed right away.
@@ -364,15 +363,15 @@ internal class Screenshot(private val ua: UiAutomation) {
             copier.cancel()
             try {
                 reader.setOnImageAvailableListener(null, null)
-            } catch (ignored: Throwable) {
+            } catch (_: Throwable) {
             }
             try {
                 vd.release()
-            } catch (ignored: Throwable) {
+            } catch (_: Throwable) {
             }
             try {
                 reader.close()
-            } catch (ignored: Throwable) {
+            } catch (_: Throwable) {
             }
             absorbMutex.withLock {
                 frameMutex.withLock {
@@ -408,14 +407,11 @@ internal class Screenshot(private val ua: UiAutomation) {
                     ImageReader.newInstance(outW, outH, PixelFormat.RGBA_8888, 3,
                         HardwareBuffer.USAGE_CPU_READ_OFTEN or HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE)
                 else ImageReader.newInstance(outW, outH, PixelFormat.RGBA_8888, 3)
-
-                var flags: Int
-                try {
-                    flags =
-                        DisplayManager::class.java.getDeclaredField("VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR")
-                            .getInt(null)
-                } catch (t: Throwable) {
-                    flags = 16
+                val flags: Int = try {
+                    DisplayManager::class.java.getDeclaredField("VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR")
+                        .getInt(null)
+                } catch (_: Throwable) {
+                    16
                 }
 
                 // Frame-available callbacks arrive on the main looper; the pixel
@@ -454,14 +450,12 @@ internal class Screenshot(private val ua: UiAutomation) {
                     // for the very first frame but the queue has it.
                     val img = reader.acquireLatestImage()
                     if (img != null) {
-                        try {
+                        img.use { img ->
                             m.absorb(img)
-                        } finally {
-                            img.close()
                         }
                         return m
                     }
-                    delay(15)
+                    delay(15.milliseconds)
                 }
                 return m
             }
@@ -519,7 +513,7 @@ internal class Screenshot(private val ua: UiAutomation) {
                 }
                 chosen += " + wrapper"
             }
-            Logx.i("screenshot: display ctx = $chosen, op=${base.getOpPackageName()}")
+            Logx.i("screenshot: display ctx = $chosen, op=${base.opPackageName}")
             return base.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager?
         }
 
@@ -529,11 +523,11 @@ internal class Screenshot(private val ua: UiAutomation) {
         private fun findSecureWindow(): String? {
             try {
                 val p = Runtime.getRuntime().exec(
-                    arrayOf<String>("dumpsys", "window", "windows")
+                    arrayOf("dumpsys", "window", "windows")
                 )
                 BufferedReader(
                     InputStreamReader(
-                        p.getInputStream(),
+                        p.inputStream,
                         StandardCharsets.UTF_8
                     )
                 ).use { r ->
@@ -553,12 +547,12 @@ internal class Screenshot(private val ua: UiAutomation) {
                                     inside
                             }
                         } else if (t.startsWith("fl=") && containsToken(t, "SECURE")) {
-                            return if (currentWin != null) currentWin else "unknown"
+                            return currentWin ?: "unknown"
                         }
                     }
                 }
                 p.waitFor()
-            } catch (ignored: Throwable) {
+            } catch (_: Throwable) {
             }
             return null
         }
@@ -586,10 +580,10 @@ internal class Screenshot(private val ua: UiAutomation) {
         private fun compressFormat(format: String?): CompressFormat {
             if (isPng(format)) return CompressFormat.PNG
             if ("webp".equals(format, ignoreCase = true)) {
-                try {
-                    return CompressFormat.valueOf("WEBP_LOSSY")
-                } catch (ignored: IllegalArgumentException) {
-                    return CompressFormat.valueOf("WEBP")
+                return try {
+                    CompressFormat.valueOf("WEBP_LOSSY")
+                } catch (_: IllegalArgumentException) {
+                    CompressFormat.valueOf("WEBP")
                 }
             }
             return CompressFormat.JPEG
@@ -611,7 +605,7 @@ internal class Screenshot(private val ua: UiAutomation) {
                 @Suppress("DEPRECATION") // WindowMetrics needs API 30 and a window context
                 d.getRealSize(p)
                 return p
-            } catch (t: Throwable) {
+            } catch (_: Throwable) {
                 return Point(0, 0)
             }
         }

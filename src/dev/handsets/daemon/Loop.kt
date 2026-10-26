@@ -37,12 +37,12 @@ object Loop {
         private set
 
     val Work: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(
-        minOf(4, Runtime.getRuntime().availableProcessors()).coerceAtLeast(2)
+        minOf(4, Runtime.getRuntime().availableProcessors()).coerceAtLeast(2), "work"
     )
 
     val Blocking: CoroutineDispatcher = Dispatchers.IO
 
-    val FrameCopy: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1)
+    val FrameCopy: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1, "frame")
 
     val blockingExecutor: Executor = Blocking.asExecutor()
 

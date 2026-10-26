@@ -55,7 +55,7 @@ internal class Notifications {
             if (whenRaw != null) {
                 try {
                     posted = whenRaw.trim { it <= ' ' }.toLong()
-                } catch (ignored: NumberFormatException) {
+                } catch (_: NumberFormatException) {
                 }
             }
 
@@ -91,7 +91,7 @@ internal class Notifications {
         @Throws(Exception::class)
         private fun runDumpsys(): String {
             val p = Runtime.getRuntime().exec(
-                arrayOf<String>("dumpsys", "notification", "--noredact")
+                arrayOf("dumpsys", "notification", "--noredact")
             )
             val sb = StringBuilder(64 * 1024)
             BufferedReader(
@@ -108,7 +108,7 @@ internal class Notifications {
         /** Slice the dump into per-NotificationRecord blocks, dropping any
          * preamble + the Snoozed/History sections at the bottom.  */
         private fun splitRecords(text: String): MutableList<String> {
-            val out: MutableList<String> = ArrayList<String>()
+            val out: MutableList<String> = ArrayList()
             val active = text.indexOf("Notification List:")
             val from = if (active >= 0) active else 0
             val marker = "NotificationRecord("
@@ -138,7 +138,7 @@ internal class Notifications {
             if (i < 0) return null
             val start = i + prefix.length
             var end = start
-            while (end < block.length && stopChars.indexOf(block.get(end)) < 0) end++
+            while (end < block.length && stopChars.indexOf(block[end]) < 0) end++
             return block.substring(start, end)
         }
 
@@ -147,8 +147,8 @@ internal class Notifications {
          * isn't present or the value is `null`.  */
         private fun extractExtra(block: String, key: String?): String? {
             // Match either `key=String (` or `key=CharSequence (`.
-            var i = block.indexOf("\n                " + key + "=")
-            if (i < 0) i = block.indexOf("                " + key + "=")
+            var i = block.indexOf("\n                $key=")
+            if (i < 0) i = block.indexOf("                $key=")
             if (i < 0) return null
             val lineStart = i + 1 // skip the leading newline if present
             val eq = block.indexOf('=', lineStart)
@@ -159,18 +159,17 @@ internal class Notifications {
             // Look for `(...)` payload.
             val paren = block.indexOf('(', after)
             val lineEnd = block.indexOf('\n', after)
-            if (paren < 0 || (lineEnd >= 0 && paren > lineEnd)) return null
+            if (paren < 0 || (lineEnd in 0..<paren)) return null
             // Balanced-paren extractor — handles parentheses inside the
             // value text. Stop on the matching ')' that closes our '('.
             var depth = 0
-            val from = paren
             for (p in paren..<block.length) {
-                val c = block.get(p)
+                val c = block[p]
                 if (c == '(') depth++
                 else if (c == ')') {
                     depth--
                     if (depth == 0) {
-                        return block.substring(from + 1, p)
+                        return block.substring(paren + 1, p)
                     }
                 }
                 // Bail out if we run into a new extras line.
@@ -188,8 +187,7 @@ internal class Notifications {
             out.append('"')
             val n = s.length
             for (i in 0..<n) {
-                val ch = s.get(i)
-                when (ch) {
+                when (val ch = s[i]) {
                     '\\' -> out.append("\\\\")
                     '"' -> out.append("\\\"")
                     '\n' -> out.append("\\n")
@@ -208,7 +206,7 @@ internal class Notifications {
         }
 
         private fun err(tail: String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
 }

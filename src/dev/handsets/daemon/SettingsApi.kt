@@ -36,7 +36,7 @@ internal class SettingsApi(ctx: Context) {
                 else -> return err("bad-namespace:$namespace")
             }
             if (v != null) return v.toByteArray(StandardCharsets.UTF_8)
-        } catch (ignored: Throwable) {
+        } catch (_: Throwable) {
         }
         // Last resort: spawn the settings binary.
         return execFallback("get", namespace, key, null)
@@ -47,26 +47,24 @@ internal class SettingsApi(ctx: Context) {
             return "ok".toByteArray(StandardCharsets.UTF_8)
         }
         try {
-            val ok: Boolean
-            when (namespace.lowercase(Locale.getDefault())) {
-                "system" -> ok = Settings.System.putString(cr, key, value)
-                "secure" -> ok = Settings.Secure.putString(cr, key, value)
-                "global" -> ok = Settings.Global.putString(cr, key, value)
+            val ok: Boolean = when (namespace.lowercase(Locale.getDefault())) {
+                "system" -> Settings.System.putString(cr, key, value)
+                "secure" -> Settings.Secure.putString(cr, key, value)
+                "global" -> Settings.Global.putString(cr, key, value)
                 else -> return err("bad-namespace:$namespace")
             }
             if (ok) return "ok".toByteArray(StandardCharsets.UTF_8)
-        } catch (ignored: Throwable) {
+        } catch (_: Throwable) {
         }
         return execFallback("put", namespace, key, value)
     }
 
     private fun execFallback(op: String?, ns: String?, key: String?, value: String?): ByteArray {
         try {
-            val pb: ProcessBuilder?
-            if ("get" == op) {
-                pb = ProcessBuilder("/system/bin/settings", "get", ns, key)
+            val pb = if ("get" == op) {
+                ProcessBuilder("/system/bin/settings", "get", ns, key)
             } else {
-                pb = ProcessBuilder(
+                ProcessBuilder(
                     "/system/bin/settings", "put", ns, key,
                     value ?: ""
                 )

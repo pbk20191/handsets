@@ -2,7 +2,6 @@ package dev.handsets.daemon
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.nio.charset.StandardCharsets
@@ -96,7 +95,7 @@ internal class Dispatch(
             if (tok.startsWith("sizes=")) {
                 sizes = try {
                     tok.substring("sizes=".length).split(",").map { it.toLong() }.toLongArray()
-                } catch (e: NumberFormatException) {
+                } catch (_: NumberFormatException) {
                     return Server.errBytes("install_multi-bad-sizes")
                 }
             }

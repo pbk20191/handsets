@@ -33,35 +33,35 @@ internal class Am(private val ctx: Context) {
             if (cn == null && component != null && component.indexOf('/') < 0) {
                 // Bare package name — resolve the launcher activity the same
                 // way `monkey -p pkg 1` and Launcher.startActivity do.
-                val launch = ctx.getPackageManager().getLaunchIntentForPackage(component)
-                if (launch != null) cn = launch.getComponent()
+                val launch = ctx.packageManager.getLaunchIntentForPackage(component)
+                if (launch != null) cn = launch.component
                 if (cn == null) {
                     // No package matched. Try the user-visible label as the
                     // last fallback so `hs open "Chrome"` works alongside
                     // `hs open com.android.chrome`.
                     val hits = findByLabel(component)
                     if (hits.size == 1) {
-                        val a = hits.get(0)!!.activityInfo
+                        val a = hits[0]!!.activityInfo
                         cn = ComponentName(a.packageName, a.name)
                     } else if (hits.size > 1) {
                         val pkgs = StringBuilder()
                         for (i in hits.indices) {
                             if (i > 0) pkgs.append(',')
-                            pkgs.append(hits.get(i)!!.activityInfo.packageName)
+                            pkgs.append(hits[i]!!.activityInfo.packageName)
                         }
                         return err(
                             ("AMBIGUOUS_LABEL:" + component + ":" + pkgs
                                     + " — use the package id (e.g. "
-                                    + hits.get(0)!!.activityInfo.packageName + ")")
+                                    + hits[0]!!.activityInfo.packageName + ")")
                         )
                     }
                 }
             }
-            if (cn == null) return err("bad-component:" + component)
+            if (cn == null) return err("bad-component:$component")
             val intent = Intent()
             intent.setComponent(cn)
-            if (action != null && !action.isEmpty()) intent.setAction(action)
-            if (data != null && !data.isEmpty()) intent.setData(Uri.parse(data))
+            if (!action.isNullOrEmpty()) intent.setAction(action)
+            if (!data.isNullOrEmpty()) intent.setData(Uri.parse(data))
             intent.addFlags(flags or Intent.FLAG_ACTIVITY_NEW_TASK)
             // Use IActivityTaskManager.startActivityAsUser (Q+) or
             // IActivityManager.startActivityAsUser (pre-Q). The shell UID is
@@ -70,7 +70,7 @@ internal class Am(private val ctx: Context) {
             val result = startActivityViaBinder(intent)
             return ok("ok started=" + cn.flattenToShortString() + " result=" + result)
         } catch (ite: InvocationTargetException) {
-            val cause: Throwable = (if (ite.cause != null) ite.cause else ite)!!
+            val cause: Throwable = (ite.cause ?: ite)
             return err("start-failed:" + cause.javaClass.getSimpleName() + ":" + cause.message)
         } catch (t: Throwable) {
             return err("start-failed:" + t.javaClass.getSimpleName() + ":" + t.message)
@@ -87,21 +87,20 @@ internal class Am(private val ctx: Context) {
     @Throws(Exception::class)
     private fun startActivityViaBinder(intent: Intent?): Int {
         // Try IActivityTaskManager first (Q+), then IActivityManager.
-        val candidates = arrayOf<Any?>(
+        val candidates = arrayOf(
             iActivityTaskManagerOrNull(),
             iActivityManager(),
         )
         var last: Throwable? = null
         for (svc in candidates) {
             if (svc == null) continue
-            val m: Method? = findStartActivityAsUser(svc.javaClass)
-            if (m == null) continue
+            val m: Method = findStartActivityAsUser(svc.javaClass) ?: continue
             try {
                 val args: Array<Any?> = buildStartArgs(m, intent)
                 val ret = m.invoke(svc, *args)
-                return if (ret is Int) ret else 0
+                return ret as? Int ?: 0
             } catch (ite: InvocationTargetException) {
-                last = if (ite.cause != null) ite.cause else ite
+                last = ite.cause ?: ite
             }
         }
         if (last is Exception) throw last
@@ -120,9 +119,9 @@ internal class Am(private val ctx: Context) {
             )
             val userId = myUserId()
             m.invoke(iam, pkg, userId)
-            return ok("ok force-stop=" + pkg)
+            return ok("ok force-stop=$pkg")
         } catch (ite: InvocationTargetException) {
-            val cause: Throwable = (if (ite.cause != null) ite.cause else ite)!!
+            val cause: Throwable = (ite.cause ?: ite)
             return err("force-stop-failed:" + cause.javaClass.getSimpleName() + ":" + cause.message)
         } catch (t: Throwable) {
             return err("force-stop-threw:" + t.javaClass.getSimpleName() + ":" + t.message)
@@ -133,7 +132,7 @@ internal class Am(private val ctx: Context) {
         try {
             val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
             am.killBackgroundProcesses(pkg)
-            return ok("ok kill=" + pkg)
+            return ok("ok kill=$pkg")
         } catch (t: Throwable) {
             return err("kill-failed:" + t.javaClass.getSimpleName() + ":" + t.message)
         }
@@ -141,19 +140,19 @@ internal class Am(private val ctx: Context) {
 
     fun broadcast(action: String?, component: String?, data: String?): ByteArray {
         try {
-            if ((action == null || action.isEmpty()) && (component == null || component.isEmpty())) {
+            if (action.isNullOrEmpty() && component.isNullOrEmpty()) {
                 return err("broadcast-needs-action-or-component")
             }
             val intent = Intent()
-            if (action != null && !action.isEmpty()) intent.setAction(action)
-            if (data != null && !data.isEmpty()) intent.setData(Uri.parse(data))
-            if (component != null && !component.isEmpty()) {
-                val cn: ComponentName? = parseComponent(component)
-                if (cn == null) return err("bad-component:" + component)
+            if (!action.isNullOrEmpty()) intent.setAction(action)
+            if (!data.isNullOrEmpty()) intent.setData(Uri.parse(data))
+            if (!component.isNullOrEmpty()) {
+                val cn: ComponentName =
+                    parseComponent(component) ?: return err("bad-component:$component")
                 intent.setComponent(cn)
             }
             ctx.sendBroadcast(intent)
-            return ok("ok broadcast=" + (if (action != null) action else component))
+            return ok("ok broadcast=" + (action ?: component))
         } catch (t: Throwable) {
             return err("broadcast-failed:" + t.javaClass.getSimpleName() + ":" + t.message)
         }
@@ -164,9 +163,9 @@ internal class Am(private val ctx: Context) {
      * activities so a label collision with a non-app package — system
      * providers, overlays — doesn't poison the resolution.  */
     private fun findByLabel(label: String?): MutableList<ResolveInfo?> {
-        val out: MutableList<ResolveInfo?> = ArrayList<ResolveInfo?>()
-        if (label == null || label.isEmpty()) return out
-        val pm = ctx.getPackageManager()
+        val out: MutableList<ResolveInfo?> = ArrayList()
+        if (label.isNullOrEmpty()) return out
+        val pm = ctx.packageManager
         val probe = Intent(Intent.ACTION_MAIN)
         probe.addCategory(Intent.CATEGORY_LAUNCHER)
         val launchers = pm.queryIntentActivities(probe, 0)
@@ -176,7 +175,7 @@ internal class Am(private val ctx: Context) {
                 if (label.equals(l.toString(), ignoreCase = true)) {
                     out.add(ri)
                 }
-            } catch (ignored: Throwable) {
+            } catch (_: Throwable) {
             }
         }
         return out
@@ -187,8 +186,8 @@ internal class Am(private val ctx: Context) {
             var best: Method? = null
             var bestParams = -1
             for (m in cls.getMethods()) {
-                if ("startActivityAsUser" != m.getName()) continue
-                if (m.getReturnType() != Int::class.javaPrimitiveType) continue
+                if ("startActivityAsUser" != m.name) continue
+                if (m.returnType != Int::class.javaPrimitiveType) continue
                 val p = m.getParameterTypes()
                 // Canonical shape: (IApplicationThread, String, [String featureId,] Intent, ...
                 // int userId). The 4th param is Intent on Q+; the 3rd on older surfaces.
@@ -199,7 +198,7 @@ internal class Am(private val ctx: Context) {
                         break
                     }
                 }
-                if (intentIdx < 2 || intentIdx > 3) continue
+                if (intentIdx !in 2..3) continue
                 if (p[p.size - 1] != Int::class.javaPrimitiveType) continue
                 if (p.size > bestParams) {
                     best = m
@@ -211,7 +210,7 @@ internal class Am(private val ctx: Context) {
 
         private fun buildStartArgs(m: Method, intent: Intent?): Array<Any?> {
             val p = m.getParameterTypes()
-            val args: MutableList<Any?> = ArrayList<Any?>(p.size)
+            val args: MutableList<Any?> = ArrayList(p.size)
             var intentIdx = -1
             for (i in p.indices) {
                 if (p[i] == Intent::class.java) {
@@ -251,8 +250,8 @@ internal class Am(private val ctx: Context) {
             if (slash <= 0 || slash >= s.length - 1) return null
             val pkg = s.substring(0, slash)
             var cls = s.substring(slash + 1)
-            if (cls.get(0) == '.') cls = pkg + cls
-            else if (cls.indexOf('.') < 0) cls = pkg + "." + cls
+            if (cls[0] == '.') cls = pkg + cls
+            else if (cls.indexOf('.') < 0) cls = "$pkg.$cls"
             return ComponentName(pkg, cls)
         }
 
@@ -261,7 +260,7 @@ internal class Am(private val ctx: Context) {
         }
 
         private fun err(tail: String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
 }

@@ -124,7 +124,7 @@ class Conn(private val socket: LocalSocket) {
             } catch (e: ErrnoException) {
                 if (e.errno != OsConstants.EAGAIN) return
             }
-            suspendCancellableCoroutine<Unit> { c ->
+            suspendCancellableCoroutine { c ->
                 readWaiter = c
                 updateInterest()
                 c.invokeOnCancellation { if (readWaiter === c) { readWaiter = null; updateInterest() } }
@@ -161,7 +161,7 @@ class Conn(private val socket: LocalSocket) {
             } catch (e: ErrnoException) {
                 if (e.errno != OsConstants.EAGAIN) return false
             }
-            suspendCancellableCoroutine<Unit> { c ->
+            suspendCancellableCoroutine { c ->
                 readWaiter = c
                 updateInterest()
                 c.invokeOnCancellation { if (readWaiter === c) readWaiter = null }
@@ -212,7 +212,7 @@ class Conn(private val socket: LocalSocket) {
     private suspend fun awaitBelow(limit: Long) {
         while (outBytes > limit || (limit == 0L && latest.isNotEmpty())) {
             if (closed) throw EOFException()
-            suspendCancellableCoroutine<Unit> { c ->
+            suspendCancellableCoroutine { c ->
                 writeWaiters.add(c)
                 c.invokeOnCancellation { writeWaiters.remove(c) }
             }
@@ -234,7 +234,7 @@ class Conn(private val socket: LocalSocket) {
             } catch (e: ErrnoException) {
                 if (e.errno == OsConstants.EAGAIN) break
                 close(); return
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 close(); return
             }
             outHead += n

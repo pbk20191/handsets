@@ -35,7 +35,7 @@ internal class Pm(private val ctx: Context) {
                 if (s != p.packageName) {
                     label = s.replace('\t', ' ').replace('\n', ' ')
                 }
-            } catch (ignored: Throwable) {
+            } catch (_: Throwable) {
             }
             sb.append(p.packageName)
                 .append('\t')
@@ -52,7 +52,7 @@ internal class Pm(private val ctx: Context) {
             val ai = ctx.packageManager.getApplicationInfo(pkg, 0)
             val src = ai.sourceDir ?: return err("no-sourceDir:$pkg")
             return src.toByteArray(StandardCharsets.UTF_8)
-        } catch (e: PackageManager.NameNotFoundException) {
+        } catch (_: PackageManager.NameNotFoundException) {
             return err("not-found:$pkg")
         }
     }

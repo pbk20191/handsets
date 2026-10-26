@@ -23,7 +23,7 @@ object Traverse {
                 out.append("null,")
             } else {
                 writeFields(n, out)
-                val cc = n.getChildCount()
+                val cc = n.childCount
                 if (cc > 0) {
                     out.key("children").beginArr()
                     open.addLast(Open(n, cc))
@@ -52,44 +52,42 @@ object Traverse {
     private fun writeFields(n: AccessibilityNodeInfo, out: JsonOut) {
         out.beginObj()
 
-        val cls = n.getClassName()
+        val cls = n.className
         if (cls != null) out.str("cls", cls)
 
-        val pkg = n.getPackageName()
+        val pkg = n.packageName
         if (pkg != null) out.str("pkg", pkg)
 
-        val rid = n.getViewIdResourceName()
-        if (rid != null && !rid.isEmpty()) out.str("rid", rid)
+        val rid = n.viewIdResourceName
+        if (rid != null && rid.isNotEmpty()) out.str("rid", rid)
 
         val text = n.getText()
-        if (text != null && text.length > 0) out.str("text", text)
+        if (text != null && text.isNotEmpty()) out.str("text", text)
 
-        val desc = n.getContentDescription()
-        if (desc != null && desc.length > 0) out.str("desc", desc)
+        val desc = n.contentDescription
+        if (desc != null && desc.isNotEmpty()) out.str("desc", desc)
 
-        if (Build.VERSION.SDK_INT >= 26) {
-            val hint = n.getHintText()
-            if (hint != null && hint.length > 0) out.str("hint", hint)
-        }
+        val hint = n.hintText
+        if (hint != null && hint.isNotEmpty()) out.str("hint", hint)
 
         val b = TMP_RECT
         n.getBoundsInScreen(b)
         out.rect("bounds", b.left, b.top, b.right, b.bottom)
 
         val flags = StringBuilder(8)
-        if (n.isClickable()) flags.append('c')
-        if (n.isLongClickable()) flags.append('L')
-        if (n.isScrollable()) flags.append('s')
-        if (n.isCheckable()) flags.append('k')
+        if (n.isClickable) flags.append('c')
+        if (n.isLongClickable) flags.append('L')
+        if (n.isScrollable) flags.append('s')
+        if (n.isCheckable) flags.append('k')
         @Suppress("DEPRECATION") // getChecked() is API 36; min API is 28
-        if (n.isChecked()) flags.append('K')
-        if (n.isFocusable()) flags.append('f')
-        if (n.isFocused()) flags.append('F')
-        if (n.isEnabled()) flags.append('e')
-        if (n.isSelected()) flags.append('S')
-        if (n.isPassword()) flags.append('p')
-        if (n.isVisibleToUser()) flags.append('v')
-        if (flags.length > 0) out.str("flags", flags)
+        if (n.isChecked) flags.append('K')
+        if (n.isFocusable) flags.append('f')
+        if (n.isFocused) flags.append('F')
+        if (n.isEnabled) flags.append('e')
+        if (n.isSelected) flags.append('S')
+        if (n.isPassword) flags.append('p')
+        if (n.isVisibleToUser) flags.append('v')
+        if (flags.isNotEmpty()) out.str("flags", flags)
     }
 
     private fun getChildSafe(n: AccessibilityNodeInfo, i: Int): AccessibilityNodeInfo? {
@@ -98,7 +96,7 @@ object Traverse {
                 return n.getChild(i, PREFETCH)
             }
             return n.getChild(i)
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
             return null
         }
     }
@@ -109,13 +107,13 @@ object Traverse {
             return AccessibilityNodeInfo::class.java
                 .getField("FLAG_PREFETCH_DESCENDANTS_HYBRID")
                 .getInt(null)
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
             // Older constant (API 16+); takes effect via internal client.
             try {
                 return AccessibilityNodeInfo::class.java
                     .getField("FLAG_PREFETCH_DESCENDANTS")
                     .getInt(null)
-            } catch (t2: Throwable) {
+            } catch (_: Throwable) {
                 return -1
             }
         }

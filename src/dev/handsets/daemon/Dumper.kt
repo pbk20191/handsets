@@ -53,11 +53,11 @@ class Dumper(private val ua: UiAutomation) {
     private fun writeWindow(w: AccessibilityWindowInfo?, out: JsonOut) {
         if (w == null) return
         out.beginObj()
-        out.num("id", w.getId().toLong())
-        out.num("type", w.getType().toLong())
-        out.bool("active", w.isActive())
-        out.bool("focused", w.isFocused())
-        out.num("layer", w.getLayer().toLong())
+        out.num("id", w.id.toLong())
+        out.num("type", w.type.toLong())
+        out.bool("active", w.isActive)
+        out.bool("focused", w.isFocused)
+        out.num("layer", w.layer.toLong())
 
         val r = Rect()
         w.getBoundsInScreen(r)
@@ -65,8 +65,8 @@ class Dumper(private val ua: UiAutomation) {
 
         var root: AccessibilityNodeInfo? = null
         try {
-            root = w.getRoot()
-        } catch (t: Throwable) {
+            root = w.root
+        } catch (_: Throwable) {
             // some windows aren't accessible to the shell uid
         }
         out.key("root")

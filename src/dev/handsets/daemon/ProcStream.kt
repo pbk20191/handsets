@@ -95,7 +95,7 @@ internal class ProcStream(private val clip: Clipboard) {
         // stdout+stderr go into a pipe we own (via /proc/self/fd/N): the stream
         // ProcessBuilder hands out is drained and closed by its reaper thread on
         // exit, so its fd can't be read from the looper.
-        val pipe = try { Os.pipe() } catch (e: ErrnoException) { null }
+        val pipe = try { Os.pipe() } catch (_: ErrnoException) { null }
         val wfdNum = pipe?.let { fdInt(it[1]) }
         val p = try {
             withContext(Loop.Work) {
@@ -160,7 +160,7 @@ internal class ProcStream(private val clip: Clipboard) {
         }
     }
 
-    private suspend fun awaitReadable(fd: FileDescriptor) = suspendCancellableCoroutine<Unit> { k ->
+    private suspend fun awaitReadable(fd: FileDescriptor) = suspendCancellableCoroutine { k ->
         // Resume via post: resuming inline would re-watch this fd inside its own
         // callback, and the 0 returned here would then unregister it natively.
         Io.watch(fd, Io.IN or Io.ERR) { Loop.post { if (k.isActive) k.resume(Unit) }; 0 }
@@ -181,7 +181,7 @@ internal class ProcStream(private val clip: Clipboard) {
         fun split(tail: String?): List<String> = if (tail.isNullOrEmpty()) emptyList() else tail.split(WS)
 
         fun fdInt(fd: FileDescriptor): Int? = try {
-            FileDescriptor::class.java.getDeclaredMethod("getInt\$").invoke(fd) as Int
+            FileDescriptor::class.java.getDeclaredMethod($$"getInt$").invoke(fd) as Int
         } catch (_: Throwable) {
             null
         }

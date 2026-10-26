@@ -25,7 +25,7 @@ internal class Wm(private val dm: DisplayManager) {
             d.getRealSize(size)
             val dmx = DisplayMetrics()
             d.getRealMetrics(dmx)
-            val rot = d.getRotation()
+            val rot = d.rotation
             val json = ("{\"width\":" + size.x
                     + ",\"height\":" + size.y
                     + ",\"density\":" + dmx.densityDpi
@@ -42,13 +42,13 @@ internal class Wm(private val dm: DisplayManager) {
     fun setRotation(rotation: Int): ByteArray {
         try {
             val iwm = asInterface(
-                "android.view.IWindowManager\$Stub", service("window")
+                $$"android.view.IWindowManager$Stub", service("window")
             )
             // freezeRotation(int) is the long-stable shape; newer surfaces add
             // a String caller. Try both.
             var best: Method? = null
             for (m in iwm!!.javaClass.getMethods()) {
-                if ("freezeRotation" != m.getName()) continue
+                if ("freezeRotation" != m.name) continue
                 val p = m.getParameterTypes()
                 if (p.size >= 1 && p[0] == Int::class.javaPrimitiveType && (best == null || p.size < best.getParameterTypes().size)) {
                     best = m
@@ -65,9 +65,9 @@ internal class Wm(private val dm: DisplayManager) {
                 else args[i] = null
             }
             best.invoke(iwm, *args)
-            return ok("ok rotation=" + rotation)
+            return ok("ok rotation=$rotation")
         } catch (ite: InvocationTargetException) {
-            val c: Throwable = (if (ite.cause != null) ite.cause else ite)!!
+            val c: Throwable = (ite.cause ?: ite)
             return err("rotation-failed:" + c.javaClass.getSimpleName() + ":" + c.message)
         } catch (t: Throwable) {
             return err("rotation-threw:" + t.javaClass.getSimpleName() + ":" + t.message)
@@ -80,7 +80,7 @@ internal class Wm(private val dm: DisplayManager) {
         }
 
         private fun err(tail: String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
 }
