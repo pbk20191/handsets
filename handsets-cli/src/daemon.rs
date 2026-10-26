@@ -257,6 +257,15 @@ fn ping_daemon(port: u16) -> io::Result<()> {
 
 pub(crate) fn disconnect(opts: &DisconnectOpts) -> io::Result<()> {
     let serial = resolve_serial(opts.serial.as_deref())?;
+    // Every step below ignores adb failures, so an unknown serial would
+    // otherwise "succeed" without touching anything.
+    if opts.serial.is_some() {
+        let listing = adb_ok(None, &["devices"], "adb devices")?;
+        if !is_listed(&listing, &serial) {
+            return Err(io::Error::other(format!(
+                "--device {serial}: not attached — check `adb devices`")));
+        }
+    }
     // 1. Kill the host-side state watcher(s) for any forward this device owns.
     if let Ok(forwards) = list_forwards() {
         for f in forwards.iter().filter(|f| f.serial == serial) {
@@ -397,6 +406,12 @@ fn list_forwards() -> io::Result<Vec<ForwardEntry>> {
 
 /// If no serial is specified and exactly one device is attached, use it.
 /// Otherwise error out so the user picks.
+/// Whether `adb devices` output lists `serial`, in any state (offline and
+/// unauthorized devices still own forwards worth removing).
+fn is_listed(listing: &str, serial: &str) -> bool {
+    listing.lines().skip(1).any(|l| l.split_whitespace().next() == Some(serial))
+}
+
 fn resolve_serial(explicit: Option<&str>) -> io::Result<String> {
     if let Some(s) = explicit { return Ok(s.to_string()); }
     let listing = adb_ok(None, &["devices"], "adb devices")?;
@@ -588,4 +603,18 @@ fn adb_server_list_forwards() -> io::Result<Vec<ForwardEntry>> {
         out.push(ForwardEntry { serial, host_spec: host, remote_spec: remote });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_listed;
+
+    #[test]
+    fn is_listed_matches_whole_serials_in_any_state() {
+        let listing = "List of devices attached\nemulator-5554\tdevice\nR58M\toffline\n\n";
+        assert!(is_listed(listing, "emulator-5554"));
+        assert!(is_listed(listing, "R58M"));
+        assert!(!is_listed(listing, "emulator-555"));
+        assert!(!is_listed(listing, "List"));
+    }
 }

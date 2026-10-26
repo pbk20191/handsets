@@ -387,10 +387,11 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         i += 1;
     }
 
-    // During `use`, `--device SERIAL` selects the ADB device to bootstrap.
-    // Other verbs use it to route to a daemon that `hs use` already started.
-    let is_use = positional.first() == Some(&"use");
-    if !is_use {
+    // During `use` and `drop`, `--device SERIAL` selects the ADB device to
+    // bootstrap or tear down. Other verbs use it to route to a daemon that
+    // `hs use` already started.
+    let selects_device = matches!(positional.first(), Some(&"use") | Some(&"drop"));
+    if !selects_device {
         if let Some(serial) = device_serial.as_deref() {
             match resolve_device_port(serial) {
                 Ok(p) => port = p,
@@ -416,7 +417,13 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
             }
             Cmd::Connect(connect)
         }
-        Some((&"drop", rest)) => Cmd::Disconnect(parse_drop(rest)?),
+        Some((&"drop", rest)) => {
+            let mut drop = parse_drop(rest)?;
+            if device_serial.is_some() {
+                drop.serial = device_serial;
+            }
+            Cmd::Disconnect(drop)
+        }
 
         // ─── See — capture by extension, bare = viewer ───────────────
         Some((&"see", rest)) => Cmd::See(parse_see(rest)?),
@@ -2447,6 +2454,21 @@ mod parse_use_tests {
         assert!(matches!(parse(&["tui"]), Ok(Cmd::Tui { active: false })));
         assert!(matches!(parse(&["tui", "--active"]), Ok(Cmd::Tui { active: true })));
         assert!(parse(&["tui", "--bogus"]).is_err());
+    }
+
+    #[test]
+    fn global_device_selects_the_device_to_drop() {
+        let parse = |args: &[&str]| {
+            let args = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+            parse_args(&args).map(|opts| opts.cmd)
+        };
+        // Must not need a forwarded daemon: drop also cleans up dead ones.
+        for args in [&["--device", "NOT_ATTACHED", "drop"][..], &["drop", "--device", "NOT_ATTACHED"]] {
+            match parse(args) {
+                Ok(Cmd::Disconnect(d)) => assert_eq!(d.serial.as_deref(), Some("NOT_ATTACHED")),
+                other => panic!("expected disconnect, got {other:?}"),
+            }
+        }
     }
 
     #[test]
