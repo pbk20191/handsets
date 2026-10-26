@@ -56,6 +56,10 @@ pub struct ActionFlags {
     /// mode (which never caches); meaningful inside `hs run` / `hs shell`.
     pub fresh: bool,
 
+    /// Look only at the focused window. By default lookups cover every
+    /// app window, so dialogs, popups and bottom sheets are found too.
+    pub active_window: bool,
+
     /// Output format override. `None` lets the global default win.
     pub out_fmt: Option<OutFmt>,
 }
@@ -72,12 +76,18 @@ impl Default for ActionFlags {
             require_unique: false,
             nth: None,
             fresh: false,
+            active_window: false,
             out_fmt: None,
         }
     }
 }
 
 impl ActionFlags {
+    /// The daemon dump a lookup reads (see `active_window`).
+    pub fn dump_wire(&self) -> &'static str {
+        if self.active_window { "dump_active" } else { "dump" }
+    }
+
     /// Extract recognised flags from `rest` into `self`; return the
     /// surviving positional tokens for the caller to interpret.
     pub fn take<'a>(&mut self, rest: &[&'a str]) -> Result<Vec<&'a str>, String> {
@@ -113,6 +123,7 @@ impl ActionFlags {
                     self.nth = Some(n);
                 }
                 "--fresh"     => self.fresh = true,
+                "--active"    => self.active_window = true,
                 "--json"      => self.out_fmt = Some(OutFmt::Json),
                 "--no-json"   => self.out_fmt = Some(OutFmt::Human),
                 other => positional.push(other),
@@ -159,6 +170,14 @@ mod tests {
         assert_eq!(pos, vec!["foo", "bar"]);
         assert_eq!(f.timeout_ms, Some(500));
         assert_eq!(f.retries, 3);
+    }
+
+    #[test]
+    fn active_limits_lookups_to_the_focused_window() {
+        let mut f = ActionFlags::default();
+        assert_eq!(f.dump_wire(), "dump");
+        assert!(f.take(&["OK", "--active"]).unwrap() == vec!["OK"]);
+        assert_eq!(f.dump_wire(), "dump_active");
     }
 
     #[test]

@@ -413,10 +413,12 @@ pub(crate) struct MatchCtx<'a> {
 
 impl<'a> MatchCtx<'a> {
     pub fn new(dump: &'a Value) -> Self {
-        Self {
-            roots: collect_roots(dump),
-            parent: std::cell::OnceCell::new(),
-        }
+        Self::from_roots(collect_roots(dump))
+    }
+
+    /// Match over the given window roots only, in that order.
+    pub fn from_roots(roots: Vec<&'a Value>) -> Self {
+        Self { roots, parent: std::cell::OnceCell::new() }
     }
 
     /// Build (or fetch) the parent-pointer map needed by `:in()`.

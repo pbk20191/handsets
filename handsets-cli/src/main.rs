@@ -1110,15 +1110,15 @@ fn run_type_focused(opts: &Opts, text: &str, flags: &flags::ActionFlags) -> io::
 
 /// `hs fill` accepts both grammars. Any selector containing `=` is treated
 /// as daemon-grammar (`id=…`, `class=EditText text~=…`) and passed through
-/// unchanged. Bare strings are free-text queries: dump the active window,
-/// find the best-matching input widget, then rebuild a daemon selector
+/// unchanged. Bare strings are free-text queries: dump the app's windows
+/// (the focused one with `--active`), find the best-matching input widget, then rebuild a daemon selector
 /// (preferring `id=<full-rid>`, falling back to class + exact text) so the
 /// daemon's narrower parser can still resolve it.
-fn resolve_fill_selector(conn: &mut Conn, sel_in: &str) -> io::Result<String> {
+fn resolve_fill_selector(conn: &mut Conn, sel_in: &str, flags: &flags::ActionFlags) -> io::Result<String> {
     if sel_in.contains('=') {
         return Ok(sel_in.to_string());
     }
-    let body = conn.call("dump_active")?;
+    let body = conn.call(flags.dump_wire())?;
     if errors::parse_err(&body).is_some() {
         // Couldn't read the tree — fall through and let the daemon error.
         return Ok(sel_in.to_string());
@@ -1127,9 +1127,9 @@ fn resolve_fill_selector(conn: &mut Conn, sel_in: &str) -> io::Result<String> {
         .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
     let dump = json::parse(text)
         .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
-    let root = json::obj_get(&dump, "root").unwrap_or(&dump);
+    let roots: Vec<&json::Value> = json::app_roots(&dump).into_iter().rev().collect();
 
-    match find_fill_target(root, sel_in) {
+    match find_fill_target(&roots, sel_in) {
         Some(node) => Ok(node_to_daemon_selector(node)),
         None => Err(io::Error::other(format!(
             "fill: no input widget matched {sel_in:?} — pass an explicit \
@@ -1177,26 +1177,31 @@ fn fill_priority(q: &str, q_low: &str, text: &str, desc: &str, hint: &str) -> Op
     None
 }
 
-fn find_fill_target<'a>(root: &'a json::Value, query: &str) -> Option<&'a json::Value> {
+/// `roots` are window roots, topmost first; on equal rank the upper
+/// window's input wins.
+fn find_fill_target<'a>(roots: &[&'a json::Value], query: &str) -> Option<&'a json::Value> {
     let q_low = query.to_lowercase();
 
     // Phase 1: prefer an input widget whose own text/desc/hint matches.
     // Empty EditTexts surface their hint as `text` in the dump, so this
     // catches the common "fill the field whose placeholder mentions X" case.
     let mut best: Option<(u8, &json::Value)> = None;
-    find_input_match(root, query, &q_low, &mut best);
+    for root in roots { find_input_match(root, query, &q_low, &mut best); }
     if let Some((_, n)) = best { return Some(n); }
 
     // Phase 2: label-anchored — find any node matching the query, then
     // take the nearest input widget below or right-of it. Mirrors how a
     // human reads a form: label on the left or above, field next to it.
-    let mut labels: Vec<&json::Value> = Vec::new();
-    collect_labels(root, &q_low, &mut labels);
-    for label in labels {
-        let Some(lb) = selector::bounds(label) else { continue; };
-        let mut nearest: Option<(i64, &json::Value)> = None;
-        find_nearest_input(root, lb, &mut nearest);
-        if let Some((_, n)) = nearest { return Some(n); }
+    // The field is looked for in the label's own window.
+    for root in roots {
+        let mut labels: Vec<&json::Value> = Vec::new();
+        collect_labels(root, &q_low, &mut labels);
+        for label in labels {
+            let Some(lb) = selector::bounds(label) else { continue; };
+            let mut nearest: Option<(i64, &json::Value)> = None;
+            find_nearest_input(root, lb, &mut nearest);
+            if let Some((_, n)) = nearest { return Some(n); }
+        }
     }
     None
 }
@@ -1272,7 +1277,7 @@ fn run_type_into(
     // Selectors with no `=` are free-text queries: look up the best
     // matching EditText in the live dump and rebuild a daemon-grammar
     // selector for it. Mirrors `hs tap "TEXT"`.
-    let resolved = resolve_fill_selector(&mut conn, selector)?;
+    let resolved = resolve_fill_selector(&mut conn, selector, flags)?;
     let mut attempts = flags.total_attempts();
     loop {
         // Daemon wire command: node_set_text <selector> value="..."
@@ -1476,7 +1481,7 @@ fn run_find(
             errors::ErrInfo::new(errors::ErrCode::BadArg, e))),
     };
     let mut conn = Conn::connect(host, port)?;
-    let body = conn.call("dump_active")?;
+    let body = conn.call(f.dump_wire())?;
     if let Some(e) = errors::parse_err(&body) {
         return Err(reporter.fail("find", e));
     }
@@ -1484,7 +1489,8 @@ fn run_find(
         .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
     let json = json::parse(text)
         .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
-    let ctx = selector::MatchCtx::new(&json);
+    // App windows, topmost first — the order `hs tap` prefers.
+    let ctx = selector::MatchCtx::from_roots(json::app_roots(&json).into_iter().rev().collect());
     let mut matches = selector::find_all_with(&ctx, &selectors);
     selector::apply_filters(&mut matches, f);
 
@@ -1647,7 +1653,7 @@ pub(crate) fn dispatch_session_verb(
         Cmd::TypeInto { selector, text, mut flags } => {
             merge_session_defaults(&mut flags, sess);
             let reporter = output::Reporter::new(flags.out(sess.default_out));
-            let resolved = resolve_fill_selector(&mut sess.conn, &selector)?;
+            let resolved = resolve_fill_selector(&mut sess.conn, &selector, &flags)?;
             let body = sess.conn.call(&format!("node_set_text {resolved} value={text:?}"))?;
             if let Some(e) = errors::parse_err(&body) {
                 return Err(reporter.fail("type", e));
@@ -1695,6 +1701,7 @@ fn merge_session_defaults(f: &mut flags::ActionFlags, sess: &session::Session) {
     if !f.require_visible       { f.require_visible   = sess.defaults.require_visible; }
     if !f.require_clickable     { f.require_clickable = sess.defaults.require_clickable; }
     if !f.require_enabled       { f.require_enabled   = sess.defaults.require_enabled; }
+    if !f.active_window         { f.active_window     = sess.defaults.active_window; }
     if f.out_fmt.is_none()      { f.out_fmt = sess.defaults.out_fmt; }
 }
 
@@ -2486,6 +2493,19 @@ mod parse_use_tests {
                 other => panic!("expected disconnect, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn fill_prefers_the_input_in_the_upper_window() {
+        let dump = crate::json::parse(r#"{"windows":[
+            {"type":1,"layer":5,"root":{"cls":"android.widget.FrameLayout","bounds":[0,1600,1080,2400],"children":[
+                {"cls":"android.widget.EditText","rid":"com.foo:id/sheet_comment","text":"Comment","bounds":[40,2200,1040,2300],"children":[]}]}},
+            {"type":1,"layer":2,"root":{"cls":"android.widget.FrameLayout","bounds":[0,0,1080,2400],"children":[
+                {"cls":"android.widget.EditText","rid":"com.foo:id/comment","text":"Comment","bounds":[40,100,1040,200],"children":[]}]}}
+        ]}"#).unwrap();
+        let roots: Vec<_> = crate::json::app_roots(&dump).into_iter().rev().collect();
+        let node = super::find_fill_target(&roots, "Comment").expect("an input matches");
+        assert_eq!(super::node_to_daemon_selector(node), "id=com.foo:id/sheet_comment");
     }
 
     #[test]

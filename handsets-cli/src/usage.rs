@@ -36,6 +36,8 @@ Shared action flags (tap, type, find, wait, submit, paste, act):
   --enabled            require enabled
   --unique             fail with AMBIGUOUS if >1 match
   --nth I              pick the I-th match (1-indexed)
+  --active             look in the focused window only (default: every
+                       app window, so dialogs and popups are found too)
   --json               emit {\"verb\":…, \"ok\":…, \"result\"|\"error\":…} per line
 
 More verbs:
