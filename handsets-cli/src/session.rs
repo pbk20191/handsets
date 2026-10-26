@@ -1,6 +1,6 @@
 // `Session` — warm-socket execution context for `hs run`, `hs act`, and any
 // other verb that wants to amortise the daemon connection + reuse a cached
-// `dump_active` across multiple lookups.
+// `dump` across multiple lookups.
 //
 // One-shot CLI calls deliberately do *not* go through Session: each
 // invocation is a fresh process, and a 150 ms stale dump in a 200 ms-long
@@ -21,7 +21,7 @@ pub struct Session {
     /// flags layer on top via `merge_session_defaults`.
     pub defaults: ActionFlags,
     pub default_out: OutFmt,
-    /// Cached `dump_active` payload (raw bytes from the daemon, JSON).
+    /// Cached `dump` payload (every window; raw bytes from the daemon, JSON).
     cached_dump: Option<(Instant, Vec<u8>)>,
     /// Cached parsed tree. Lazy.
     cached_tree: Option<crate::json::Value>,
@@ -69,10 +69,10 @@ impl Session {
     /// Fetch a fresh dump from the daemon. Use sparingly — prefer
     /// `get_dump` so the cache amortises chained selectors.
     pub fn fetch_dump(&mut self) -> io::Result<crate::json::Value> {
-        let body = self.conn.call("dump_active")?;
+        let body = self.conn.call("dump")?;
         if let Some(e) = crate::errors::parse_err(&body) {
             return Err(io::Error::other(crate::output::ReportedError {
-                verb: "dump_active".into(),
+                verb: "dump".into(),
                 info: e,
             }));
         }

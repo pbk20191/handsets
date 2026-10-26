@@ -40,7 +40,9 @@ Shared action flags (tap, type, find, wait, submit, paste, act):
 
 More verbs:
   Capture     hs see [PATH.jpg|.webp|.png|.xml|.json] [--size N|--native]
-              hs ui [-i|--tree|--json|--xml] [--all]
+              hs ui [-i|--tree|--json|--xml] [--active|--all]
+                                       (app windows incl. popups; --active:
+                                       focused window; --all: every window)
               hs tui [--active]        keyboard-driven interactive inspector
                                        (--active: focused window only)
               hs info | hs show [top|PKG]

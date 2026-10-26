@@ -108,7 +108,7 @@ enum Cmd {
     TypeFocused { text: String, flags: flags::ActionFlags },
     TypeInto { selector: String, text: String, flags: flags::ActionFlags },
     SettingsListAll,
-    Ui { format: UiFormat, all: bool },
+    Ui { format: UiFormat, windows: UiWindows },
     Devices,
     StateDaemon,
     Shell,
@@ -149,6 +149,11 @@ const PHONE_TYPES: &[(i64, &str)] = &[
 
 #[derive(Debug, Clone, Copy)]
 enum UiFormat { Human, Interactive, Json, Xml }
+
+/// Which windows `hs ui` reads: the app's own (activity plus its dialogs
+/// and popups, the default), only the focused one, or every window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum UiWindows { App, Active, All }
 
 fn parse_use(rest: &[&str]) -> Result<daemon::ConnectOpts, String> {
     let mut opts = daemon::ConnectOpts { serial: None, port: None };
@@ -478,18 +483,19 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
             // `--tree`; `-i` / `--interactive` remain accepted no-ops so
             // older scripts keep working.
             let mut fmt = UiFormat::Interactive;
-            let mut all = false;
+            let mut windows = UiWindows::App;
             for tok in rest {
                 match *tok {
                     "--json"            => fmt = UiFormat::Json,
                     "--xml"             => fmt = UiFormat::Xml,
                     "--tree"            => fmt = UiFormat::Human,
                     "-i" | "--interactive" => fmt = UiFormat::Interactive,
-                    "--all"             => all = true,
+                    "--all"             => windows = UiWindows::All,
+                    "--active"          => windows = UiWindows::Active,
                     other               => return Err(format!("unknown ui arg: {other}")),
                 }
             }
-            Cmd::Ui { format: fmt, all }
+            Cmd::Ui { format: fmt, windows }
         }
         Some((&"show", rest)) => match rest.first() {
             None => Cmd::Adb(adb::Cmd::State("device".into())),
@@ -907,7 +913,7 @@ fn run(opts: &Opts) -> io::Result<()> {
         Cmd::Cp { src, dst } => run_cp(&opts.host, opts.port, src, dst),
         Cmd::ShowPkg(pkg) => run_show_pkg(&opts.host, opts.port, pkg),
         Cmd::Info => run_info(&opts.host, opts.port),
-        Cmd::Ui { format, all } => run_ui(&opts.host, opts.port, *format, *all),
+        Cmd::Ui { format, windows } => run_ui(&opts.host, opts.port, *format, *windows),
         Cmd::Tui { active } => tui::run(&opts.host, opts.port, *active),
         Cmd::SettingsListAll => {
             // Three Shell-passthrough calls glued client-side with header
@@ -1287,11 +1293,18 @@ fn run_type_into(
     }
 }
 
-/// `hs ui [--json|--xml] [--all]` — UI tree dump in the chosen format.
-/// Default is a human-readable indented outline; `--all` covers every
-/// window (otherwise just the active one).
-fn run_ui(host: &str, port: u16, format: UiFormat, all: bool) -> io::Result<()> {
-    let wire = if all { "dump" } else { "dump_active" };
+/// `hs ui [--tree|--json|--xml] [--active|--all]` — UI tree dump in the
+/// chosen format. The table and `--tree` cover the app's windows, so
+/// popups and bottom sheets show up; `--active` limits them to the focused
+/// window. `--json` / `--xml` are the raw dump: the focused window, or
+/// every window with `--all`.
+fn run_ui(host: &str, port: u16, format: UiFormat, windows: UiWindows) -> io::Result<()> {
+    let raw = matches!(format, UiFormat::Json | UiFormat::Xml);
+    let wire = match windows {
+        UiWindows::All => "dump",
+        UiWindows::App if !raw => "dump",
+        _ => "dump_active",
+    };
     let mut conn = Conn::connect(host, port)?;
     let body = conn.call(wire)?;
     let mut out = io::stdout().lock();
@@ -1312,17 +1325,21 @@ fn run_ui(host: &str, port: u16, format: UiFormat, all: bool) -> io::Result<()> 
                 .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
             let json = json::parse(text)
                 .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
-            out.write_all(ui_dump::render_human(&json).as_bytes())?;
+            out.write_all(ui_dump::render_human(&ui_roots(&json, windows)).as_bytes())?;
         }
         UiFormat::Interactive => {
             let text = std::str::from_utf8(&body)
                 .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
             let json = json::parse(text)
                 .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
-            out.write_all(ui_dump::render_interactive(&json).as_bytes())?;
+            out.write_all(ui_dump::render_interactive(&ui_roots(&json, windows)).as_bytes())?;
         }
     }
     out.flush()
+}
+
+fn ui_roots(dump: &json::Value, windows: UiWindows) -> Vec<&json::Value> {
+    if windows == UiWindows::All { ui_dump::collect_roots(dump) } else { json::app_roots(dump) }
 }
 
 /// `hs see [PATH]` — bare opens the viewer; otherwise extension picks

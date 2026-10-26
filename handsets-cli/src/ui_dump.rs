@@ -31,10 +31,10 @@ struct Row {
 /// The verb column collapses to `-` for nodes that are informational
 /// only (TextView labels, headings) so the layout still aligns and the
 /// agent sees the context without picking a non-actionable target.
-pub(crate) fn render_interactive(dump: &Value) -> String {
+pub(crate) fn render_interactive(roots: &[&Value]) -> String {
     let mut rows: Vec<Row> = Vec::new();
-    for root in collect_roots(dump) {
-        collect_interactive(root, &mut rows);
+    for root in roots {
+        collect_interactive(root, None, &mut rows);
     }
     // Pad only the structural columns (verb, class). They have bounded
     // vocabulary and help the eye scan down the table. Label / id /
@@ -71,9 +71,10 @@ pub(crate) fn render_interactive(dump: &Value) -> String {
 /// `-i` shows only nodes a human can identify by reading the screen:
 /// non-empty text OR content-desc. Empty interactive widgets stay in too
 /// (an unfilled `EditText` / `SeekBar` etc. still matters for automation).
-/// Nameless clickable / scrollable containers are dropped — their
-/// children carry the actual labels, and tapping the label coords still
-/// triggers the parent's onClick via bubbling.
+/// Nameless clickable / scrollable containers are dropped when a child
+/// carries a label — tapping the label coords still triggers the parent's
+/// onClick via bubbling. Image-only ones (grid cells) have no such child
+/// and are kept.
 fn is_interactive(node: &Value) -> bool {
     let text = selector::get_str(node, "text").unwrap_or("");
     let desc = selector::get_str(node, "desc").unwrap_or("");
@@ -96,10 +97,20 @@ fn is_interactive(node: &Value) -> bool {
     // with the id standing in for the missing text/desc label.
     let rid = selector::get_str(node, "rid").unwrap_or("");
     let flags = selector::get_str(node, "flags").unwrap_or("");
-    !rid.is_empty() && flags.contains('c')
+    flags.contains('c') && (!rid.is_empty() || !has_labelled_descendant(node))
 }
 
-fn collect_interactive(node: &Value, rows: &mut Vec<Row>) {
+fn has_labelled_descendant(node: &Value) -> bool {
+    selector::children(node).is_some_and(|kids| kids.iter().any(|c| {
+        !selector::get_str(c, "text").unwrap_or("").is_empty()
+            || !selector::get_str(c, "desc").unwrap_or("").is_empty()
+            || has_labelled_descendant(c)
+    }))
+}
+
+/// `slot` is the nearest ancestor with a resource-id and the index of the
+/// child subtree we are in; it names anonymous cells as `#rv_cards[3]`.
+fn collect_interactive(node: &Value, slot: Option<(&str, usize)>, rows: &mut Vec<Row>) {
     let cls_full  = selector::get_str(node, "cls").unwrap_or("");
     let cls_short = cls_full.rsplit('.').next().unwrap_or(cls_full);
     let id_full   = selector::get_str(node, "rid").unwrap_or("");
@@ -130,6 +141,8 @@ fn collect_interactive(node: &Value, rows: &mut Vec<Row>) {
             truncate_quoted(label_src, 60)
         } else if !id_short.is_empty() {
             format!("#{id_short}")
+        } else if let Some((parent, i)) = slot {
+            format!("#{parent}[{i}]")
         } else {
             String::new()
         };
@@ -182,7 +195,10 @@ fn collect_interactive(node: &Value, rows: &mut Vec<Row>) {
     }
 
     if let Some(kids) = selector::children(node) {
-        for c in kids { collect_interactive(c, rows); }
+        for (i, c) in kids.iter().enumerate() {
+            let slot = if id_short.is_empty() { slot } else { Some((id_short, i)) };
+            collect_interactive(c, slot, rows);
+        }
     }
 }
 
@@ -207,9 +223,9 @@ fn is_input_widget(simple: &str) -> bool {
         | "MultiAutoCompleteTextView")
 }
 
-pub(crate) fn render_human(dump: &Value) -> String {
+pub(crate) fn render_human(roots: &[&Value]) -> String {
     let mut out = String::with_capacity(8 * 1024);
-    for root in collect_roots(dump) {
+    for root in roots {
         walk(root, 0, &mut out);
     }
     out
@@ -359,7 +375,7 @@ mod tests {
                 ]
             }
         }"#).unwrap();
-        let out = render_interactive(&dump);
+        let out = render_interactive(&collect_roots(&dump));
         let lines: Vec<&str> = out.trim_end().lines().collect();
         assert_eq!(lines.len(), 3, "expected 3 actionable rows, got:\n{out}");
 
@@ -422,7 +438,7 @@ mod tests {
                 ]
             }
         }"#).unwrap();
-        let out = render_interactive(&dump);
+        let out = render_interactive(&collect_roots(&dump));
         let lines: Vec<&str> = out.trim_end().lines().collect();
 
         // Only the clickable icon surfaces — non-clickable anonymous
@@ -433,6 +449,37 @@ mod tests {
         assert!(lines[0].contains("#back_btn"), "got: {}", lines[0]);
         // `#back_btn` should appear exactly once — no duplicate id column.
         assert_eq!(lines[0].matches("#back_btn").count(), 1, "got: {}", lines[0]);
+    }
+
+    /// Image-only grid cells (clickable, no text/desc/id) used to vanish,
+    /// so a card picker showed nothing to tap. They are listed under the
+    /// nearest id'd ancestor and their index, which `hs tap` accepts.
+    /// A nameless clickable whose child carries a label stays out: the
+    /// label row already covers it.
+    #[test]
+    fn anonymous_cells_are_listed_by_ancestor_id_and_index() {
+        let dump = json::parse(r#"{
+            "root": {
+                "cls": "android.widget.FrameLayout", "bounds": [0, 0, 1080, 2400],
+                "children": [
+                    {"cls":"android.widget.GridView","rid":"com.foo:id/rv_cards","flags":"s","bounds":[0,600,1080,1800],"children":[
+                        {"cls":"android.view.ViewGroup","flags":"ce","bounds":[0,600,360,1000],"children":[
+                            {"cls":"android.widget.ImageView","flags":"","bounds":[20,620,340,980],"children":[]}]},
+                        {"cls":"android.view.ViewGroup","flags":"ce","bounds":[360,600,720,1000],"children":[
+                            {"cls":"android.widget.ImageView","flags":"","bounds":[380,620,700,980],"children":[]}]}
+                    ]},
+                    {"cls":"android.widget.LinearLayout","flags":"ce","bounds":[0,1900,1080,2000],"children":[
+                        {"cls":"android.widget.TextView","text":"Settings","flags":"","bounds":[40,1910,400,1990],"children":[]}]}
+                ]
+            }
+        }"#).unwrap();
+        let out = render_interactive(&collect_roots(&dump));
+        let lines: Vec<&str> = out.trim_end().lines().collect();
+        assert_eq!(lines.len(), 3, "got:\n{out}");
+        assert!(lines[0].starts_with("tap") && lines[0].contains("ViewGroup")
+            && lines[0].contains("#rv_cards[0]") && lines[0].contains("180,800"), "got: {}", lines[0]);
+        assert!(lines[1].contains("#rv_cards[1]") && lines[1].contains("540,800"), "got: {}", lines[1]);
+        assert!(lines[2].contains("\"Settings\""), "got: {}", lines[2]);
     }
 
     /// Off-screen rows (negative bounds, zero-area, scrolled-out recycler
@@ -452,7 +499,7 @@ mod tests {
                 ]
             }
         }"#).unwrap();
-        let out = render_interactive(&dump);
+        let out = render_interactive(&collect_roots(&dump));
         let lines: Vec<&str> = out.trim_end().lines().collect();
         assert_eq!(lines.len(), 1, "only the OK button has visible bounds, got:\n{out}");
         assert!(lines[0].contains("\"OK\""));
@@ -475,12 +522,12 @@ mod tests {
                 ]
             }
         }"#).unwrap();
-        print!("\n--- hs ui (verb-led) ---\n{}", render_interactive(&dump));
+        print!("\n--- hs ui (verb-led) ---\n{}", render_interactive(&collect_roots(&dump)));
     }
 }
 
 /// Unwrap the dump envelope (dump_active = `{"root": …}`, dump = `{"windows": [...]}`).
-fn collect_roots(v: &Value) -> Vec<&Value> {
+pub(crate) fn collect_roots(v: &Value) -> Vec<&Value> {
     let mut out = Vec::new();
     if let Value::Obj(fields) = v {
         for (k, val) in fields {

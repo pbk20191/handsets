@@ -27,6 +27,8 @@ When more than one ADB device is attached, select one with `hs use SERIAL` or
 `hs --device SERIAL use`. Use the serial shown by `adb devices`.
 
 `ui → label → tap → wait`. Pipe `hs ui` into a model, take the label, hand it back.
+`hs ui` and `hs tap` cover the app's dialogs, popups and bottom sheets too;
+image-only cells show up as `#grid_id[i]`, which `hs tap` accepts.
 Raw `screenshot` defaults to 768px-long-edge JPEG, the fast agent path;
 `hs see out.jpg` saves a native-resolution export unless you pass `--size 768`.
 Use WebP for compact lossy exports and PNG only for debug/lossless files.
