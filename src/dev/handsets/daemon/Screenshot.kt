@@ -5,13 +5,16 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.graphics.Bitmap.CompressFormat
+import android.graphics.ColorSpace
 import android.graphics.PixelFormat
 import android.graphics.Point
+import android.hardware.HardwareBuffer
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
 import android.media.ImageReader.OnImageAvailableListener
+import android.os.Build
 import android.view.Display
 import dev.handsets.daemon.Binders.systemContext
 import dev.handsets.daemon.Loop.mainHandler
@@ -287,6 +290,44 @@ internal class Screenshot(private val ua: UiAutomation) {
         }
 
         private suspend fun absorb(img: Image) = absorbMutex.withLock {
+            if (USE_HARDWARE_BUFFER) absorbHardware(img) else absorbLocked(img)
+
+            // Listeners must be non-blocking.
+            for (l in subscribers) {
+                try {
+                    l.onFrame()
+                } catch (ignored: Throwable) {
+                }
+            }
+        }
+
+        /**
+         * Copies through the HardwareBuffer on the GPU instead of CPU-locking
+         * the image. Locking it (Image.getPlanes) leaks one sync_file fd per
+         * frame on some gralloc implementations (API 37 emulator: ~60/s, so
+         * the daemon hit EMFILE after ~9 min and stalled), and closing
+         * Image.getFence() ourselves doesn't stop it.
+         */
+        private suspend fun absorbHardware(img: Image) {
+            val hb = img.hardwareBuffer ?: return
+            val frame = try {
+                val hw = Bitmap.wrapHardwareBuffer(hb, ColorSpace.get(ColorSpace.Named.SRGB)) ?: return
+                try { hw.copy(Bitmap.Config.ARGB_8888, false) } finally { hw.recycle() }
+            } finally {
+                hb.close()
+            } ?: return
+            // A fresh bitmap per frame; readers only touch `cached` under
+            // frameMutex, so the previous one can be freed right away.
+            frameMutex.withLock {
+                cached?.recycle()
+                cached = frame
+                cachedRowPix = frame.width
+                frameSeq++
+            }
+        }
+
+        /** API 28: no wrapHardwareBuffer, so lock and copy on the CPU (no leak seen there). */
+        private suspend fun absorbLocked(img: Image) {
             val p = img.planes[0]
             val rowPix = p.rowStride / max(1, p.pixelStride)
             val h = img.height
@@ -309,14 +350,6 @@ internal class Screenshot(private val ua: UiAutomation) {
                 scratch = oldCached // reuse previous cached as next scratch
                 scratchRowPix = oldRowPix
                 frameSeq++
-            }
-
-            // Listeners must be non-blocking.
-            for (l in subscribers) {
-                try {
-                    l.onFrame()
-                } catch (ignored: Throwable) {
-                }
             }
         }
 
@@ -364,7 +397,11 @@ internal class Screenshot(private val ua: UiAutomation) {
                 val outW = max(1, (srcW * scale).roundToInt())
                 val outH = max(1, (srcH * scale).roundToInt())
 
-                val reader = ImageReader.newInstance(outW, outH, PixelFormat.RGBA_8888, 3)
+                val reader = if (USE_HARDWARE_BUFFER)
+                    // GPU_SAMPLED_IMAGE is what Bitmap.wrapHardwareBuffer needs.
+                    ImageReader.newInstance(outW, outH, PixelFormat.RGBA_8888, 3,
+                        HardwareBuffer.USAGE_CPU_READ_OFTEN or HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE)
+                else ImageReader.newInstance(outW, outH, PixelFormat.RGBA_8888, 3)
 
                 var flags: Int
                 try {
@@ -429,6 +466,9 @@ internal class Screenshot(private val ua: UiAutomation) {
         private const val JPEG_DEFAULT_Q = 80
 
         private const val MAX_CACHED_MIRRORS = 4
+
+        /** Bitmap.wrapHardwareBuffer and ImageReader usage flags need API 29. */
+        private val USE_HARDWARE_BUFFER = Build.VERSION.SDK_INT >= 29
 
         @Throws(Exception::class)
         private fun initDisplayManager(): DisplayManager? {
