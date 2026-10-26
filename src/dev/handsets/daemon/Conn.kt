@@ -1,5 +1,6 @@
 package dev.handsets.daemon
 
+import android.net.LocalSocket
 import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
@@ -26,8 +27,13 @@ import kotlin.coroutines.resume
  * than [OUT_LIMIT] bytes are queued (backpressure). [sendLatest] is for
  * frames where only the newest matters: a frame still waiting in its slot is
  * replaced instead of queued.
+ *
+ * Owns [socket]: LocalSocket closes its fd when finalized, so the reference
+ * is held until [close] for the whole session.
  */
-class Conn(private val fd: FileDescriptor) {
+class Conn(private val socket: LocalSocket) {
+
+    private val fd: FileDescriptor = socket.fileDescriptor
 
     val job: Job = SupervisorJob(Loop.scope.coroutineContext[Job])
     val scope = CoroutineScope(Loop.Main.immediate + job + CoroutineExceptionHandler { _, t ->
@@ -286,7 +292,7 @@ class Conn(private val fd: FileDescriptor) {
         if (closed) return
         closed = true
         if (watching != 0) { Io.unwatch(fd); watching = 0 }
-        try { Os.close(fd) } catch (_: Throwable) {}
+        try { socket.close() } catch (_: Throwable) {}
         outQueue.clear(); latest.clear(); outBytes = 0
         readWaiter?.let { readWaiter = null; it.cancel(EOFException()) }
         for (w in ArrayList(writeWaiters)) w.cancel(EOFException())
