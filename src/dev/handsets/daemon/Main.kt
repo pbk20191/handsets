@@ -40,30 +40,30 @@ data object Main {
             Loop.scope.launch {
                 try {
                     ready.complete(initDaemon(sysCtx))
-                    println("hsd ready (sdk=${android.os.Build.VERSION.SDK_INT})")
+                    Logx.boot("hsd ready (sdk=${android.os.Build.VERSION.SDK_INT})")
                 } catch (t: Throwable) {
-                    t.printStackTrace()
+                    Logx.fatal("init failed", t)
                     exitProcess(2)
                 }
             }
             Looper.loop()
         } catch (t: Throwable) {
-            t.printStackTrace()
+            Logx.fatal("startup failed", t)
             exitProcess(2)
         }
     }
 
     private suspend fun initDaemon(sysCtx: Context): Server = withContext(Loop.Work) {
         val ua = try {
-            connectedUiAutomation(Looper.getMainLooper()).also { System.err.println("hsd ua-looper=main") }
+            connectedUiAutomation(Looper.getMainLooper()).also { Logx.boot("hsd ua-looper=main") }
         } catch (t: Throwable) {
-            System.err.println("hsd: UiAutomation on main looper failed ($t); using hs-ua thread")
+            Logx.bootWarn("UiAutomation on main looper failed; using hs-ua thread", t)
             val ht = HandlerThread("hs-ua").apply { start() }
-            connectedUiAutomation(ht.looper).also { System.err.println("hsd ua-looper=thread") }
+            connectedUiAutomation(ht.looper).also { Logx.boot("hsd ua-looper=thread") }
         }
         registerShutdownHook(ua)
         enableInteractiveWindows(ua)
-        try { ua.setRunAsMonkey(true) } catch (t: Throwable) { System.err.println("warn: setRunAsMonkey failed: $t") }
+        try { ua.setRunAsMonkey(true) } catch (t: Throwable) { Logx.bootWarn("setRunAsMonkey failed", t) }
 
         val h = Server.Handlers()
         h.dumper = Dumper(ua)
@@ -78,7 +78,7 @@ data object Main {
         h.notifs = Notifications()
         h.clip = Clipboard()
         h.am = Am(sysCtx)
-        try { h.props = Props() } catch (t: Throwable) { System.err.println("warn: Props init failed: $t") }
+        try { h.props = Props() } catch (t: Throwable) { Logx.bootWarn("Props init failed", t) }
         h.settings = SettingsApi(sysCtx)
         h.wm = Wm(sysCtx.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
         h.uiEvents = UiEvents(ua)
@@ -90,9 +90,9 @@ data object Main {
             try {
                 val t0 = System.nanoTime()
                 h.dumper.dumpActive()
-                System.err.println("hsd warmup: dump_active in ${(System.nanoTime() - t0) / 1_000_000}ms")
+                Logx.i("warmup: dump_active in ${(System.nanoTime() - t0) / 1_000_000}ms")
             } catch (t: Throwable) {
-                System.err.println("warn: dump_active warmup failed: $t")
+                Logx.w("dump_active warmup failed", t)
             }
         }
         Server(h)
@@ -157,7 +157,7 @@ data object Main {
             info.flags = info.flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
             ua.serviceInfo = info
         } catch (t: Throwable) {
-            System.err.println("warn: enableInteractiveWindows failed: $t")
+            Logx.bootWarn("enableInteractiveWindows failed", t)
         }
     }
 
@@ -177,7 +177,7 @@ data object Main {
             vmRuntime.getDeclaredMethod("setHiddenApiExemptions", Array<String>::class.java)
                 .invoke(runtime, arrayOf("L") as Any)
         } catch (t: Throwable) {
-            System.err.println("warn: could not lift hidden-api restrictions: $t")
+            Logx.bootWarn("could not lift hidden-api restrictions", t)
         }
     }
 }

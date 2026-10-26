@@ -13,7 +13,7 @@ internal object Frames {
 
     private val choreographer: Choreographer? by lazy {
         try { Choreographer.getInstance() } catch (t: Throwable) {
-            System.err.println("hsd: Choreographer unavailable ($t); pacing with delay(16)")
+            Logx.w("Choreographer unavailable; pacing with delay(16)", t)
             null
         }
     }

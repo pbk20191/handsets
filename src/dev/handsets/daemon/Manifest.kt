@@ -18,17 +18,17 @@ import java.nio.charset.StandardCharsets
 internal class Manifest(private val ctx: Context) {
     /** Emit one row per (intent-filter, &lt;data&gt;) pair with action.VIEW.  */
     fun deeplinks(pkg: String?): ByteArray {
-        if (pkg == null || pkg.isEmpty()) return err("deeplinks-needs-pkg")
+        if (pkg.isNullOrEmpty()) return err("deeplinks-needs-pkg")
 
         val apkPath: String?
         try {
-            val pi = ctx.getPackageManager().getPackageInfo(pkg, 0)
+            val pi = ctx.packageManager.getPackageInfo(pkg, 0)
             val ai = pi.applicationInfo
-            apkPath = if (ai == null) null else ai.sourceDir
+            apkPath = ai?.sourceDir
         } catch (t: Throwable) {
-            return err("pkg-not-found:" + pkg)
+            return err("pkg-not-found:$pkg")
         }
-        if (apkPath == null) return err("apk-path-missing:" + pkg)
+        if (apkPath == null) return err("apk-path-missing:$pkg")
 
         val parser: XmlResourceParser
         try {
@@ -58,8 +58,8 @@ internal class Manifest(private val ctx: Context) {
             parser.close()
         }
 
-        if (out.length == 0) {
-            return ("no deeplinks declared in " + pkg)
+        if (out.isEmpty()) {
+            return ("no deeplinks declared in $pkg")
                 .toByteArray(StandardCharsets.UTF_8)
         }
         return out.toString().toByteArray(StandardCharsets.UTF_8)
@@ -74,16 +74,16 @@ internal class Manifest(private val ctx: Context) {
             var currentComp: String? = null
             var inFilter = false
             var filterHasView = false
-            val cats: MutableList<String?> = ArrayList<String?>()
-            val dataLines: MutableList<String> = ArrayList<String>()
+            val cats: MutableList<String?> = ArrayList()
+            val dataLines: MutableList<String> = ArrayList()
 
             var ev: Int
             while ((p.next().also { ev = it }) != XmlResourceParser.END_DOCUMENT) {
                 if (ev == XmlResourceParser.START_TAG) {
-                    val name = p.getName()
+                    val name = p.name
                     if ("manifest" == name) {
                         val pa = p.getAttributeValue(null, "package")
-                        if (pa != null && !pa.isEmpty()) pkgAttr = pa
+                        if (pa != null && pa.isNotEmpty()) pkgAttr = pa
                     } else if ("activity" == name || "activity-alias" == name) {
                         currentComp = Companion.resolveComponent(
                             pkgAttr!!,
@@ -108,12 +108,12 @@ internal class Manifest(private val ctx: Context) {
                         }
                     } else if (inFilter && "data" == name) {
                         val line: String = describeData(p)
-                        if (!line.isEmpty()) dataLines.add(line)
+                        if (line.isNotEmpty()) dataLines.add(line)
                     }
                 } else if (ev == XmlResourceParser.END_TAG) {
-                    val name = p.getName()
+                    val name = p.name
                     if ("intent-filter" == name && inFilter) {
-                        if (filterHasView && !dataLines.isEmpty()) {
+                        if (filterHasView && dataLines.isNotEmpty()) {
                             val catStr = if (cats.isEmpty()) "-" else cats.joinToString(",")
                             for (d in dataLines) {
                                 out.append(pad(d, 60)).append("  ")
@@ -147,7 +147,7 @@ internal class Manifest(private val ctx: Context) {
             else if (prefix != null) sb.append(prefix).append('*')
             else if (pattern != null) sb.append(pattern)
             if (mime != null) {
-                if (sb.length > 0) sb.append("  ")
+                if (sb.isNotEmpty()) sb.append("  ")
                 sb.append("mime=").append(mime)
             }
             return sb.toString()
@@ -155,13 +155,13 @@ internal class Manifest(private val ctx: Context) {
 
         /** Resolve a possibly-relative activity name into pkg/.Class form.  */
         private fun resolveComponent(
-            pkg: kotlin.String,
-            activityName: kotlin.String?
-        ): kotlin.String {
-            if (activityName == null || activityName.isEmpty()) return pkg + "/?"
-            val full: kotlin.String?
+            pkg: String,
+            activityName: String?
+        ): String {
+            if (activityName.isNullOrEmpty()) return "$pkg/?"
+            val full: String?
             if (activityName.startsWith(".")) full = pkg + activityName
-            else if (!activityName.contains(".")) full = pkg + "." + activityName
+            else if (!activityName.contains(".")) full = "$pkg.$activityName"
             else full = activityName
             return ComponentName(pkg, full).flattenToShortString()
         }
@@ -173,8 +173,8 @@ internal class Manifest(private val ctx: Context) {
             return b.toString()
         }
 
-        private fun err(tail: kotlin.String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+        private fun err(tail: String?): ByteArray {
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
 }

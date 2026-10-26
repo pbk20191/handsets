@@ -209,7 +209,7 @@ internal class Providers(sysCtx: Context?) {
             val prov = holder.javaClass.getField("provider").get(holder) ?: return null
             return providerCache.putIfAbsent(authority, prov) ?: prov
         } catch (t: Throwable) {
-            System.err.println("providers: acquire " + authority + " failed: " + t)
+            Logx.w("providers: acquire $authority failed", t)
             return null
         }
     }

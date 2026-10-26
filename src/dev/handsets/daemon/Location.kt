@@ -35,8 +35,8 @@ internal class Location {
 
         // Preserve first-seen order; the freshest "last location" block
         // tends to appear before per-provider history.
-        val fixes: MutableMap<String?, DoubleArray?> = LinkedHashMap<String?, DoubleArray?>()
-        val mocks: MutableMap<String?, Boolean?> = LinkedHashMap<String?, Boolean?>()
+        val fixes: MutableMap<String?, DoubleArray?> = LinkedHashMap()
+        val mocks: MutableMap<String?, Boolean?> = LinkedHashMap()
         try {
             BufferedReader(
                 InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8)
@@ -49,16 +49,14 @@ internal class Location {
                         val lat = m.group(2)!!.toDouble()
                         val lon = m.group(3)!!.toDouble()
                         val tail = m.group(4) ?: ""
-                        fixes.put(
-                            prov, doubleArrayOf(
-                                lat, lon,
-                                kv(tail, "hAcc"),
-                                kv(tail, "alt"),
-                                kv(tail, "vel"),
-                                kv(tail, "bear"),
-                            )
+                        fixes[prov] = doubleArrayOf(
+                            lat, lon,
+                            kv(tail, "hAcc"),
+                            kv(tail, "alt"),
+                            kv(tail, "vel"),
+                            kv(tail, "bear"),
                         )
-                        mocks.put(prov, tail.contains(" mock"))
+                        mocks[prov] = tail.contains(" mock")
                     }
                 }
             }

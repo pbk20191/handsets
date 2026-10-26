@@ -22,11 +22,13 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.Volatile
 import kotlin.math.max
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 /**
  * Fast screenshot via a VirtualDisplay that mirrors the default display into
@@ -72,7 +74,7 @@ internal class Screenshot(private val ua: UiAutomation) {
         try {
             dm = initDisplayManager()
         } catch (t: Throwable) {
-            System.err.println("screenshot: DisplayManager init failed: " + t)
+            Logx.bootWarn("screenshot: DisplayManager init failed", t)
         }
         this.displayManager = dm
     }
@@ -86,12 +88,9 @@ internal class Screenshot(private val ua: UiAutomation) {
                 val m: Mirror = Mirror.create(dm, sourceSize, 768)
                 mirrorsMutex.withLock { mirrors.put(768, m) }
                 ok = true
-                println(
-                    ("screenshot: mirror " + m.outW + "x" + m.outH
-                            + " of display " + sourceSize.x + "x" + sourceSize.y)
-                )
+                Logx.i("screenshot: mirror ${m.outW}x${m.outH} of display ${sourceSize.x}x${sourceSize.y}")
             } catch (t: Throwable) {
-                System.err.println("screenshot: mirror probe failed: " + t)
+                Logx.bootWarn("screenshot: mirror probe failed", t)
             }
         }
         this.mirrorAvailable = ok
@@ -107,7 +106,7 @@ internal class Screenshot(private val ua: UiAutomation) {
             try {
                 result = mirrorCapture(longEdge, quality, args.format)
             } catch (t: Throwable) {
-                System.err.println("screenshot: mirror.capture failed, falling back: " + t)
+                Logx.w("screenshot: mirror capture failed, falling back", t)
                 result = withContext(Loop.Work) { fallbackCapture(longEdge, quality, args.format) }
             }
         } else {
@@ -120,7 +119,7 @@ internal class Screenshot(private val ua: UiAutomation) {
         if (args.secureCheck && result.size < threshold) {
             val secureWin: String? = withContext(Loop.Work) { findSecureWindow() }
             if (secureWin != null) {
-                return ("ERR:secure-window:" + secureWin)
+                return ("ERR:secure-window:$secureWin")
                     .toByteArray(StandardCharsets.UTF_8)
             }
         }
@@ -140,21 +139,21 @@ internal class Screenshot(private val ua: UiAutomation) {
         try {
             full = ua.takeScreenshot()
             if (full == null) return "ERR:screenshot-null".toByteArray()
-            val currentLong = max(full.getWidth(), full.getHeight())
+            val currentLong = max(full.width, full.height)
             val s = longEdge.toFloat() / currentLong
             if (s < 1f) {
-                val tw = max(1, Math.round(full.getWidth() * s))
-                val th = max(1, Math.round(full.getHeight() * s))
+                val tw = max(1, (full.width * s).roundToInt())
+                val th = max(1, (full.height * s).roundToInt())
                 scaled = Bitmap.createScaledBitmap(full, tw, th, true)
             }
-            val toEncode = if (scaled != null) scaled else full
+            val toEncode = scaled ?: full
             return encode(toEncode, format, quality)
         } catch (t: Throwable) {
-            return (("ERR:screenshot-failed:" + t.javaClass.getSimpleName()
+            return (("ERR:screenshot-failed:" + t.javaClass.simpleName
                     + ":" + t.message)).toByteArray()
         } finally {
-            if (scaled != null) scaled.recycle()
-            if (full != null) full.recycle()
+            scaled?.recycle()
+            full?.recycle()
         }
     }
 
@@ -259,55 +258,48 @@ internal class Screenshot(private val ua: UiAutomation) {
             }
         }
 
-        // Main thread only: one absorb in flight; frames arriving meanwhile
-        // collapse into a single re-acquire of the latest image.
-        private var absorbing = false
-        private var absorbPending = false
+        /** ImageReader callbacks; conflated, so frames that land during a copy collapse into one. */
+        private val frameSignals = Channel<Unit>(Channel.CONFLATED)
 
-        fun onImageAvailable() {
-            if (absorbing) {
-                absorbPending = true
-                return
-            }
-            val img: Image = try {
-                reader.acquireLatestImage()
-            } catch (t: Throwable) {
-                null
-            } ?: return
-            absorbing = true
-            // FrameCopy: ~16 ms GPU-fence copies per frame must not queue
-            // ahead of taps and dumps on the Work pool.
-            Loop.scope.launch(Loop.FrameCopy) {
+        /**
+         * Copies the latest image after each signal. Runs on FrameCopy: the
+         * ~16 ms GPU-fence copy per frame must not queue ahead of taps and
+         * dumps on the Work pool.
+         */
+        private val copier = Loop.scope.launch(Loop.FrameCopy) {
+            for (signal in frameSignals) {
+                val img = try {
+                    reader.acquireLatestImage()
+                } catch (t: Throwable) {
+                    null
+                } ?: continue
                 try {
                     absorb(img)
                 } catch (ignored: Throwable) {
                 } finally {
                     img.close()
                 }
-                withContext(Loop.Main) {
-                    absorbing = false
-                    if (absorbPending) {
-                        absorbPending = false
-                        onImageAvailable()
-                    }
-                }
             }
         }
 
+        fun onImageAvailable() {
+            frameSignals.trySend(Unit)
+        }
+
         private suspend fun absorb(img: Image) = absorbMutex.withLock {
-            val p = img.getPlanes()[0]
-            val rowPix = p.getRowStride() / max(1, p.getPixelStride())
-            val h = img.getHeight()
+            val p = img.planes[0]
+            val rowPix = p.rowStride / max(1, p.pixelStride)
+            val h = img.height
 
             // Resize the private scratch, then do the GPU-fence-blocking copy
             // (~16 ms on a vsync-locked producer) without holding frameMutex.
-            val sc = scratch?.takeIf { scratchRowPix == rowPix && it.getHeight() == h }
+            val sc = scratch?.takeIf { scratchRowPix == rowPix && it.height == h }
                 ?: Bitmap.createBitmap(rowPix, h, Bitmap.Config.ARGB_8888).also {
                     scratch?.recycle()
                     scratch = it
                     scratchRowPix = rowPix
                 }
-            sc.copyPixelsFromBuffer(p.getBuffer())
+            sc.copyPixelsFromBuffer(p.buffer)
 
             frameMutex.withLock {
                 val oldCached = cached
@@ -329,6 +321,8 @@ internal class Screenshot(private val ua: UiAutomation) {
         }
 
         suspend fun close() {
+            frameSignals.close()
+            copier.cancel()
             try {
                 reader.setOnImageAvailableListener(null, null)
             } catch (ignored: Throwable) {
@@ -366,8 +360,8 @@ internal class Screenshot(private val ua: UiAutomation) {
                 val longEdge = max(srcW, srcH)
                 var scale = targetLongEdge.toFloat() / longEdge
                 if (scale > 1f) scale = 1f
-                val outW = max(1, Math.round(srcW * scale))
-                val outH = max(1, Math.round(srcH * scale))
+                val outW = max(1, (srcW * scale).roundToInt())
+                val outH = max(1, (srcH * scale).roundToInt())
 
                 val reader = ImageReader.newInstance(outW, outH, PixelFormat.RGBA_8888, 3)
 
@@ -387,17 +381,15 @@ internal class Screenshot(private val ua: UiAutomation) {
                 // Build the mirror shell so we can register the listener before
                 // the VirtualDisplay starts producing frames.
                 val holder = arrayOfNulls<Mirror>(1)
-                reader.setOnImageAvailableListener(object : OnImageAvailableListener {
-                    override fun onImageAvailable(r: ImageReader?) {
-                        val mr = holder[0]
-                        if (mr != null) mr.onImageAvailable()
-                    }
+                reader.setOnImageAvailableListener({
+                    val mr = holder[0]
+                    mr?.onImageAvailable()
                 }, handler)
 
                 val vd = withContext(Loop.Blocking) {
                     dm.createVirtualDisplay(
                         "hs-mirror-" + outW + "x" + outH, outW, outH, 320,
-                        reader.getSurface(), flags
+                        reader.surface, flags
                     )
                 }
                 if (vd == null) {
@@ -464,10 +456,10 @@ internal class Screenshot(private val ua: UiAutomation) {
                 base = sysCtx!!.createPackageContext("com.android.shell", 0)
                 chosen = "com.android.shell (pkg-ctx)"
             } catch (t: Throwable) {
-                System.err.println("screenshot: createPackageContext(com.android.shell) failed: " + t)
+                Logx.w("screenshot: createPackageContext(com.android.shell) failed", t)
                 chosen = "com.android.shell (wrapped sysCtx)"
             }
-            if ("com.android.shell" != base!!.getOpPackageName()) {
+            if ("com.android.shell" != base!!.opPackageName) {
                 val inner = base
                 base = object : ContextWrapper(inner) {
                     override fun getPackageName(): String {
@@ -480,10 +472,7 @@ internal class Screenshot(private val ua: UiAutomation) {
                 }
                 chosen += " + wrapper"
             }
-            System.err.println(
-                ("screenshot: display ctx = " + chosen
-                        + ", op=" + base.getOpPackageName())
-            )
+            Logx.i("screenshot: display ctx = $chosen, op=${base.getOpPackageName()}")
             return base.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager?
         }
 
@@ -508,7 +497,7 @@ internal class Screenshot(private val ua: UiAutomation) {
                         if (t.startsWith("Window #")) {
                             val curly = t.indexOf('{')
                             val closeBrace = t.indexOf('}', curly)
-                            if (curly >= 0 && closeBrace > curly) {
+                            if (curly in 0..<closeBrace) {
                                 val inside = t.substring(curly + 1, closeBrace)
                                 val sp = inside.lastIndexOf(' ')
                                 currentWin = if (sp >= 0)

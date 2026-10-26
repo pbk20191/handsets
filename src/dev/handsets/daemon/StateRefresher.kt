@@ -1,63 +1,56 @@
 package dev.handsets.daemon
 
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Event-driven refresh of [State]'s device snapshot. [mark] (main thread)
- * restarts a short debounce; a heartbeat also refreshes when nothing has
- * happened for a while (battery level/charging have no event hook). The
- * snapshot is computed on Work and published on main.
+ * Event-driven refresh of [State]'s device snapshot: a short debounce after
+ * [mark], plus a heartbeat when nothing has happened for a while (battery
+ * level/charging have no event hook). Computed on Work, published on main.
  */
 internal class StateRefresher(private val state: State, private val debounceMs: Long, private val heartbeatMs: Long) {
 
     /** Latest published snapshot; see [State.snapshots]. */
     val snapshots = MutableStateFlow<ByteArray?>(null)
 
-    private var pending: Job? = null
-    private var debouncing = false
-    private var computing = false
-    private var dirtyAgain = false
+    /** One pending "something changed"; extra marks collapse into it. */
+    private val marks = Channel<Unit>(Channel.CONFLATED)
+    private var loop: Job? = null
 
     /** Main thread only. */
-    fun start() = schedule(heartbeatMs, debounce = false)
-
-    /**
-     * Main thread only. Refreshes [debounceMs] after the first event of a
-     * burst; later events in the burst don't push it back (so a steady event
-     * stream can't starve subscribers), and events during a refresh queue one more.
-     */
-    fun mark() {
-        when {
-            debouncing -> {}
-            computing -> dirtyAgain = true
-            else -> schedule(debounceMs, debounce = true)
-        }
+    fun start() {
+        if (loop == null) loop = Loop.scope.launch { run() }
     }
 
-    private fun schedule(afterMs: Long, debounce: Boolean) {
-        pending?.cancel()
-        debouncing = debounce
-        pending = Loop.scope.launch {
-            delay(afterMs)
-            debouncing = false
-            computing = true
+    /** Any thread. Something changed: refresh soon. */
+    fun mark() {
+        marks.trySend(Unit)
+    }
+
+    /**
+     * Waits for a mark (or the heartbeat), refreshes [debounceMs] after the
+     * first mark of a burst, then repeats. Marks during the debounce fold
+     * into that refresh, so a steady event stream can't starve subscribers;
+     * a mark during the refresh itself triggers one more.
+     */
+    private suspend fun run() {
+        while (true) {
+            val marked = withTimeoutOrNull(heartbeatMs) { marks.receive() } != null
+            if (marked) {
+                delay(debounceMs)
+                marks.tryReceive()
+            }
             try {
                 val snap = withContext(Loop.Work) { state.computeDevice() }
                 state.publish(snap)
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
-            } finally {
-                computing = false
-            }
-            if (dirtyAgain) {
-                dirtyAgain = false
-                schedule(debounceMs, debounce = true)
-            } else {
-                schedule(heartbeatMs, debounce = false)
+                Logx.w("device snapshot failed", t)
             }
         }
     }

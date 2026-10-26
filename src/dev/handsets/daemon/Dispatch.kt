@@ -71,7 +71,7 @@ internal class Dispatch(private val ready: CompletableDeferred<Server>) {
         } catch (_: IOException) {
             // client went away
         } catch (t: Throwable) {
-            if (t !is kotlinx.coroutines.CancellationException) t.printStackTrace()
+            if (t !is kotlinx.coroutines.CancellationException) Logx.e("session failed", t)
         } finally {
             c.close()
         }

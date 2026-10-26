@@ -8,11 +8,48 @@ object Traverse {
     private val PREFETCH = resolvePrefetchFlags()
     private val TMP_RECT = Rect()
 
-    fun writeNode(n: AccessibilityNodeInfo?, out: JsonOut) {
-        if (n == null) {
-            out.append("null,")
-            return
+    /** A node whose `children` array is open; [next] is the next child index to write. */
+    private class Open(val node: AccessibilityNodeInfo, val count: Int, var next: Int = 0)
+
+    /**
+     * Writes [root] and its subtree depth-first. An explicit stack instead of
+     * recursion, so a deep hierarchy can't overflow the thread stack.
+     */
+    fun writeNode(root: AccessibilityNodeInfo?, out: JsonOut) {
+        val open = ArrayDeque<Open>()
+        var n: AccessibilityNodeInfo? = root
+        while (true) {
+            if (n == null) {
+                out.append("null,")
+            } else {
+                writeFields(n, out)
+                val cc = n.getChildCount()
+                if (cc > 0) {
+                    out.key("children").beginArr()
+                    open.addLast(Open(n, cc))
+                } else {
+                    out.endObj()
+                }
+            }
+            // Next child of the innermost open node, closing finished ones.
+            var advanced = false
+            while (open.isNotEmpty()) {
+                val top = open.last()
+                if (top.next < top.count) {
+                    n = getChildSafe(top.node, top.next++)
+                    advanced = true
+                    break
+                }
+                open.removeLast()
+                out.endArr()
+                out.endObj()
+            }
+            if (!advanced) return
         }
+    }
+
+    /** Opens the node's object and writes its own fields (not children). */
+    private fun writeFields(n: AccessibilityNodeInfo, out: JsonOut) {
         out.beginObj()
 
         val cls = n.getClassName()
@@ -52,18 +89,6 @@ object Traverse {
         if (n.isPassword()) flags.append('p')
         if (n.isVisibleToUser()) flags.append('v')
         if (flags.length > 0) out.str("flags", flags)
-
-        val cc = n.getChildCount()
-        if (cc > 0) {
-            out.key("children").beginArr()
-            for (i in 0..<cc) {
-                val child = getChildSafe(n, i)
-                writeNode(child, out)
-            }
-            out.endArr()
-        }
-
-        out.endObj()
     }
 
     private fun getChildSafe(n: AccessibilityNodeInfo, i: Int): AccessibilityNodeInfo? {

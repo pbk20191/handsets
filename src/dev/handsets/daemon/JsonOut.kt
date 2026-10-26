@@ -29,7 +29,7 @@ class JsonOut(private val sb: StringBuilder) {
     }
 
     fun str(k: String?, v: CharSequence?): JsonOut {
-        if (v == null || v.length == 0) return this
+        if (v.isNullOrEmpty()) return this
         key(k)
         escape(v)
         sb.append(',')

@@ -7,6 +7,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.nio.charset.StandardCharsets
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Input verbs, `wait_for_*` and the tap-then-settle composites. Runs on the
@@ -37,7 +38,7 @@ internal class Gestures(private val h: Server.Handlers) {
     suspend fun tap(x: Int, y: Int) {
         val t = SystemClock.uptimeMillis()
         motion(t, t, MotionEvent.ACTION_DOWN, x, y)
-        delay(16)
+        delay(16.milliseconds)
         motion(t, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y)
     }
 

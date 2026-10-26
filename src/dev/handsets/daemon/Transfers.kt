@@ -102,7 +102,7 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
         } catch (e: IOException) {
             // Like the old Files.pull: terminate the stream, keep the connection.
             if (c.closed) throw e
-            System.err.println("pull failed: $e")
+            Logx.w("pull failed", e)
             c.sendRaw(END)
         } finally {
             input?.let { i -> withContext(NonCancellable + Loop.Work) { try { i.close() } catch (_: IOException) {} } }

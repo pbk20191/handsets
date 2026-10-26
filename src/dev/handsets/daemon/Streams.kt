@@ -87,7 +87,7 @@ internal object Streams {
             }
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException || t is java.io.IOException) throw t
-            t.printStackTrace()   // old TileStreamer logged and ended the stream without a frame
+            Logx.e("tile stream failed", t)   // ends the stream without a frame, as before
         } finally {
             mirror.unsubscribe(l)
         }
@@ -241,7 +241,7 @@ internal object Streams {
             enc.start()
             vd = dm.createVirtualDisplay("hs-h264-${key.w}x${key.h}", key.w, key.h, 320, sf, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR)
                 ?: throw VdNull()
-            println("h264: started ${key.w}x${key.h} @ ${key.kbps} kbps  fps=${key.fps}")
+            Logx.i("h264: started ${key.w}x${key.h} @ ${key.kbps} kbps  fps=${key.fps}")
         }
 
         private fun config(b: ByteArray) {
@@ -290,7 +290,7 @@ internal object Streams {
 
         fun fail(t: Throwable) {
             val e = if (t is VdNull) err("createVirtualDisplay-null")
-            else err("h264-failed:${t.javaClass.simpleName}:${t.message}").also { t.printStackTrace() }
+            else err("h264-failed:${t.javaClass.simpleName}:${t.message}").also { Logx.e("h264 encoder failed", t) }
             for (s in subs.toList()) { s.error = e; s.ch.close() }
         }
 

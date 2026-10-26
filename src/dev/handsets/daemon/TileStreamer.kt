@@ -147,10 +147,7 @@ internal class TileStreamer(private val mirror: Screenshot.Mirror, quality: Int,
         changedW = IntArray(totalTiles)
         changedH = IntArray(totalTiles)
         tilePix = IntArray(tileEdge * tileEdge)
-        println(
-            ("tilejpeg: stream " + w + "x" + h + " tile=" + tileEdge
-                    + " (" + tilesX + "x" + tilesY + " = " + totalTiles + " tiles), q=" + quality)
-        )
+        Logx.i("tilejpeg: stream ${w}x$h tile=$tileEdge ($tilesX x $tilesY = $totalTiles tiles), q=$quality")
     }
 
     init {

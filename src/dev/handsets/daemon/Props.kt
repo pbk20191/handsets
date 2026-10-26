@@ -26,7 +26,7 @@ internal class Props {
             val v = get.invoke(null, key)
             return (v as String).toByteArray(StandardCharsets.UTF_8)
         } catch (t: Throwable) {
-            return err("getprop-failed:" + t.message)
+            return err("get prop-failed:" + t.message)
         }
     }
 
@@ -35,13 +35,13 @@ internal class Props {
             set.invoke(null, key, value)
             return "ok".toByteArray(StandardCharsets.UTF_8)
         } catch (t: Throwable) {
-            return err("setprop-failed:" + t.message)
+            return err("set prop-failed:" + t.message)
         }
     }
 
     companion object {
         private fun err(tail: String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
 }

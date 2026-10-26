@@ -44,10 +44,7 @@ object Loop {
 
     val FrameCopy: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1)
 
-    /** The same dispatchers as plain Executors, for Java callers. */
-    val workExecutor: Executor = Work.asExecutor()
     val blockingExecutor: Executor = Blocking.asExecutor()
-    val frameCopyExecutor: Executor = FrameCopy.asExecutor()
 
     /**
      * Only for framework APIs that take a Handler (listener registration,
@@ -66,13 +63,12 @@ object Loop {
             Dispatchers.Main.also { it.immediate.isDispatchNeeded(EmptyCoroutineContext) }
         } catch (t: Throwable) {
             // Factory missing from the jar: bind to the main looper directly.
-            System.err.println("hsd: Dispatchers.Main unavailable ($t); using a looper handler")
+            Logx.bootWarn("Dispatchers.Main unavailable; using a looper handler", t)
             mainHandler.asCoroutineDispatcher("hs-main")
         }
         scope =
             CoroutineScope(SupervisorJob() + Main.immediate + CoroutineExceptionHandler { _, t ->
-                System.err.println("hsd: uncaught in coroutine: $t")
-                t.printStackTrace()
+                Logx.e("uncaught in coroutine", t)
             })
     }
 

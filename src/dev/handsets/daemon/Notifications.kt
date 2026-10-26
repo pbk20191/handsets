@@ -30,11 +30,11 @@ internal class Notifications {
             text = runDumpsys()
         } catch (t: Throwable) {
             return err(
-                ("dumpsys-failed:" + t.javaClass.getSimpleName()
+                ("dumpsys-failed:" + t.javaClass.simpleName
                         + ":" + t.message)
             )
         }
-        if (text == null || text.isEmpty()) return err("empty-dumpsys")
+        if (text.isEmpty()) return err("empty-dumpsys")
 
         val blocks: MutableList<String> = splitRecords(text)
         val out = StringBuilder(4096)
@@ -42,10 +42,9 @@ internal class Notifications {
 
         var emitted = 0
         for (block in blocks) {
-            if (limit > 0 && emitted >= limit) break
-            val pkg: String? = extractAfter(block, "pkg=", " \t\n")
-            if (pkg == null) continue
-            if (pkgFilter != null && !pkgFilter.isEmpty() && (pkgFilter != pkg)) continue
+            if (limit in 1..emitted) break
+            val pkg: String = extractAfter(block, "pkg=", " \t\n") ?: continue
+            if (!pkgFilter.isNullOrEmpty() && (pkgFilter != pkg)) continue
 
             val key: String? = extractAfter(block, "\n      key=", "\n")
             val channel: String? = extractAfter(block, "channel=", " \t\n")
@@ -96,11 +95,11 @@ internal class Notifications {
             )
             val sb = StringBuilder(64 * 1024)
             BufferedReader(
-                InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8)
+                InputStreamReader(p.inputStream, StandardCharsets.UTF_8)
             ).use { r ->
                 val buf = CharArray(4096)
                 var n: Int
-                while ((r.read(buf).also { n = it }) > 0) sb.append(buf, 0, n)
+                while ((r.read(buf).also { n = it }) > 0) sb.appendRange(buf, 0, n)
             }
             p.waitFor()
             return sb.toString()
@@ -119,7 +118,7 @@ internal class Notifications {
                 // Stop scanning once we leave the "Notification List:" section
                 // (e.g. into the "Notifications by app:" report).
                 val sectionEnd = text.indexOf("\n  ", i) // next 2-space section header
-                if (sectionEnd >= 0 && (j < 0 || sectionEnd < j)) {
+                if (sectionEnd >= 0 && (j !in 0..sectionEnd)) {
                     // The NotificationRecord block usually ends at a line with
                     // exactly two spaces of indent — the section boundary.
                 }

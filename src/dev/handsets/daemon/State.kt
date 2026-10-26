@@ -268,10 +268,7 @@ internal class State(
             val pkgH = mainHandler
             val pkgR: BroadcastReceiver = object : BroadcastReceiver() {
                 override fun onReceive(c: Context?, i: Intent) {
-                    System.err.println(
-                        ("hs: pkg broadcast " + i.getAction()
-                                + " data=" + i.getDataString())
-                    )
+                    Logx.i("pkg broadcast ${i.getAction()} data=${i.getDataString()}")
                     invalidateAppCounts()
                     markDirty()
                 }
@@ -292,7 +289,7 @@ internal class State(
                 ctx.registerReceiver(pkgR, pkgFilter, null, pkgH)
             }
         } catch (t: Throwable) {
-            System.err.println("warn: package broadcast listener failed: " + t)
+            Logx.w("package broadcast listener failed", t)
         }
 
         // 2. Display state changes → screen on/off.
@@ -312,7 +309,7 @@ internal class State(
                 }
             }, handler)
         } catch (t: Throwable) {
-            System.err.println("warn: State display listener failed: " + t)
+            Logx.w("State display listener failed", t)
         }
 
         // 3. Configuration changes → uiMode (dark/light theme), locale,
@@ -343,7 +340,7 @@ internal class State(
                 ctx.registerReceiver(cfgR, cfgFilter, null, cfgH)
             }
         } catch (t: Throwable) {
-            System.err.println("warn: State config-change listener failed: " + t)
+            Logx.w("State config-change listener failed", t)
         }
     }
 

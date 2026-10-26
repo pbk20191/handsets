@@ -22,11 +22,11 @@ import java.nio.charset.StandardCharsets
 internal class Installer(private val ctx: Context) {
     fun grantAllRequested(pkg: String) {
         try {
-            val pm = ctx.getPackageManager()
+            val pm = ctx.packageManager
             val requested = pm.getPackageInfo(pkg, PackageManager.GET_PERMISSIONS)
                 .requestedPermissions
             if (requested == null) return
-            val svcs = arrayOf<Any?>(
+            val svcs = arrayOf(
                 iPermissionManagerOrNull(),
                 iPackageManager(),
             )
@@ -42,7 +42,7 @@ internal class Installer(private val ctx: Context) {
                 }
             }
             if (grant == null) return
-            val gp = grant.getParameterTypes()
+            val gp = grant.parameterTypes
             val userId = myUserId()
             for (perm in requested) {
                 val args = arrayOfNulls<Any>(gp.size)
@@ -72,11 +72,11 @@ internal class Installer(private val ctx: Context) {
             try {
                 val m = SessionParams::class.java
                     .getDeclaredMethod("setInstallFlags", Int::class.javaPrimitiveType)
-                m.setAccessible(true)
+                m.isAccessible = true
                 // setInstallFlags replaces; OR in our flag with whatever was there.
                 val f =
                     SessionParams::class.java.getDeclaredField("installFlags")
-                f.setAccessible(true)
+                f.isAccessible = true
                 val prev = f.getInt(params)
                 m.invoke(params, prev or flag)
             } catch (t: Throwable) {
@@ -84,7 +84,7 @@ internal class Installer(private val ctx: Context) {
                 try {
                     val f =
                         SessionParams::class.java.getDeclaredField("installFlags")
-                    f.setAccessible(true)
+                    f.isAccessible = true
                     f.setInt(params, f.getInt(params) or flag)
                 } catch (ignored: Throwable) {
                 }
@@ -103,9 +103,9 @@ internal class Installer(private val ctx: Context) {
 
         private fun findGrant(cls: Class<*>): Method? {
             var picked: Method? = null
-            for (m in cls.getMethods()) {
-                if ("grantRuntimePermission" != m.getName()) continue
-                val p = m.getParameterTypes()
+            for (m in cls.methods) {
+                if ("grantRuntimePermission" != m.name) continue
+                val p = m.parameterTypes
                 if (p.size >= 3 && p[0] == String::class.java && p[1] == String::class.java && (picked == null || p.size < picked.getParameterTypes().size)) {
                     picked = m
                 }
@@ -118,7 +118,7 @@ internal class Installer(private val ctx: Context) {
         }
 
         private fun err(tail: String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
 }

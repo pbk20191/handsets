@@ -49,7 +49,7 @@ class UiEvents(private val ua: UiAutomation) {
             }
             installed = true
         } catch (t: Throwable) {
-            System.err.println("warn: UiEvents install failed: $t")
+            Logx.w("UiEvents install failed", t)
         }
     }
 

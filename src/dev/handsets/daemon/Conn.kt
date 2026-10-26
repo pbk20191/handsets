@@ -33,7 +33,7 @@ class Conn(private val fd: FileDescriptor) {
     val scope = CoroutineScope(Loop.Main.immediate + job + CoroutineExceptionHandler { _, t ->
         // A stray failure in a connection's coroutine must never reach the
         // looper's uncaught handler (that would kill app_process).
-        if (t !is IOException) System.err.println("hsd: connection coroutine failed: $t")
+        if (t !is IOException) Logx.w("connection coroutine failed", t)
     })
 
     private var inBuf = ByteArray(8192)

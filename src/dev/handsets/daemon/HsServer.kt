@@ -19,7 +19,7 @@ internal class HsServer(private val port: Int, private val dispatch: Dispatch) {
         Os.listen(listenFd, 8)
         nonBlocking(listenFd)
         Io.watch(listenFd, Io.IN or Io.ERR) { acceptAll(); Io.IN or Io.ERR }
-        println("hsd listening on 127.0.0.1:$port")
+        Logx.boot("hsd listening on 127.0.0.1:$port")
     }
 
     private fun acceptAll() {
@@ -28,7 +28,7 @@ internal class HsServer(private val port: Int, private val dispatch: Dispatch) {
                 Os.accept(listenFd, null)
             } catch (e: ErrnoException) {
                 if (e.errno != OsConstants.EAGAIN && e.errno != OsConstants.EINTR) {
-                    System.err.println("hsd: accept failed: $e")
+                    Logx.w("accept failed", e)
                 }
                 return
             } ?: return
