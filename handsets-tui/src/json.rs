@@ -34,6 +34,17 @@ pub fn get_str<'a>(node: &'a Value, key: &str) -> Option<&'a str> {
     None
 }
 
+pub fn get_num(node: &Value, key: &str) -> Option<i64> {
+    if let Value::Obj(fields) = node {
+        for (k, v) in fields {
+            if k == key {
+                if let Value::Num(n) = v { return Some(*n); }
+            }
+        }
+    }
+    None
+}
+
 pub fn children(node: &Value) -> Option<&Vec<Value>> {
     if let Value::Obj(fields) = node {
         for (k, v) in fields {

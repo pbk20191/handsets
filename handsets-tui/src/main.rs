@@ -28,16 +28,19 @@ Usage: handsets-tui [options]
 Options:
   --host H     daemon host (default 127.0.0.1)
   --port P     daemon port (default 9008)
+  --active     list only the focused window (default: every app window,
+               including popups and bottom sheets in their own window)
   -h, --help   show this message
 ";
 
 struct Args {
     host: String,
     port: u16,
+    active: bool,
 }
 
 impl Default for Args {
-    fn default() -> Self { Self { host: "127.0.0.1".into(), port: 9008 } }
+    fn default() -> Self { Self { host: "127.0.0.1".into(), port: 9008, active: false } }
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -49,6 +52,7 @@ fn parse_args() -> Result<Args, String> {
             "--host" => a.host = it.next().ok_or("--host needs a value")?,
             "--port" => a.port = it.next().ok_or("--port needs a value")?
                 .parse().map_err(|_| "bad --port".to_string())?,
+            "--active" => a.active = true,
             other => return Err(format!("unknown arg: {other}")),
         }
     }
@@ -68,7 +72,7 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Args) -> io::Result<()> {
-    let mut app = App::new(args.host, args.port)?;
+    let mut app = App::new(args.host, args.port, args.active)?;
 
     let mut terminal = setup_terminal()?;
     let result = app.run(&mut terminal);

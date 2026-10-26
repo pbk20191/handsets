@@ -65,16 +65,16 @@ pub fn run_session(
             sess.invalidate_dump();
         }
         let hits = match sess.with_dump(|tree| {
-            // dump_active envelopes as { ts: ..., root: { ... } }; descend
-            // into the inner node so the walker hits the actual a11y root.
-            let root = obj_get(tree, "root").unwrap_or(tree);
+            // The app's windows, so a dialog or popup over the activity
+            // is searched too (and wins ties — see find_in).
+            let roots = crate::json::app_roots(tree);
             // `#id` short-circuits the text/desc walk so anonymous
             // clickable widgets (the ImageView icons that `hs ui`
             // surfaces with a `#name` label) are reachable from `hs tap`.
             if let Some(id_query) = query.strip_prefix('#') {
-                find_by_id(root, id_query, &flags)
+                find_by_id_in(&roots, id_query, &flags)
             } else {
-                find_all(root, query, &flags)
+                find_in(&roots, query, &flags)
             }
         }) {
             Ok(h) => h,
@@ -200,42 +200,102 @@ fn find_by_id(root: &Value, id_query: &str, flags: &ActionFlags) -> Vec<Hit> {
     let mut hits: Vec<Hit> = Vec::new();
     if id_query.is_empty() { return hits; }
     walk(root, &mut |node, _ancestors| {
-        let rid = obj_get(node, "rid").and_then(as_str).unwrap_or("");
-        if rid.is_empty() { return Some(()); }
-        let short = rid.rsplit('/').next().unwrap_or(rid);
-        if rid != id_query && short != id_query { return Some(()); }
-        let bounds = bounds_of(node)?;
-        let text = obj_get(node, "text").and_then(as_str).unwrap_or("").to_string();
-        let desc = obj_get(node, "desc").and_then(as_str).unwrap_or("").to_string();
-        let cls  = obj_get(node, "cls").and_then(as_str).unwrap_or("").to_string();
-        let flag_str = obj_get(node, "flags").and_then(as_str).unwrap_or("").to_string();
-        if flags.require_clickable && !flag_str.contains('c') { return Some(()); }
-        if flags.require_enabled   && !flag_str.contains('e') { return Some(()); }
-        if flags.require_visible {
-            if !flag_str.contains('v') { return Some(()); }
-            if bounds.2 <= bounds.0 || bounds.3 <= bounds.1 { return Some(()); }
+        if rid_matches(node, id_query) {
+            hits.extend(id_hit(node, flags));
         }
-        // Priority is uniform across id matches — they're already as
-        // specific as a selector gets, no text/desc tie-break needed.
-        hits.push(Hit {
-            text, desc, cls, rid: rid.to_string(),
-            flags: flag_str, bounds,
-            priority: Priority::ExactText,
-        });
         Some(())
     });
     hits
+}
+
+/// `find_by_id` over several window roots, topmost first. `name[i]` is
+/// the form `hs ui` gives anonymous cells: the i-th child of the node with
+/// that id, tapped at its first clickable node.
+fn find_by_id_in(roots: &[&Value], id_query: &str, flags: &ActionFlags) -> Vec<Hit> {
+    let indexed = id_query.strip_suffix(']')
+        .and_then(|q| q.split_once('['))
+        .and_then(|(name, i)| Some((name, i.parse::<usize>().ok()?)));
+    let Some((name, i)) = indexed else {
+        return roots.iter().rev().flat_map(|r| find_by_id(r, id_query, flags)).collect();
+    };
+    let mut hits = Vec::new();
+    for root in roots.iter().rev() {
+        walk(root, &mut |node, _ancestors| {
+            if rid_matches(node, name) {
+                let cell = obj_get(node, "children").and_then(as_arr).and_then(|k| k.get(i));
+                if let Some(cell) = cell {
+                    hits.extend(id_hit(first_clickable(cell).unwrap_or(cell), flags));
+                }
+            }
+            Some(())
+        });
+    }
+    hits
+}
+
+fn rid_matches(node: &Value, id_query: &str) -> bool {
+    let rid = obj_get(node, "rid").and_then(as_str).unwrap_or("");
+    let short = rid.rsplit('/').next().unwrap_or(rid);
+    !rid.is_empty() && (rid == id_query || short == id_query)
+}
+
+fn first_clickable(node: &Value) -> Option<&Value> {
+    let mut found = None;
+    walk(node, &mut |n, _ancestors| {
+        if found.is_none() && obj_get(n, "flags").and_then(as_str).unwrap_or("").contains('c') {
+            found = Some(n);
+        }
+        Some(())
+    });
+    found
+}
+
+fn id_hit(node: &Value, flags: &ActionFlags) -> Option<Hit> {
+    let bounds = bounds_of(node)?;
+    let flag_str = obj_get(node, "flags").and_then(as_str).unwrap_or("").to_string();
+    if flags.require_clickable && !flag_str.contains('c') { return None; }
+    if flags.require_enabled   && !flag_str.contains('e') { return None; }
+    if flags.require_visible {
+        if !flag_str.contains('v') { return None; }
+        if bounds.2 <= bounds.0 || bounds.3 <= bounds.1 { return None; }
+    }
+    let field = |k| obj_get(node, k).and_then(as_str).unwrap_or("").to_string();
+    // Priority is uniform across id matches — they're already as
+    // specific as a selector gets, no text/desc tie-break needed.
+    Some(Hit {
+        text: field("text"), desc: field("desc"), cls: field("cls"), rid: field("rid"),
+        flags: flag_str, bounds,
+        priority: Priority::ExactText,
+    })
+}
+
+/// `find_all` over several window roots. Hits from upper windows come
+/// first, so a dialog's "OK" beats the activity's "OK" at equal priority.
+/// The aggregator check measures against the full screen, not a popup.
+fn find_in(roots: &[&Value], query: &str, flags: &ActionFlags) -> Vec<Hit> {
+    let screen_area = roots.iter().filter_map(|r| bounds_of(r)).map(area).max().unwrap_or(0);
+    let mut hits: Vec<Hit> = roots.iter().rev()
+        .flat_map(|r| find_all_within(r, screen_area, query, flags))
+        .collect();
+    hits.sort_by_key(|h| h.priority);
+    hits
+}
+
+fn area((l, t, r, b): (i32, i32, i32, i32)) -> i64 {
+    ((r - l).max(0) as i64) * ((b - t).max(0) as i64)
 }
 
 /// Walk the tree, classify every node whose text/desc matches `query`,
 /// then return the matches sorted by priority (best first). Filters apply
 /// upstream of priority so a visible substring match still beats an
 /// invisible exact one when --visible is set.
+#[cfg(test)]
 fn find_all(root: &Value, query: &str, flags: &ActionFlags) -> Vec<Hit> {
+    find_all_within(root, bounds_of(root).map(area).unwrap_or(0), query, flags)
+}
+
+fn find_all_within(root: &Value, screen_area: i64, query: &str, flags: &ActionFlags) -> Vec<Hit> {
     let q_low = query.to_ascii_lowercase();
-    let screen_area = bounds_of(root)
-        .map(|(l, t, r, b)| ((r - l).max(0) as i64) * ((b - t).max(0) as i64))
-        .unwrap_or(0);
     let mut hits: Vec<Hit> = Vec::new();
     walk(root, &mut |node, ancestors| {
         let raw_bounds = bounds_of(node)?;
@@ -350,12 +410,12 @@ where
 /// but the daemon can't use the faster `node_click id=…` shortcut and the
 /// reported flags lie about what got tapped. Walking up to the first
 /// clickable ancestor gives both: accurate logs and the click-by-id path.
-fn promote_to_clickable<'a>(
+fn promote_to_clickable(
     bounds: (i32, i32, i32, i32),
     rid: &str,
     cls: &str,
     flag_str: &str,
-    ancestors: &[&'a Value],
+    ancestors: &[&Value],
     screen_area: i64,
 ) -> ((i32, i32, i32, i32), String, String, String) {
     if flag_str.contains('c') {
@@ -401,6 +461,38 @@ fn bounds_of(node: &Value) -> Option<(i32, i32, i32, i32)> {
 mod tests {
     use super::*;
     use crate::json;
+
+    /// `hs tap "OK"` with a dialog over the activity must hit the dialog,
+    /// not the activity's own "OK" underneath it.
+    #[test]
+    fn popup_window_wins_over_the_activity_below() {
+        let dump = json::parse(r#"{"windows":[
+            {"type":1,"layer":5,"root":{"cls":"android.widget.FrameLayout","bounds":[0,1600,1080,2400],"children":[
+                {"cls":"android.widget.Button","text":"OK","flags":"cev","bounds":[400,2200,680,2300],"children":[]}]}},
+            {"type":1,"layer":2,"root":{"cls":"android.widget.FrameLayout","bounds":[0,0,1080,2400],"children":[
+                {"cls":"android.widget.Button","text":"OK","flags":"cev","bounds":[400,100,680,200],"children":[]}]}}
+        ]}"#).unwrap();
+        let hits = find_in(&json::app_roots(&dump), "OK", &ActionFlags::default());
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].bounds, (400, 2200, 680, 2300));
+    }
+
+    /// `hs ui` lists image-only grid cells as `#rv_cards[i]`; `hs tap`
+    /// takes that label back.
+    #[test]
+    fn indexed_id_taps_the_nth_cell_under_that_id() {
+        let dump = json::parse(r#"{"root":{"cls":"android.widget.FrameLayout","bounds":[0,0,1080,2400],"children":[
+            {"cls":"android.widget.GridView","rid":"com.foo:id/rv_cards","flags":"s","bounds":[0,600,1080,1800],"children":[
+                {"cls":"android.view.ViewGroup","flags":"ce","bounds":[0,600,360,1000],"children":[]},
+                {"cls":"android.widget.FrameLayout","flags":"","bounds":[360,600,720,1000],"children":[
+                    {"cls":"android.view.ViewGroup","flags":"ce","bounds":[370,610,710,990],"children":[]}]}
+            ]}]}}"#).unwrap();
+        let roots = json::app_roots(&dump);
+        let hits = find_by_id_in(&roots, "rv_cards[1]", &ActionFlags::default());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].bounds, (370, 610, 710, 990));
+        assert!(find_by_id_in(&roots, "rv_cards[5]", &ActionFlags::default()).is_empty());
+    }
 
     /// Regression: `hs tap 闲鱼` used to silently tap whatever sat at the
     /// screen centre (Calendar on the home screen) when the launcher root

@@ -63,6 +63,39 @@ pub fn as_arr(v: &Value) -> Option<&[Value]> {
     }
 }
 
+/// Every window root in a dump, in the daemon's order (topmost first).
+/// Unwraps both envelopes: `dump_active` = `{"root": …}`, `dump` =
+/// `{"windows": [{…, "root": …}, …]}`; a bare node passes through.
+pub fn all_roots(dump: &Value) -> Vec<&Value> {
+    if let Some(root) = obj_get(dump, "root") {
+        return vec![root];
+    }
+    if let Some(windows) = obj_get(dump, "windows").and_then(as_arr) {
+        return windows.iter().filter_map(|w| obj_get(w, "root")).collect();
+    }
+    if obj_get(dump, "cls").is_some() {
+        return vec![dump];
+    }
+    Vec::new()
+}
+
+/// Roots of the app's own windows in a dump, bottom (activity) first.
+/// `dump` lists every window; this keeps TYPE_APPLICATION ones (activity,
+/// dialogs, popups, bottom sheets) and drops the status bar, IME and other
+/// system windows. A `dump_active` payload (`{"root": …}`) passes through.
+pub fn app_roots(dump: &Value) -> Vec<&Value> {
+    const TYPE_APPLICATION: i64 = 1;
+    if let Some(root) = obj_get(dump, "root") {
+        return vec![root];
+    }
+    let mut apps: Vec<&Value> = obj_get(dump, "windows").and_then(as_arr).unwrap_or(&[])
+        .iter()
+        .filter(|w| obj_get(w, "type").and_then(as_num) == Some(TYPE_APPLICATION))
+        .collect();
+    apps.sort_by_key(|w| obj_get(w, "layer").and_then(as_num).unwrap_or(0));
+    apps.into_iter().filter_map(|w| obj_get(w, "root")).collect()
+}
+
 // ---------- parser internals ----------
 
 struct Parser<'a> {
@@ -304,5 +337,33 @@ impl<'a> Parser<'a> {
         } else {
             Err(format!("bad number '{s}' at byte {start}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_roots_keeps_app_windows_bottom_first() {
+        let dump = parse(r#"{"windows":[
+            {"type":3,"layer":9,"root":{"cls":"StatusBar"}},
+            {"type":1,"layer":5,"root":{"cls":"Popup"}},
+            {"type":1,"layer":2,"root":{"cls":"Activity"}}
+        ]}"#).unwrap();
+        let cls: Vec<&str> = app_roots(&dump).iter()
+            .map(|r| obj_get(r, "cls").and_then(as_str).unwrap()).collect();
+        assert_eq!(cls, ["Activity", "Popup"]);
+        let active = parse(r#"{"root":{"cls":"Only"}}"#).unwrap();
+        assert_eq!(app_roots(&active).len(), 1);
+    }
+
+    #[test]
+    fn all_roots_unwraps_every_envelope() {
+        let dump = parse(r#"{"windows":[{"type":3,"root":{"cls":"A"}},{"type":1,"root":{"cls":"B"}}]}"#).unwrap();
+        assert_eq!(all_roots(&dump).len(), 2);
+        assert_eq!(all_roots(&parse(r#"{"ts":1,"root":{"cls":"A"}}"#).unwrap()).len(), 1);
+        assert_eq!(all_roots(&parse(r#"{"cls":"A"}"#).unwrap()).len(), 1);
+        assert!(all_roots(&parse(r#"{"ts":1}"#).unwrap()).is_empty());
     }
 }

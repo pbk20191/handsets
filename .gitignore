@@ -1,5 +1,7 @@
 # ── Java daemon build artifacts ──────────────────────────────
 build/
+build-gradle/
+.gradle/
 *.class
 *.dex
 
@@ -37,3 +39,6 @@ bindings/python/build/
 /screenshot.png
 /1.jpg
 /build.log
+
+# Machine-local SDK path
+local.properties

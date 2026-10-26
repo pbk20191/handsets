@@ -84,6 +84,8 @@ struct SeeOpts {
     size: Option<u32>,
     native: bool,
     secure_check: bool,
+    /// .json / .xml: every window instead of the focused one (as `hs ui --all`).
+    all_windows: bool,
 }
 
 #[derive(Debug)]
@@ -108,7 +110,7 @@ enum Cmd {
     TypeFocused { text: String, flags: flags::ActionFlags },
     TypeInto { selector: String, text: String, flags: flags::ActionFlags },
     SettingsListAll,
-    Ui { format: UiFormat, all: bool },
+    Ui { format: UiFormat, windows: UiWindows },
     Devices,
     StateDaemon,
     Shell,
@@ -126,7 +128,7 @@ enum Cmd {
     Location { json: bool },
     Notif { pkg: Option<String>, history: bool, limit: u32, json: bool },
     Clip { text: Option<String>, watch: bool, interval_ms: u64 },
-    Tui,
+    Tui { active: bool },
 }
 
 // SMS type codes — Android Telephony.TextBasedSmsColumns.
@@ -150,6 +152,11 @@ const PHONE_TYPES: &[(i64, &str)] = &[
 #[derive(Debug, Clone, Copy)]
 enum UiFormat { Human, Interactive, Json, Xml }
 
+/// Which windows `hs ui` reads: the app's own (activity plus its dialogs
+/// and popups, the default), only the focused one, or every window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum UiWindows { App, Active, All }
+
 fn parse_use(rest: &[&str]) -> Result<daemon::ConnectOpts, String> {
     let mut opts = daemon::ConnectOpts { serial: None, port: None };
     let mut i = 0;
@@ -163,6 +170,9 @@ fn parse_use(rest: &[&str]) -> Result<daemon::ConnectOpts, String> {
                 i += 1;
                 opts.port = Some(rest.get(i).ok_or("--port needs a value")?
                     .parse().map_err(|_| "invalid --port".to_string())?);
+            }
+            serial if !serial.starts_with('-') && opts.serial.is_none() => {
+                opts.serial = Some(serial.to_string());
             }
             other => return Err(format!("unknown connect arg: {other}")),
         }
@@ -305,6 +315,7 @@ fn parse_see(rest: &[&str]) -> Result<SeeOpts, String> {
             }
             "--native" | "--max" => opts.native = true,
             "--secure-check" | "--secure" => opts.secure_check = true,
+            "--all" => opts.all_windows = true,
             path if path.starts_with('-') => return Err(format!("unknown see arg: {path}")),
             path => {
                 if opts.path.is_some() {
@@ -318,7 +329,7 @@ fn parse_see(rest: &[&str]) -> Result<SeeOpts, String> {
     if opts.native && opts.size.is_some() {
         return Err("see: --native and --size are mutually exclusive".into());
     }
-    if opts.path.is_none() && (opts.size.is_some() || opts.native || opts.secure_check) {
+    if opts.path.is_none() && (opts.size.is_some() || opts.native || opts.secure_check || opts.all_windows) {
         return Err("see: capture flags need a PATH; bare `hs see` opens the viewer".into());
     }
     Ok(opts)
@@ -384,14 +395,16 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         i += 1;
     }
 
-    // `--device SERIAL` resolves to the per-device forwarded port so the
-    // rest of the CLI can stay device-agnostic. We deliberately do this
-    // before verb parsing so a missing forward fails fast with a clear
-    // error rather than later as "no daemon listening".
-    if let Some(serial) = device_serial.as_deref() {
-        match resolve_device_port(serial) {
-            Ok(p) => port = p,
-            Err(e) => return Err(e),
+    // During `use` and `drop`, `--device SERIAL` selects the ADB device to
+    // bootstrap or tear down. Other verbs use it to route to a daemon that
+    // `hs use` already started.
+    let selects_device = matches!(positional.first(), Some(&"use") | Some(&"drop"));
+    if !selects_device {
+        if let Some(serial) = device_serial.as_deref() {
+            {
+                let p = resolve_device_port(serial)?;
+                port = p
+            }
         }
     }
 
@@ -400,19 +413,35 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         None => Cmd::Devices,
 
         // ─── Lifecycle ────────────────────────────────────────────────
-        Some((&"use", rest))  => Cmd::Connect(parse_use(rest)?),
-        Some((&"drop", rest)) => Cmd::Disconnect(parse_drop(rest)?),
+        Some((&"use", rest)) => {
+            let mut connect = parse_use(rest)?;
+            if let Some(serial) = device_serial.as_deref() {
+                if let Some(selected) = connect.serial.as_deref() {
+                    if selected != serial {
+                        return Err("conflicting device selectors for `hs use`".into());
+                    }
+                }
+                connect.serial = Some(serial.to_string());
+            }
+            Cmd::Connect(connect)
+        }
+        Some((&"drop", rest)) => {
+            let mut drop = parse_drop(rest)?;
+            if device_serial.is_some() {
+                drop.serial = device_serial;
+            }
+            Cmd::Disconnect(drop)
+        }
 
         // ─── See — capture by extension, bare = viewer ───────────────
         Some((&"see", rest)) => Cmd::See(parse_see(rest)?),
 
         // ─── TUI — keyboard-driven inspector ─────────────────────────
-        Some((&"tui", rest)) => {
-            if !rest.is_empty() {
-                return Err(format!("tui takes no positional args (got: {})", rest.join(" ")));
-            }
-            Cmd::Tui
-        }
+        Some((&"tui", rest)) => match rest {
+            [] => Cmd::Tui { active: false },
+            ["--active"] => Cmd::Tui { active: true },
+            _ => return Err(format!("tui takes only --active (got: {})", rest.join(" "))),
+        },
 
         // ─── Apps ─────────────────────────────────────────────────────
         Some((&"apps", rest)) => {
@@ -457,18 +486,19 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
             // `--tree`; `-i` / `--interactive` remain accepted no-ops so
             // older scripts keep working.
             let mut fmt = UiFormat::Interactive;
-            let mut all = false;
+            let mut windows = UiWindows::App;
             for tok in rest {
                 match *tok {
                     "--json"            => fmt = UiFormat::Json,
                     "--xml"             => fmt = UiFormat::Xml,
                     "--tree"            => fmt = UiFormat::Human,
                     "-i" | "--interactive" => fmt = UiFormat::Interactive,
-                    "--all"             => all = true,
+                    "--all"             => windows = UiWindows::All,
+                    "--active"          => windows = UiWindows::Active,
                     other               => return Err(format!("unknown ui arg: {other}")),
                 }
             }
-            Cmd::Ui { format: fmt, all }
+            Cmd::Ui { format: fmt, windows }
         }
         Some((&"show", rest)) => match rest.first() {
             None => Cmd::Adb(adb::Cmd::State("device".into())),
@@ -886,8 +916,8 @@ fn run(opts: &Opts) -> io::Result<()> {
         Cmd::Cp { src, dst } => run_cp(&opts.host, opts.port, src, dst),
         Cmd::ShowPkg(pkg) => run_show_pkg(&opts.host, opts.port, pkg),
         Cmd::Info => run_info(&opts.host, opts.port),
-        Cmd::Ui { format, all } => run_ui(&opts.host, opts.port, *format, *all),
-        Cmd::Tui => tui::run(&opts.host, opts.port),
+        Cmd::Ui { format, windows } => run_ui(&opts.host, opts.port, *format, *windows),
+        Cmd::Tui { active } => tui::run(&opts.host, opts.port, *active),
         Cmd::SettingsListAll => {
             // Three Shell-passthrough calls glued client-side with header
             // lines — keeps the daemon's shell command simple (no quote
@@ -1042,7 +1072,7 @@ fn run_submit(opts: &Opts, sel: Option<&str>, flags: &flags::ActionFlags) -> io:
             }
             return Err(reporter.fail("submit", e));
         }
-        return reporter.ok("submit", &String::from_utf8_lossy(&body).trim_end(),
+        return reporter.ok("submit", String::from_utf8_lossy(&body).trim_end(),
             json_out::Obj::new().opt_s("selector", sel));
     }
 }
@@ -1065,7 +1095,7 @@ fn run_paste(opts: &Opts, sel: Option<&str>, flags: &flags::ActionFlags) -> io::
             }
             return Err(reporter.fail("paste", e));
         }
-        return reporter.ok("paste", &String::from_utf8_lossy(&body).trim_end(),
+        return reporter.ok("paste", String::from_utf8_lossy(&body).trim_end(),
             json_out::Obj::new().opt_s("selector", sel));
     }
 }
@@ -1077,21 +1107,21 @@ fn run_type_focused(opts: &Opts, text: &str, flags: &flags::ActionFlags) -> io::
     if let Some(e) = errors::parse_err(&body) {
         return Err(reporter.fail("type", e));
     }
-    reporter.ok("type", &String::from_utf8_lossy(&body).trim_end(),
+    reporter.ok("type", String::from_utf8_lossy(&body).trim_end(),
         json_out::Obj::new().s("text", text))
 }
 
 /// `hs fill` accepts both grammars. Any selector containing `=` is treated
 /// as daemon-grammar (`id=…`, `class=EditText text~=…`) and passed through
-/// unchanged. Bare strings are free-text queries: dump the active window,
-/// find the best-matching input widget, then rebuild a daemon selector
+/// unchanged. Bare strings are free-text queries: dump the app's windows
+/// (the focused one with `--active`), find the best-matching input widget, then rebuild a daemon selector
 /// (preferring `id=<full-rid>`, falling back to class + exact text) so the
 /// daemon's narrower parser can still resolve it.
-fn resolve_fill_selector(conn: &mut Conn, sel_in: &str) -> io::Result<String> {
+fn resolve_fill_selector(conn: &mut Conn, sel_in: &str, flags: &flags::ActionFlags) -> io::Result<String> {
     if sel_in.contains('=') {
         return Ok(sel_in.to_string());
     }
-    let body = conn.call("dump_active")?;
+    let body = conn.call(flags.dump_wire())?;
     if errors::parse_err(&body).is_some() {
         // Couldn't read the tree — fall through and let the daemon error.
         return Ok(sel_in.to_string());
@@ -1100,9 +1130,9 @@ fn resolve_fill_selector(conn: &mut Conn, sel_in: &str) -> io::Result<String> {
         .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
     let dump = json::parse(text)
         .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
-    let root = json::obj_get(&dump, "root").unwrap_or(&dump);
+    let roots: Vec<&json::Value> = json::app_roots(&dump).into_iter().rev().collect();
 
-    match find_fill_target(root, sel_in) {
+    match find_fill_target(&roots, sel_in) {
         Some(node) => Ok(node_to_daemon_selector(node)),
         None => Err(io::Error::other(format!(
             "fill: no input widget matched {sel_in:?} — pass an explicit \
@@ -1150,26 +1180,31 @@ fn fill_priority(q: &str, q_low: &str, text: &str, desc: &str, hint: &str) -> Op
     None
 }
 
-fn find_fill_target<'a>(root: &'a json::Value, query: &str) -> Option<&'a json::Value> {
+/// `roots` are window roots, topmost first; on equal rank the upper
+/// window's input wins.
+fn find_fill_target<'a>(roots: &[&'a json::Value], query: &str) -> Option<&'a json::Value> {
     let q_low = query.to_lowercase();
 
     // Phase 1: prefer an input widget whose own text/desc/hint matches.
     // Empty EditTexts surface their hint as `text` in the dump, so this
     // catches the common "fill the field whose placeholder mentions X" case.
     let mut best: Option<(u8, &json::Value)> = None;
-    find_input_match(root, query, &q_low, &mut best);
+    for root in roots { find_input_match(root, query, &q_low, &mut best); }
     if let Some((_, n)) = best { return Some(n); }
 
     // Phase 2: label-anchored — find any node matching the query, then
     // take the nearest input widget below or right-of it. Mirrors how a
     // human reads a form: label on the left or above, field next to it.
-    let mut labels: Vec<&json::Value> = Vec::new();
-    collect_labels(root, &q_low, &mut labels);
-    for label in labels {
-        let Some(lb) = selector::bounds(label) else { continue; };
-        let mut nearest: Option<(i64, &json::Value)> = None;
-        find_nearest_input(root, lb, &mut nearest);
-        if let Some((_, n)) = nearest { return Some(n); }
+    // The field is looked for in the label's own window.
+    for root in roots {
+        let mut labels: Vec<&json::Value> = Vec::new();
+        collect_labels(root, &q_low, &mut labels);
+        for label in labels {
+            let Some(lb) = selector::bounds(label) else { continue; };
+            let mut nearest: Option<(i64, &json::Value)> = None;
+            find_nearest_input(root, lb, &mut nearest);
+            if let Some((_, n)) = nearest { return Some(n); }
+        }
     }
     None
 }
@@ -1245,7 +1280,7 @@ fn run_type_into(
     // Selectors with no `=` are free-text queries: look up the best
     // matching EditText in the live dump and rebuild a daemon-grammar
     // selector for it. Mirrors `hs tap "TEXT"`.
-    let resolved = resolve_fill_selector(&mut conn, selector)?;
+    let resolved = resolve_fill_selector(&mut conn, selector, flags)?;
     let mut attempts = flags.total_attempts();
     loop {
         // Daemon wire command: node_set_text <selector> value="..."
@@ -1258,7 +1293,7 @@ fn run_type_into(
             }
             return Err(reporter.fail("type", e));
         }
-        return reporter.ok("type", &String::from_utf8_lossy(&body).trim_end(),
+        return reporter.ok("type", String::from_utf8_lossy(&body).trim_end(),
             json_out::Obj::new()
                 .s("selector", &resolved)
                 .s("query", selector)
@@ -1266,11 +1301,18 @@ fn run_type_into(
     }
 }
 
-/// `hs ui [--json|--xml] [--all]` — UI tree dump in the chosen format.
-/// Default is a human-readable indented outline; `--all` covers every
-/// window (otherwise just the active one).
-fn run_ui(host: &str, port: u16, format: UiFormat, all: bool) -> io::Result<()> {
-    let wire = if all { "dump" } else { "dump_active" };
+/// `hs ui [--tree|--json|--xml] [--active|--all]` — UI tree dump in the
+/// chosen format. The table and `--tree` cover the app's windows, so
+/// popups and bottom sheets show up; `--active` limits them to the focused
+/// window. `--json` / `--xml` are the raw dump: the focused window, or
+/// every window with `--all`.
+fn run_ui(host: &str, port: u16, format: UiFormat, windows: UiWindows) -> io::Result<()> {
+    let raw = matches!(format, UiFormat::Json | UiFormat::Xml);
+    let wire = match windows {
+        UiWindows::All => "dump",
+        UiWindows::App if !raw => "dump",
+        _ => "dump_active",
+    };
     let mut conn = Conn::connect(host, port)?;
     let body = conn.call(wire)?;
     let mut out = io::stdout().lock();
@@ -1291,41 +1333,50 @@ fn run_ui(host: &str, port: u16, format: UiFormat, all: bool) -> io::Result<()> 
                 .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
             let json = json::parse(text)
                 .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
-            out.write_all(ui_dump::render_human(&json).as_bytes())?;
+            out.write_all(ui_dump::render_human(&ui_roots(&json, windows)).as_bytes())?;
         }
         UiFormat::Interactive => {
             let text = std::str::from_utf8(&body)
                 .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
             let json = json::parse(text)
                 .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
-            out.write_all(ui_dump::render_interactive(&json).as_bytes())?;
+            out.write_all(ui_dump::render_interactive(&ui_roots(&json, windows)).as_bytes())?;
         }
     }
     out.flush()
+}
+
+fn ui_roots(dump: &json::Value, windows: UiWindows) -> Vec<&json::Value> {
+    if windows == UiWindows::All { json::all_roots(dump) } else { json::app_roots(dump) }
 }
 
 /// `hs see [PATH]` — bare opens the viewer; otherwise extension picks
 /// the format (jpg/webp/png screenshot, xml/json UI hierarchy).
 fn run_see(host: &str, port: u16, opts: &SeeOpts) -> io::Result<()> {
     let Some(path) = opts.path.as_deref() else {
-        return mirror::run(host, port, mirror::Args::default());
+        return mirror::run(host, port, mirror::Args);
     };
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default();
+    let is_tree = matches!(ext.as_str(), "json" | "xml");
+    if opts.all_windows && !is_tree {
+        return Err(io::Error::other("see: --all only applies to .json/.xml"));
+    }
+    let dump_wire = if opts.all_windows { "dump" } else { "dump_active" };
     let mut conn = Conn::connect(host, port)?;
     let bytes: Vec<u8> = match ext.as_str() {
         "jpg" | "jpeg" => conn.call(&see_screenshot_wire(opts, "jpeg"))?,
         "webp"         => conn.call(&see_screenshot_wire(opts, "webp"))?,
         "png"          => conn.call(&see_screenshot_wire(opts, "png"))?,
-        "json"         => conn.call("dump_active")?,
+        "json"         => conn.call(dump_wire)?,
         "xml" => {
             if opts.size.is_some() || opts.native || opts.secure_check {
                 return Err(io::Error::other("see: screenshot flags only apply to jpg/webp/png"));
             }
-            let body = conn.call("dump_active")?;
+            let body = conn.call(dump_wire)?;
             let text = std::str::from_utf8(&body)
                 .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
             let json = json::parse(text)
@@ -1400,7 +1451,9 @@ fn run_wait(
     } else if is_component(spec) || is_pkg(spec) {
         format!("wait_for_activity n={spec} timeout_ms={timeout_ms}")
     } else {
-        format!("wait_for_text text={spec:?} timeout_ms={timeout_ms}")
+        // Same windows as tap / find: the app's, or the focused one.
+        let scope = if f.active_window { "active" } else { "app" };
+        format!("wait_for_text text={spec:?} scope={scope} timeout_ms={timeout_ms}")
     };
     // Retry layer: timeout exhaustion gets retried `retries` additional
     // times. For most waits this is a no-op (retries=0), but it lets RPA
@@ -1416,7 +1469,7 @@ fn run_wait(
             }
             return Err(reporter.fail("wait", e));
         }
-        return reporter.ok("wait", &String::from_utf8_lossy(&body).trim_end(),
+        return reporter.ok("wait", String::from_utf8_lossy(&body).trim_end(),
             json_out::Obj::new().s("spec", spec).n("timeout_ms", timeout_ms as i64));
     }
 }
@@ -1438,7 +1491,7 @@ fn run_find(
             errors::ErrInfo::new(errors::ErrCode::BadArg, e))),
     };
     let mut conn = Conn::connect(host, port)?;
-    let body = conn.call("dump_active")?;
+    let body = conn.call(f.dump_wire())?;
     if let Some(e) = errors::parse_err(&body) {
         return Err(reporter.fail("find", e));
     }
@@ -1446,7 +1499,8 @@ fn run_find(
         .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
     let json = json::parse(text)
         .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
-    let ctx = selector::MatchCtx::new(&json);
+    // App windows, topmost first — the order `hs tap` prefers.
+    let ctx = selector::MatchCtx::from_roots(json::app_roots(&json).into_iter().rev().collect());
     let mut matches = selector::find_all_with(&ctx, &selectors);
     selector::apply_filters(&mut matches, f);
 
@@ -1555,7 +1609,7 @@ pub(crate) fn dispatch_session_verb(
             if let Some(e) = errors::parse_err(&body) {
                 return Err(reporter.fail("tap", e));
             }
-            reporter.ok("tap", &String::from_utf8_lossy(&body).trim_end(),
+            reporter.ok("tap", String::from_utf8_lossy(&body).trim_end(),
                 json_out::Obj::new().n("x", x as i64).n("y", y as i64))
         }
         Cmd::Wait { spec, mut flags } => {
@@ -1579,7 +1633,7 @@ pub(crate) fn dispatch_session_verb(
             if let Some(e) = errors::parse_err(&body) {
                 return Err(reporter.fail("submit", e));
             }
-            reporter.ok("submit", &String::from_utf8_lossy(&body).trim_end(),
+            reporter.ok("submit", String::from_utf8_lossy(&body).trim_end(),
                 json_out::Obj::new().opt_s("selector", sel.as_deref()))
         }
         Cmd::Paste { sel, mut flags } => {
@@ -1593,7 +1647,7 @@ pub(crate) fn dispatch_session_verb(
             if let Some(e) = errors::parse_err(&body) {
                 return Err(reporter.fail("paste", e));
             }
-            reporter.ok("paste", &String::from_utf8_lossy(&body).trim_end(),
+            reporter.ok("paste", String::from_utf8_lossy(&body).trim_end(),
                 json_out::Obj::new().opt_s("selector", sel.as_deref()))
         }
         Cmd::TypeFocused { text, mut flags } => {
@@ -1603,18 +1657,18 @@ pub(crate) fn dispatch_session_verb(
             if let Some(e) = errors::parse_err(&body) {
                 return Err(reporter.fail("type", e));
             }
-            reporter.ok("type", &String::from_utf8_lossy(&body).trim_end(),
+            reporter.ok("type", String::from_utf8_lossy(&body).trim_end(),
                 json_out::Obj::new().s("text", &text))
         }
         Cmd::TypeInto { selector, text, mut flags } => {
             merge_session_defaults(&mut flags, sess);
             let reporter = output::Reporter::new(flags.out(sess.default_out));
-            let resolved = resolve_fill_selector(&mut sess.conn, &selector)?;
+            let resolved = resolve_fill_selector(&mut sess.conn, &selector, &flags)?;
             let body = sess.conn.call(&format!("node_set_text {resolved} value={text:?}"))?;
             if let Some(e) = errors::parse_err(&body) {
                 return Err(reporter.fail("type", e));
             }
-            reporter.ok("type", &String::from_utf8_lossy(&body).trim_end(),
+            reporter.ok("type", String::from_utf8_lossy(&body).trim_end(),
                 json_out::Obj::new()
                     .s("selector", &resolved)
                     .s("query", &selector)
@@ -1657,6 +1711,7 @@ fn merge_session_defaults(f: &mut flags::ActionFlags, sess: &session::Session) {
     if !f.require_visible       { f.require_visible   = sess.defaults.require_visible; }
     if !f.require_clickable     { f.require_clickable = sess.defaults.require_clickable; }
     if !f.require_enabled       { f.require_enabled   = sess.defaults.require_enabled; }
+    if !f.active_window         { f.active_window     = sess.defaults.active_window; }
     if f.out_fmt.is_none()      { f.out_fmt = sess.defaults.out_fmt; }
 }
 
@@ -1890,7 +1945,7 @@ fn run_show_pkg(host: &str, port: u16, pkg: &str) -> io::Result<()> {
     // Try a short dumpsys package — the first few lines usually cover
     // versionName / versionCode / firstInstallTime.
     let info = conn.call(&format!("dumpsys package {pkg}"));
-    if let Ok(_) = info {
+    if info.is_ok() {
         // dumpsys returns chunked frames; for now skip detailed parsing.
         // The path alone is the most-asked-for field.
     }
@@ -2394,5 +2449,80 @@ fn try_auto_use(port: u16) -> Result<(), String> {
         n => Err(format!(
             "{n} devices attached; pass `hs use SERIAL` to pick one"
         )),
+    }
+}
+
+#[cfg(test)]
+mod parse_use_tests {
+    use super::{parse_args, Cmd};
+
+    fn selected_serial(args: &[&str]) -> Option<String> {
+        let args = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+        let opts = parse_args(&args).expect("use arguments should parse");
+        match opts.cmd {
+            Cmd::Connect(connect) => connect.serial,
+            other => panic!("expected connect command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn use_accepts_serial_as_a_positional_argument() {
+        assert_eq!(selected_serial(&["use", "192.168.0.10:5555"]),
+            Some("192.168.0.10:5555".into()));
+    }
+
+    #[test]
+    fn global_device_selects_the_device_during_bootstrap() {
+        assert_eq!(selected_serial(&["--device", "SERIAL", "use"]),
+            Some("SERIAL".into()));
+        assert_eq!(selected_serial(&["use", "--device", "SERIAL"]),
+            Some("SERIAL".into()));
+    }
+
+    #[test]
+    fn tui_takes_an_optional_active_flag() {
+        let parse = |args: &[&str]| {
+            let args = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+            parse_args(&args).map(|opts| opts.cmd)
+        };
+        assert!(matches!(parse(&["tui"]), Ok(Cmd::Tui { active: false })));
+        assert!(matches!(parse(&["tui", "--active"]), Ok(Cmd::Tui { active: true })));
+        assert!(parse(&["tui", "--bogus"]).is_err());
+    }
+
+    #[test]
+    fn global_device_selects_the_device_to_drop() {
+        let parse = |args: &[&str]| {
+            let args = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+            parse_args(&args).map(|opts| opts.cmd)
+        };
+        // Must not need a forwarded daemon: drop also cleans up dead ones.
+        for args in [&["--device", "NOT_ATTACHED", "drop"][..], &["drop", "--device", "NOT_ATTACHED"]] {
+            match parse(args) {
+                Ok(Cmd::Disconnect(d)) => assert_eq!(d.serial.as_deref(), Some("NOT_ATTACHED")),
+                other => panic!("expected disconnect, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fill_prefers_the_input_in_the_upper_window() {
+        let dump = crate::json::parse(r#"{"windows":[
+            {"type":1,"layer":5,"root":{"cls":"android.widget.FrameLayout","bounds":[0,1600,1080,2400],"children":[
+                {"cls":"android.widget.EditText","rid":"com.foo:id/sheet_comment","text":"Comment","bounds":[40,2200,1040,2300],"children":[]}]}},
+            {"type":1,"layer":2,"root":{"cls":"android.widget.FrameLayout","bounds":[0,0,1080,2400],"children":[
+                {"cls":"android.widget.EditText","rid":"com.foo:id/comment","text":"Comment","bounds":[40,100,1040,200],"children":[]}]}}
+        ]}"#).unwrap();
+        let roots: Vec<_> = crate::json::app_roots(&dump).into_iter().rev().collect();
+        let node = super::find_fill_target(&roots, "Comment").expect("an input matches");
+        assert_eq!(super::node_to_daemon_selector(node), "id=com.foo:id/sheet_comment");
+    }
+
+    #[test]
+    fn conflicting_bootstrap_selectors_are_rejected() {
+        let args = ["--device", "SERIAL_A", "use", "SERIAL_B"]
+            .iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+        let error = parse_args(&args).expect_err("conflicting selectors must fail");
+        assert!(error.contains("conflicting device selectors"));
     }
 }

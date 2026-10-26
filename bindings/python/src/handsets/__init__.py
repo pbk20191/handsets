@@ -45,4 +45,4 @@ __all__ = [
     "ErrCode",
 ]
 
-__version__ = "0.1.25"
+__version__ = "0.2.0"

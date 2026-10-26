@@ -72,9 +72,17 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     const CY_W: usize = 4;
 
     let items: Vec<ListItem> = app.elements.iter().enumerate().map(|(i, el)| {
-        let spans = format_row(el, verb_w, class_w, label_w, id_w, CX_W, CY_W);
+        let mut spans = format_row(el, verb_w, class_w, label_w, id_w, CX_W, CY_W);
+        let selected = Some(i) == app.cursor;
+        if selected {
+            // The cursor row's background is DarkGray too; lighten dim text
+            // or the coords and the info `-` vanish.
+            for sp in &mut spans {
+                if sp.style.fg == Some(Color::DarkGray) { sp.style.fg = Some(Color::Gray); }
+            }
+        }
         let mut item = ListItem::new(Line::from(spans));
-        if Some(i) == app.cursor {
+        if selected {
             item = item.style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
         }
         item
@@ -170,7 +178,7 @@ fn pad_display(s: &str, w: usize) -> String {
     let count = s.chars().count();
     if count >= w { s.to_string() }
     else {
-        let pad: String = std::iter::repeat(' ').take(w - count).collect();
+        let pad: String = std::iter::repeat_n(' ', w - count).collect();
         format!("{s}{pad}")
     }
 }

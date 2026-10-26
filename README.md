@@ -3,10 +3,14 @@
   <br><br>
   <em>Drive Android from the shell, in milliseconds. One jar; no app, no root.</em>
   <br><br>
-  <a href="https://github.com/elliotgao2/handsets/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/elliotgao2/handsets?color=blue"></a>
+  <a href="https://github.com/pbk20191/handsets/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/pbk20191/handsets?color=blue"></a>
   <a href="https://pypi.org/project/handsets/"><img alt="pypi" src="https://img.shields.io/pypi/v/handsets?color=blue"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
+
+> Fork of [elliotgao2/handsets](https://github.com/elliotgao2/handsets). The
+> daemon here is built with the Android Gradle Plugin and listens on an
+> abstract Unix socket; `pip install handsets` and the blog are upstream's.
 
 ---
 
@@ -23,7 +27,12 @@ $ hs tap  "Continue"                  # text-lookup tap
 $ hs wait "Welcome"                   # block on success text
 ```
 
+When more than one ADB device is attached, select one with `hs use SERIAL` or
+`hs --device SERIAL use`. Use the serial shown by `adb devices`.
+
 `ui → label → tap → wait`. Pipe `hs ui` into a model, take the label, hand it back.
+`hs ui` and `hs tap` cover the app's dialogs, popups and bottom sheets too;
+image-only cells show up as `#grid_id[i]`, which `hs tap` accepts.
 Raw `screenshot` defaults to 768px-long-edge JPEG, the fast agent path;
 `hs see out.jpg` saves a native-resolution export unless you pass `--size 768`.
 Use WebP for compact lossy exports and PNG only for debug/lossless files.
@@ -62,6 +71,10 @@ idle, no race between tap and re-dump.
 - **Works on animated pages.** No `wait_for_idle` blocking — even constantly
   animating screens render smoothly at 10–20 fps.
 
+- **Sees popups.** Lists every app window, so popups and bottom sheets that
+  live in their own window show up too. `hs tui --active` lists only the
+  focused window.
+
 Open it with `hs tui` after `hs use`. Built as a sibling crate
 (`handsets-tui`, [ratatui](https://ratatui.rs) + crossterm) so the core `hs`
 binary stays zero-dep.
@@ -84,13 +97,15 @@ Vocabulary: `[a=v]` `[a~=sub]` `[a^=pre]` `[a$=suf]` · `:visible :clickable :en
 ```
 host                                  device (shell UID via app_process)
 ─────                                  ─────────────────────────────────
-  hs ─── adb forward ────► tcp:9008 ─► Server.java
+  hs ─── adb forward ────► @hsd_9008 ─► Server.java
                                          ├─ accessibility dump
                                          ├─ binder reflection (Pm/Am/Wm/Settings)
                                          └─ screenshots + state mirror
 ```
 
-Length-prefixed binary frames over `adb forward`:
+The daemon listens on an abstract Unix socket (`@hsd_<port>`) and only accepts
+adbd (shell) or root, so other apps on the device can't reach it.
+Length-prefixed binary frames over `adb forward tcp:<port> localabstract:hsd_<port>`:
 
 ```
 host → device:   [u32 BE len][ascii: verb [k=v ...]]
@@ -104,10 +119,10 @@ Full protocol: [docs/wire.md](docs/wire.md). Reflection details and sharp edges:
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/elliotgao2/handsets/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/pbk20191/handsets/main/install.sh | bash
 ```
 
-Needs `adb` on `$PATH`. macOS and Linux. Pin a version with `HANDSETS_VERSION=v0.1.26`.
+Needs `adb` on `$PATH`. macOS and Linux. Pin a version with `HANDSETS_VERSION=v0.2.0`.
 
 Python bindings: `pip install handsets`.
 
@@ -119,6 +134,19 @@ with Session() as d:
 ```
 
 For other languages, drive `hs --json` as a subprocess and parse one JSON line per call.
+
+### Building the daemon
+
+`./gradlew hsJar` (or `./build.sh`, a thin wrapper) builds `build/hs.jar`
+with the Android Gradle Plugin: the daemon is an unsigned release APK whose
+`classes.dex` R8 has shrunk together with its runtime libraries (kotlin-stdlib,
+kotlinx-coroutines). `app_process` accepts an APK on `CLASSPATH`, so it ships
+under the old name. The same project imports into Android Studio / IntelliJ
+for navigation and completion.
+
+The SDK is found via `local.properties` (`sdk.dir`) or `ANDROID_HOME`. AGP
+downloads the pinned platform (`compileSdk = 36`) and build-tools if they are
+missing, once the SDK licenses are accepted (`sdkmanager --licenses`).
 
 ---
 

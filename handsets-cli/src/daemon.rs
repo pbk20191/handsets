@@ -20,8 +20,8 @@ const DEFAULT_PORT: u16 = 9008;
 ///   1. $HANDSETS_JAR  (or legacy $A11YDUMP_JAR)
 ///   2. <exe_dir>/hs.jar          — release tarball layout
 ///   3. <exe_dir>/../build/hs.jar (and ../../, ../../../)
-///   4. ~/.handsets/hs.jar        — curl-installer layout (resolved even when
-///                                  <exe_dir> points at a /usr/local/bin symlink)
+///   4. ~/.handsets/hs.jar        — curl-installer layout (found even when
+///      <exe_dir> is the /usr/local/bin a symlink points from)
 ///   5. ./build/hs.jar            — dev checkout
 pub(crate) fn locate_jar() -> io::Result<PathBuf> {
     for var in ["HANDSETS_JAR", "A11YDUMP_JAR"] {
@@ -166,8 +166,11 @@ pub(crate) fn connect(opts: &ConnectOpts) -> io::Result<u16> {
     // Fast path: if the chosen port is already forwarded to this serial AND
     // the daemon answers `ping`, we're done. This is the common case when
     // RPA scripts re-invoke `hs use` defensively before each step.
+    // Matching the device side too means a daemon from an older hs (which
+    // listened on TCP) is restarted rather than reused.
     let already_forwarded = forwards.iter().any(|f|
-        f.serial == serial && f.host_spec == format!("tcp:{port}"));
+        f.serial == serial && f.host_spec == format!("tcp:{port}")
+            && f.remote_spec == device_socket(port));
     if already_forwarded && ping_daemon(port).is_ok() {
         let _ = state_cache::spawn_detached("127.0.0.1", port);
         return Ok(port);
@@ -201,7 +204,7 @@ pub(crate) fn connect(opts: &ConnectOpts) -> io::Result<u16> {
     let _ = adb(Some(&serial), &["forward", "--remove", &format!("tcp:{port}")]);
     adb_ok(
         Some(&serial),
-        &["forward", &format!("tcp:{port}"), &format!("tcp:{port}")],
+        &["forward", &format!("tcp:{port}"), &device_socket(port)],
         "forward",
     )?;
 
@@ -254,6 +257,15 @@ fn ping_daemon(port: u16) -> io::Result<()> {
 
 pub(crate) fn disconnect(opts: &DisconnectOpts) -> io::Result<()> {
     let serial = resolve_serial(opts.serial.as_deref())?;
+    // Every step below ignores adb failures, so an unknown serial would
+    // otherwise "succeed" without touching anything.
+    if opts.serial.is_some() {
+        let listing = adb_ok(None, &["devices"], "adb devices")?;
+        if !is_listed(&listing, &serial) {
+            return Err(io::Error::other(format!(
+                "--device {serial}: not attached — check `adb devices`")));
+        }
+    }
     // 1. Kill the host-side state watcher(s) for any forward this device owns.
     if let Ok(forwards) = list_forwards() {
         for f in forwards.iter().filter(|f| f.serial == serial) {
@@ -368,6 +380,14 @@ pub(crate) fn devices() -> io::Result<Vec<DeviceRow>> {
 struct ForwardEntry {
     serial: String,
     host_spec: String,
+    remote_spec: String,
+}
+
+/// The daemon listens on an abstract Unix socket, not a device TCP port, so
+/// it can check the peer uid and keep other apps out. Must match
+/// HsServer.socketName.
+fn device_socket(port: u16) -> String {
+    format!("localabstract:hsd_{port}")
 }
 
 fn list_forwards() -> io::Result<Vec<ForwardEntry>> {
@@ -378,13 +398,20 @@ fn list_forwards() -> io::Result<Vec<ForwardEntry>> {
         let mut it = line.split_whitespace();
         let serial = match it.next() { Some(s) => s.to_string(), None => continue };
         let host = match it.next() { Some(s) => s.to_string(), None => continue };
-        out.push(ForwardEntry { serial, host_spec: host });
+        let remote = it.next().unwrap_or("").to_string();
+        out.push(ForwardEntry { serial, host_spec: host, remote_spec: remote });
     }
     Ok(out)
 }
 
 /// If no serial is specified and exactly one device is attached, use it.
 /// Otherwise error out so the user picks.
+/// Whether `adb devices` output lists `serial`, in any state (offline and
+/// unauthorized devices still own forwards worth removing).
+fn is_listed(listing: &str, serial: &str) -> bool {
+    listing.lines().skip(1).any(|l| l.split_whitespace().next() == Some(serial))
+}
+
 fn resolve_serial(explicit: Option<&str>) -> io::Result<String> {
     if let Some(s) = explicit { return Ok(s.to_string()); }
     let listing = adb_ok(None, &["devices"], "adb devices")?;
@@ -572,7 +599,22 @@ fn adb_server_list_forwards() -> io::Result<Vec<ForwardEntry>> {
         let mut it = line.split_whitespace();
         let serial = match it.next() { Some(s) => s.to_string(), None => continue };
         let host = match it.next() { Some(s) => s.to_string(), None => continue };
-        out.push(ForwardEntry { serial, host_spec: host });
+        let remote = it.next().unwrap_or("").to_string();
+        out.push(ForwardEntry { serial, host_spec: host, remote_spec: remote });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_listed;
+
+    #[test]
+    fn is_listed_matches_whole_serials_in_any_state() {
+        let listing = "List of devices attached\nemulator-5554\tdevice\nR58M\toffline\n\n";
+        assert!(is_listed(listing, "emulator-5554"));
+        assert!(is_listed(listing, "R58M"));
+        assert!(!is_listed(listing, "emulator-555"));
+        assert!(!is_listed(listing, "List"));
+    }
 }

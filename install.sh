@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Handsets installer — macOS and Linux.
 #
-#   curl -fsSL https://raw.githubusercontent.com/elliotgao2/handsets/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/pbk20191/handsets/main/install.sh | bash
 #
 # Env overrides (all optional):
 #   HANDSETS_VERSION  vX.Y.Z   pin a release (default: latest)
 #   HANDSETS_DIR      PATH     where to extract (default: $HOME/.handsets)
 #   HANDSETS_PREFIX   PATH     where to symlink `hs` (default: first writable
 #                                of /usr/local/bin, /opt/homebrew/bin, ~/.local/bin)
-#   HANDSETS_REPO     OWNER/N  override repo (default: elliotgao2/handsets)
+#   HANDSETS_REPO     OWNER/N  override repo (default: pbk20191/handsets)
 
 set -eu
 
-REPO="${HANDSETS_REPO:-elliotgao2/handsets}"
+REPO="${HANDSETS_REPO:-pbk20191/handsets}"
 DIR="${HANDSETS_DIR:-$HOME/.handsets}"
 
 say()  { printf '%s\n' "$*"; }

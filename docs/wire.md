@@ -65,7 +65,7 @@ text        STRING                                       KeyEvents to the focuse
 
 ```
 wait_for_idle      [idle_ms=200] [timeout_ms=5000]     → ok elapsed=N | ERR:timeout
-wait_for_text      text="…" [match=sub|exact] [timeout_ms=5000]
+wait_for_text      text="…" [match=sub|exact] [scope=all|app|active] [timeout_ms=5000]
                                                        → ok x=… y=… w=… h=… elapsed=…
 wait_for_activity  n=COMPONENT [timeout_ms=5000]       prefix-matches the package
 ```

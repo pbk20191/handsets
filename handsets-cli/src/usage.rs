@@ -11,7 +11,7 @@ hs — drive Android from the shell. Built for LLM agents and humans.
 Usage: hs [--device SERIAL] [--json] <verb> [args]
 
 The agent loop:
-  hs use                       connect a device, start the daemon
+  hs use [SERIAL]              connect a device, start the daemon
   hs ui                        flat table of tappable nodes (the LLM input format)
   hs tap \"Continue\"             find by text, tap centre
   hs tap #back_btn             find by resource-id, tap centre
@@ -36,12 +36,18 @@ Shared action flags (tap, type, find, wait, submit, paste, act):
   --enabled            require enabled
   --unique             fail with AMBIGUOUS if >1 match
   --nth I              pick the I-th match (1-indexed)
+  --active             look in the focused window only (default: every
+                       app window, so dialogs and popups are found too)
   --json               emit {\"verb\":…, \"ok\":…, \"result\"|\"error\":…} per line
 
 More verbs:
   Capture     hs see [PATH.jpg|.webp|.png|.xml|.json] [--size N|--native]
-              hs ui [-i|--tree|--json|--xml] [--all]
-              hs tui                   keyboard-driven interactive inspector
+              (.xml/.json: focused window; --all: every window)
+              hs ui [-i|--tree|--json|--xml] [--active|--all]
+                                       (app windows incl. popups; --active:
+                                       focused window; --all: every window)
+              hs tui [--active]        keyboard-driven interactive inspector
+                                       (--active: focused window only)
               hs info | hs show [top|PKG]
   Input       hs tap X Y | hs swipe DIR | hs go back|home|recents|…
               hs type TEXT                  keystrokes to focused field
@@ -75,7 +81,7 @@ Exit codes:
 Global options:
   --host HOST        default 127.0.0.1
   --port PORT        default 9008
-  --device, -s SERIAL  route to the daemon for SERIAL
+  --device, -s SERIAL  route to a daemon, or select the device for `hs use`
   --json             default output to JSON (or set HS_FORMAT=json)
 
 Low-level / debugging:
