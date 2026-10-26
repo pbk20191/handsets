@@ -146,7 +146,7 @@ internal class NodeActions(private val ua: UiAutomation) {
                 if (f != null) return f
             }
         }
-        val root = ua.getRootInActiveWindow()
+        val root = ua.rootInActiveWindow
         return if (root == null) null else root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
     }
 
@@ -157,14 +157,13 @@ internal class NodeActions(private val ua: UiAutomation) {
 
     /** Locate the first node matching `sel`, or null.  */
     fun find(sel: Selector): AccessibilityNodeInfo? {
-        val windows = ua.getWindows()
+        val windows = ua.windows
         if (windows == null || windows.isEmpty()) {
-            val root = ua.getRootInActiveWindow()
+            val root = ua.rootInActiveWindow
             return if (root == null) null else bfs(root, sel)
         }
         for (w in windows) {
-            val root = w.getRoot()
-            if (root == null) continue
+            val root = w.root ?: continue
             val hit: AccessibilityNodeInfo? = bfs(root, sel)
             if (hit != null) return hit
         }
@@ -257,7 +256,7 @@ internal class NodeActions(private val ua: UiAutomation) {
 
         companion object {
             fun parse(s: String): Selector {
-                require(!(s == null || s.isEmpty())) { "empty" }
+                require(!(s.isEmpty())) { "empty" }
                 val sel = Selector()
                 // Split on whitespace but respect quoted values.
                 val toks: MutableList<String> = tokenize(s)

@@ -43,6 +43,7 @@ class UiEvents(private val ua: UiAutomation) {
             ua.setOnAccessibilityEventListener { ev ->
                 if (Looper.myLooper() == Looper.getMainLooper()) dispatch(ev)
                 else {
+                    @Suppress("DEPRECATION") // the copy constructor needs API 30
                     val copy = AccessibilityEvent.obtain(ev)
                     Loop.post { dispatch(copy) }
                 }

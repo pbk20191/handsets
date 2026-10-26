@@ -19,12 +19,8 @@ import java.util.Locale
  * `adb shell settings put …`.
  */
 internal class SettingsApi(ctx: Context) {
-    private val cr: ContentResolver?
+    private val cr: ContentResolver? = ctx.contentResolver
     private val direct = SettingsDirect()
-
-    init {
-        this.cr = ctx.getContentResolver()
-    }
 
     fun get(namespace: String, key: String?): ByteArray {
         // Fast path: direct IContentProvider.call via getContentProviderExternal.
@@ -33,11 +29,11 @@ internal class SettingsApi(ctx: Context) {
         // Second try: public ContentResolver helpers. Will usually fail from
         // app_process (no IApplicationThread registration) but is harmless to try.
         try {
-            when (namespace.lowercase(Locale.getDefault())) {
-                "system" -> v = Settings.System.getString(cr, key)
-                "secure" -> v = Settings.Secure.getString(cr, key)
-                "global" -> v = Settings.Global.getString(cr, key)
-                else -> return err("bad-namespace:" + namespace)
+            v = when (namespace.lowercase(Locale.getDefault())) {
+                "system" -> Settings.System.getString(cr, key)
+                "secure" -> Settings.Secure.getString(cr, key)
+                "global" -> Settings.Global.getString(cr, key)
+                else -> return err("bad-namespace:$namespace")
             }
             if (v != null) return v.toByteArray(StandardCharsets.UTF_8)
         } catch (ignored: Throwable) {
@@ -56,7 +52,7 @@ internal class SettingsApi(ctx: Context) {
                 "system" -> ok = Settings.System.putString(cr, key, value)
                 "secure" -> ok = Settings.Secure.putString(cr, key, value)
                 "global" -> ok = Settings.Global.putString(cr, key, value)
-                else -> return err("bad-namespace:" + namespace)
+                else -> return err("bad-namespace:$namespace")
             }
             if (ok) return "ok".toByteArray(StandardCharsets.UTF_8)
         } catch (ignored: Throwable) {
@@ -72,21 +68,21 @@ internal class SettingsApi(ctx: Context) {
             } else {
                 pb = ProcessBuilder(
                     "/system/bin/settings", "put", ns, key,
-                    if (value == null) "" else value
+                    value ?: ""
                 )
             }
             pb.redirectErrorStream(true)
             val p = pb.start()
             val sb = StringBuilder()
-            BufferedReader(InputStreamReader(p.getInputStream())).use { r ->
+            BufferedReader(InputStreamReader(p.inputStream)).use { r ->
                 var line: String?
                 while ((r.readLine().also { line = it }) != null) sb.append(line).append('\n')
             }
             val code = p.waitFor()
             val out = sb.toString().trim { it <= ' ' }
-            if (code != 0) return err("settings-exit-" + code + (if (out.isEmpty()) "" else ":" + out))
+            if (code != 0) return err("settings-exit-" + code + (if (out.isEmpty()) "" else ":$out"))
             return (if ("get" == op)
-                (if (out.isEmpty()) "null" else out)
+                (out.ifEmpty { "null" })
             else
                 "ok").toByteArray(StandardCharsets.UTF_8)
         } catch (e: IOException) {
@@ -98,7 +94,7 @@ internal class SettingsApi(ctx: Context) {
 
     companion object {
         private fun err(tail: String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
 }

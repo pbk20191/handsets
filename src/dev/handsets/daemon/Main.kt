@@ -29,6 +29,8 @@ data object Main {
 
         try {
             disableHiddenApiRestrictions()
+            // app_process has no ActivityThread to prepare the main looper for us.
+            @Suppress("DEPRECATION")
             if (Looper.getMainLooper() == null) Looper.prepareMainLooper()
             Loop.init()
             // ActivityThread.systemMain() binds handlers to the calling thread's

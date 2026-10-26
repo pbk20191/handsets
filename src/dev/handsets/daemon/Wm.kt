@@ -16,6 +16,8 @@ import java.nio.charset.StandardCharsets
  * a fresh `wm` app_process.
  */
 internal class Wm(private val dm: DisplayManager) {
+    // Display.getRealSize/getRealMetrics: WindowMetrics needs API 30 and a window context.
+    @Suppress("DEPRECATION")
     fun info(): ByteArray {
         try {
             val d = dm.getDisplay(Display.DEFAULT_DISPLAY)

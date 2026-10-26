@@ -255,14 +255,14 @@ internal class Server(private val h: Handlers) {
 
     private fun runDeeplinks(cmd: String): ByteArray? {
         val pkg: String? = positional(cmd)
-        return h.manifest!!.deeplinks(pkg)
+        return h.manifest.deeplinks(pkg)
     }
 
     // ---------- user-data ContentProvider verbs ----------
     private fun runSms(cmd: String): ByteArray? {
         val kind: String? = strArgOr(cmd, "type", "inbox")
         val limit = longArg(cmd, "limit", 50).toInt()
-        return h.providers!!.sms(kind, limit)
+        return h.providers.sms(kind, limit)
     }
 
     private fun runCalls(cmd: String): ByteArray? {

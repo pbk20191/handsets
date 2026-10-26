@@ -81,6 +81,7 @@ object Traverse {
         if (n.isLongClickable()) flags.append('L')
         if (n.isScrollable()) flags.append('s')
         if (n.isCheckable()) flags.append('k')
+        @Suppress("DEPRECATION") // getChecked() is API 36; min API is 28
         if (n.isChecked()) flags.append('K')
         if (n.isFocusable()) flags.append('f')
         if (n.isFocused()) flags.append('F')

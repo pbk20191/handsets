@@ -20,23 +20,20 @@ internal class Pm(private val ctx: Context) {
      * user-visible app name from the manifest; blank for packages whose
      * manifest label is just the package name (overlays, RROs, providers).  */
     fun list(thirdPartyOnly: Boolean, systemOnly: Boolean): ByteArray {
-        val pm = ctx.getPackageManager()
+        val pm = ctx.packageManager
         val pkgs = pm.getInstalledPackages(0)
         val sb = StringBuilder(8 * 1024)
         for (p in pkgs) {
-            val ai = p.applicationInfo
-            if (ai == null) continue
+            val ai = p.applicationInfo ?: continue
             val system = (ai.flags and ApplicationInfo.FLAG_SYSTEM) != 0
             if (thirdPartyOnly && system) continue
             if (systemOnly && !system) continue
             var label = ""
             try {
                 val l = pm.getApplicationLabel(ai)
-                if (l != null) {
-                    val s = l.toString()
-                    if (s != p.packageName) {
-                        label = s.replace('\t', ' ').replace('\n', ' ')
-                    }
+                val s = l.toString()
+                if (s != p.packageName) {
+                    label = s.replace('\t', ' ').replace('\n', ' ')
                 }
             } catch (ignored: Throwable) {
             }
@@ -44,7 +41,7 @@ internal class Pm(private val ctx: Context) {
                 .append('\t')
                 .append(label)
                 .append('\t')
-                .append(if (ai.sourceDir == null) "" else ai.sourceDir)
+                .append(ai.sourceDir ?: "")
                 .append('\n')
         }
         return sb.toString().toByteArray(StandardCharsets.UTF_8)
@@ -52,12 +49,11 @@ internal class Pm(private val ctx: Context) {
 
     fun path(pkg: String): ByteArray {
         try {
-            val ai = ctx.getPackageManager().getApplicationInfo(pkg, 0)
-            val src = ai.sourceDir
-            if (src == null) return err("no-sourceDir:" + pkg)
+            val ai = ctx.packageManager.getApplicationInfo(pkg, 0)
+            val src = ai.sourceDir ?: return err("no-sourceDir:$pkg")
             return src.toByteArray(StandardCharsets.UTF_8)
         } catch (e: PackageManager.NameNotFoundException) {
-            return err("not-found:" + pkg)
+            return err("not-found:$pkg")
         }
     }
 
@@ -73,22 +69,21 @@ internal class Pm(private val ctx: Context) {
         val methodName = if (grant) "grantRuntimePermission" else "revokeRuntimePermission"
         // Permission management moved off IPackageManager onto IPermissionManager
         // around API 30. Try the dedicated service first.
-        val candidates = arrayOf<Any?>(
+        val candidates = arrayOf(
             iPermissionManagerOrNull(),
             iPackageManager(),
         )
         var lastCause: Throwable? = null
         for (svc in candidates) {
             if (svc == null) continue
-            val picked: Method? = findRuntimePermMethod(svc.javaClass, methodName)
-            if (picked == null) continue
-            try {
+            val picked: Method = findRuntimePermMethod(svc.javaClass, methodName) ?: continue
+            lastCause = try {
                 picked.invoke(svc, *buildRuntimePermArgs(picked, pkg, perm))
-                return ok("ok " + methodName + " " + pkg + " " + perm)
+                return ok("ok $methodName $pkg $perm")
             } catch (ite: InvocationTargetException) {
-                lastCause = if (ite.cause != null) ite.cause else ite
+                ite.cause ?: ite
             } catch (t: Throwable) {
-                lastCause = t
+                t
             }
         }
         if (lastCause != null) {
@@ -97,18 +92,18 @@ internal class Pm(private val ctx: Context) {
                         + lastCause.javaClass.getSimpleName() + ":" + lastCause.message)
             )
         }
-        return err(methodName + "-not-exposed")
+        return err("$methodName-not-exposed")
     }
 
     companion object {
         private fun findRuntimePermMethod(cls: Class<*>, name: String): Method? {
             var picked: Method? = null
-            for (m in cls.getMethods()) {
-                if (name != m.getName()) continue
-                val p = m.getParameterTypes()
+            for (m in cls.methods) {
+                if (name != m.name) continue
+                val p = m.parameterTypes
                 if (p.size < 3) continue
                 if (p[0] != String::class.java || p[1] != String::class.java) continue
-                if (picked == null || p.size < picked.getParameterTypes().size) {
+                if (picked == null || p.size < picked.parameterTypes.size) {
                     picked = m
                 }
             }
@@ -116,7 +111,7 @@ internal class Pm(private val ctx: Context) {
         }
 
         private fun buildRuntimePermArgs(m: Method, pkg: String?, perm: String?): Array<Any?> {
-            val p = m.getParameterTypes()
+            val p = m.parameterTypes
             val userId = myUserId()
             val args = arrayOfNulls<Any>(p.size)
             args[0] = pkg
@@ -142,7 +137,7 @@ internal class Pm(private val ctx: Context) {
         }
 
         private fun err(tail: String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
 }

@@ -21,6 +21,8 @@ internal object Binders {
     private val systemContextLazy: Context by lazy {
         try {
             if (Looper.getMainLooper() == null) {
+                // app_process has no ActivityThread to prepare the main looper for us.
+                @Suppress("DEPRECATION")
                 Looper.prepareMainLooper()
             }
             val at = Class.forName("android.app.ActivityThread")

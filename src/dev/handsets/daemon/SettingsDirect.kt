@@ -46,14 +46,13 @@ internal class SettingsDirect {
     fun tryGet(ns: String, key: String?): String? {
         if (failed) return null
         try {
-            val prov = provider()
-            if (prov == null) return null
-            val n = callMethod!!.getParameterTypes().size
+            val prov = provider() ?: return null
+            val n = callMethod!!.parameterTypes.size
             val extras = Bundle()
             extras.putInt("_user", myUserId())
             val args = buildCallArgs(n, "GET_" + ns.lowercase(Locale.getDefault()), key, extras)
             val res = callMethod!!.invoke(prov, *args) as Bundle?
-            return if (res == null) null else res.getString("value")
+            return res?.getString("value")
         } catch (t: Throwable) {
             return null
         }
@@ -63,9 +62,8 @@ internal class SettingsDirect {
     fun tryPut(ns: String, key: String?, value: String?): Boolean {
         if (failed) return false
         try {
-            val prov = provider()
-            if (prov == null) return false
-            val n = callMethod!!.getParameterTypes().size
+            val prov = provider() ?: return false
+            val n = callMethod!!.parameterTypes.size
             val extras = Bundle()
             extras.putString("value", value)
             extras.putInt("_user", myUserId())
@@ -106,7 +104,7 @@ internal class SettingsDirect {
                 failed = true
                 return null
             }
-            val paramTypes = call.getParameterTypes()
+            val paramTypes = call.parameterTypes
             callPrefix = buildPrefix(paramTypes)
             callMethod = call
             provider = prov
@@ -122,15 +120,15 @@ internal class SettingsDirect {
         // preceding params shift between API levels (callingPkg, featureId,
         // authority, AttributionSource, …). Pick the call() with that suffix.
         var best: Method? = null
-        for (m in cls.getMethods()) {
-            if ("call" != m.getName()) continue
-            if (m.getReturnType() != Bundle::class.java) continue
-            val p = m.getParameterTypes()
+        for (m in cls.methods) {
+            if ("call" != m.name) continue
+            if (m.returnType != Bundle::class.java) continue
+            val p = m.parameterTypes
             if (p.size < 3) continue
             if (p[p.size - 1] != Bundle::class.java) continue
             if (p[p.size - 2] != String::class.java) continue
             if (p[p.size - 3] != String::class.java) continue
-            if (best == null || p.size > best.getParameterTypes().size) best = m
+            if (best == null || p.size > best.parameterTypes.size) best = m
         }
         return best
     }
@@ -142,8 +140,8 @@ internal class SettingsDirect {
         var seenAttribution = false
         for (i in 0..<prefixLen) {
             val c: Class<*> = paramTypes[i]!!
-            if (c.getName().endsWith("AttributionSource") && !seenAttribution) {
-                if (attributionSource == null) attributionSource = makeAttributionSource()
+            if (c.name.endsWith("AttributionSource") && !seenAttribution) {
+                attributionSource = makeAttributionSource()
                 pre[i] = attributionSource
                 seenAttribution = true
             } else if (c == String::class.java) {
@@ -189,9 +187,9 @@ internal class SettingsDirect {
     companion object {
         private fun findExternalGetter(iamCls: Class<*>): Method? {
             // Stable shape: (String name, int userId, IBinder token, String tag).
-            for (m in iamCls.getMethods()) {
-                if ("getContentProviderExternal" != m.getName()) continue
-                val p = m.getParameterTypes()
+            for (m in iamCls.methods) {
+                if ("getContentProviderExternal" != m.name) continue
+                val p = m.parameterTypes
                 if (p.size == 4 && p[0] == String::class.java && p[1] == Int::class.javaPrimitiveType && IBinder::class.java.isAssignableFrom(
                         p[2]
                     ) && p[3] == String::class.java

@@ -163,6 +163,7 @@ internal class State(
             else if (p[i] == Boolean::class.javaPrimitiveType) args[i] = false
             else args[i] = null
         }
+        @Suppress("UNCHECKED_CAST") // reflective IActivityTaskManager.getTasks
         val tasks =
             gt.invoke(iatm, *args) as MutableList<RunningTaskInfo?>?
         if (tasks == null || tasks.isEmpty()) return null
@@ -174,6 +175,7 @@ internal class State(
         try {
             val iam = activityBinder()
             if (iam == null || getRunningAppProcesses == null) return err("not-bound")
+            @Suppress("UNCHECKED_CAST") // reflective IActivityManager.getRunningAppProcesses
             val ps =
                 getRunningAppProcesses!!.invoke(iam) as MutableList<RunningAppProcessInfo>?
             val sb = StringBuilder(2048)
@@ -450,6 +452,7 @@ internal class State(
         val d = ctx.getSystemService(DisplayManager::class.java)
             .getDisplay(Display.DEFAULT_DISPLAY)
         val sz = Point()
+        @Suppress("DEPRECATION") // WindowMetrics needs API 30 and a window context
         d.getRealSize(sz)
         sb.append("\"width\":").append(sz.x).append(',')
         sb.append("\"height\":").append(sz.y).append(',')

@@ -80,7 +80,7 @@ internal class ProcStream(private val clip: Clipboard) {
         flow {
             while (true) {
                 withContext(Loop.Work) { clip.currentText() }?.let { emit(it) }
-                delay(intervalMs)
+                delay(intervalMs.milliseconds)
             }
         }.stateIn(Loop.scope, SharingStarted.WhileSubscribed(replayExpirationMillis = 0), null)
     }

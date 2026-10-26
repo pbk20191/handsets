@@ -352,6 +352,7 @@ internal class Screenshot(private val ua: UiAutomation) {
                 if (srcW <= 0 || srcH <= 0) {
                     val d = dm.getDisplay(Display.DEFAULT_DISPLAY)
                     val p = Point()
+                    @Suppress("DEPRECATION") // WindowMetrics needs API 30 and a window context
                     d.getRealSize(p)
                     srcW = p.x
                     srcH = p.y
@@ -561,6 +562,7 @@ internal class Screenshot(private val ua: UiAutomation) {
                 val d = dmg.getMethod("getRealDisplay", Int::class.javaPrimitiveType)
                     .invoke(inst, Display.DEFAULT_DISPLAY) as Display
                 val p = Point()
+                @Suppress("DEPRECATION") // WindowMetrics needs API 30 and a window context
                 d.getRealSize(p)
                 return p
             } catch (t: Throwable) {

@@ -39,7 +39,7 @@ internal class Location {
         val mocks: MutableMap<String?, Boolean?> = LinkedHashMap()
         try {
             BufferedReader(
-                InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8)
+                InputStreamReader(p.inputStream, StandardCharsets.UTF_8)
             ).use { br ->
                 for (ln in br.lineSequence()) {
                     val m: Matcher = LOC.matcher(ln)

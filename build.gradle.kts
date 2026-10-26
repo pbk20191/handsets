@@ -62,7 +62,7 @@ kotlin {
         // R8 desugars Java 17 bytecode (indy string concat, etc.) for --min-api 28.
         jvmTarget = JvmTarget.JVM_17
         // java.* comes from android.jar, not the host JDK.
-        freeCompilerArgs.add("-no-jdk")
+        noJdk = true
         // Drop Intrinsics.checkNotNull* calls: R8 can't remove them, and the
         // daemon has no Java callers that could pass unexpected nulls.
         freeCompilerArgs.addAll("-Xno-param-assertions", "-Xno-call-assertions", "-Xno-receiver-assertions")
@@ -90,7 +90,7 @@ tasks.withType<JavaCompile>().configureEach {
 
 val r8Out = layout.buildDirectory.dir("r8")
 
-val r8Dex by tasks.registering(JavaExec::class) {
+val r8Dex = tasks.register<JavaExec>("r8Dex") {
     description = "Shrinks and dexes the daemon plus its runtime libraries with the SDK's R8."
     val programJars = files(tasks.named("jar"), configurations.runtimeClasspath)
     inputs.files(programJars)
@@ -113,7 +113,7 @@ val r8Dex by tasks.registering(JavaExec::class) {
     }
 }
 
-val hsJar by tasks.registering(Jar::class) {
+val hsJar = tasks.register<Jar>("hsJar") {
     group = "build"
     description = "Builds build/hs.jar (classes.dex only) for app_process."
     from(r8Dex) { include("classes.dex") }

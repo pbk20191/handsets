@@ -173,7 +173,7 @@ internal class Am(private val ctx: Context) {
         for (ri in launchers) {
             try {
                 val l = ri.loadLabel(pm)
-                if (l != null && label.equals(l.toString(), ignoreCase = true)) {
+                if (label.equals(l.toString(), ignoreCase = true)) {
                     out.add(ri)
                 }
             } catch (ignored: Throwable) {

@@ -83,7 +83,7 @@ internal object Streams {
                 val force = first
                 val body = ts.nextPacket(force)
                 first = false
-                if (body != null) c.send(body)
+                c.send(body)
             }
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException || t is java.io.IOException) throw t
