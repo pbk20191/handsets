@@ -1,130 +1,95 @@
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import java.io.FileReader
-import java.util.Properties
-
 /*
  * Build for the on-device daemon in src/.
  *
- * Not an Android application: Main is launched by app_process on a device.
- * Pipeline: javac + kotlinc (against android.jar) -> R8 (from the SDK's
- * build-tools d8.jar) -> classes.dex -> build/hs.jar.
+ * Not a launchable app: Main is started by app_process with the APK on
+ * CLASSPATH (app_process only needs classes.dex inside a zip). AGP handles
+ * the SDK (platform + build-tools, downloaded if missing), Kotlin, and R8;
+ * hsJar copies the release APK to build/hs.jar, the path the CLI, installer
+ * and release workflow expect.
  *
  *   ./gradlew hsJar                       build build/hs.jar
- *   -PandroidCompileSdk=36                pick a platform (default: newest installed)
- *   -PbuildTools=36.0.0                   pick build-tools for R8 (default: 36.0.0)
  */
 plugins {
-    `java-library`
-    kotlin("jvm")
+    id("com.android.application")
 }
-
-val localProperties = Properties().apply {
-    val f = rootProject.file("local.properties")
-    if (f.isFile) FileReader(f).use { load(it) }
-}
-
-val sdkDirectory: String = localProperties.getProperty("sdk.dir")
-    ?: System.getenv("ANDROID_HOME")
-    ?: System.getenv("ANDROID_SDK_ROOT")
-    ?: throw GradleException(
-        "Android SDK not found. Set sdk.dir in local.properties or ANDROID_HOME / ANDROID_SDK_ROOT.")
-
-val compileSdk: String = providers.gradleProperty("androidCompileSdk").orNull
-    ?: file("$sdkDirectory/platforms").listFiles()
-        ?.mapNotNull { Regex("""android-(\d+)""").matchEntire(it.name)?.groupValues?.get(1)?.toInt() }
-        ?.maxOrNull()?.toString()
-    ?: throw GradleException("No android-N platform installed under $sdkDirectory/platforms")
-
-val androidJar = file("$sdkDirectory/platforms/android-$compileSdk/android.jar")
-if (!androidJar.isFile) {
-    throw GradleException("Android platform jar not found: $androidJar. " +
-        "Install that platform or set -PandroidCompileSdk=<API level>.")
-}
-
-val buildToolsVersion: String = providers.gradleProperty("buildTools").orNull ?: "36.0.0"
-val r8Jar = file("$sdkDirectory/build-tools/$buildToolsVersion/lib/d8.jar")
 
 // Gradle's own outputs stay out of build/, which holds only the deployable jar.
 layout.buildDirectory = layout.projectDirectory.dir("build-gradle")
 
-sourceSets {
-    main {
-        java.setSrcDirs(listOf("src"))
-        resources.setSrcDirs(emptyList<String>())
+android {
+    namespace = "dev.handsets.daemon"
+    compileSdk = 36
+
+    defaultConfig {
+        minSdk = 28
+        targetSdk = 36
+    }
+
+    sourceSets {
+        named("main") {
+            manifest.srcFile("AndroidManifest.xml")
+            java.setSrcDirs(listOf("src"))
+            kotlin.setSrcDirs(listOf("src"))
+            res.setSrcDirs(emptyList<String>())
+            resources.setSrcDirs(emptyList<String>())
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            proguardFiles("proguard-rules.pro")
+            // app_process doesn't check signatures; leave the APK unsigned.
+            signingConfig = null
+            vcsInfo.include = false
+        }
+    }
+
+    packaging {
+        // Compress classes.dex: hs.jar is pushed over adb and shipped in release
+        // tarballs, and nothing gains from mapping it uncompressed.
+        dex.useLegacyPackaging = true
+        resources {
+            // Kotlin reflection/debug metadata the daemon never reads. Keep
+            // META-INF/services: Dispatchers.Main is found through it.
+            excludes += listOf("kotlin/**", "DebugProbesKt.bin", "META-INF/*.version")
+        }
+    }
+
+    dependenciesInfo {
+        includeInApk = false
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    lint {
+        checkReleaseBuilds = false
     }
 }
 
 kotlin {
-    sourceSets {
-        main { kotlin.setSrcDirs(listOf("src")) }
-    }
     compilerOptions {
-        // R8 desugars Java 17 bytecode (indy string concat, etc.) for --min-api 28.
-        jvmTarget = JvmTarget.JVM_17
-        // java.* comes from android.jar, not the host JDK.
-        noJdk = true
         // Drop Intrinsics.checkNotNull* calls: R8 can't remove them, and the
         // daemon has no Java callers that could pass unexpected nulls.
         freeCompilerArgs.addAll("-Xno-param-assertions", "-Xno-call-assertions", "-Xno-receiver-assertions")
     }
 }
 
-java {
-    // Sources are Kotlin; this only has to match jvmTarget. A Java source
-    // added later can't use -bootclasspath (android.jar) above target 8 and
-    // would need android.jar on the classpath instead.
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
-}
-
 dependencies {
-    compileOnly(files(androidJar))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 }
 
-tasks.withType<JavaCompile>().configureEach {
-    options.encoding = "UTF-8"
-    options.bootstrapClasspath = files(androidJar)
-    options.compilerArgs.add("-Xlint:-options")
-}
-
-val r8Out = layout.buildDirectory.dir("r8")
-
-val r8Dex = tasks.register<JavaExec>("r8Dex") {
-    description = "Shrinks and dexes the daemon plus its runtime libraries with the SDK's R8."
-    val programJars = files(tasks.named("jar"), configurations.runtimeClasspath)
-    inputs.files(programJars)
-    inputs.file("proguard-rules.pro")
-    outputs.dir(r8Out)
-    classpath = files(r8Jar)
-    mainClass = "com.android.tools.r8.R8"
-    doFirst {
-        if (!r8Jar.isFile) throw GradleException("R8 not found: $r8Jar (set -PbuildTools=<version>)")
-        val out = r8Out.get().asFile
-        out.deleteRecursively()
-        out.mkdirs()
-        args = listOf(
-            "--release",
-            "--min-api", "28",
-            "--lib", androidJar.path,
-            "--pg-conf", file("proguard-rules.pro").path,
-            "--output", out.path,
-        ) + programJars.files.map { it.path }
-    }
-}
-
-val hsJar = tasks.register<Jar>("hsJar") {
+val hsJar = tasks.register<Copy>("hsJar") {
     group = "build"
-    description = "Builds build/hs.jar (classes.dex only) for app_process."
-    from(r8Dex) { include("classes.dex") }
-    // ServiceLoader entry so Dispatchers.Main finds AndroidDispatcherFactory at runtime.
-    from({ configurations.runtimeClasspath.get().filter { it.name.startsWith("kotlinx-coroutines-android") }.map { zipTree(it) } }) {
-        include("META-INF/services/kotlinx.coroutines.internal.MainDispatcherFactory")
+    description = "Builds build/hs.jar (the release APK) for app_process."
+    from(tasks.named("assembleRelease").map { layout.buildDirectory.dir("outputs/apk/release") }) {
+        include("*.apk")
+        rename { "hs.jar" }
     }
-    archiveFileName = "hs.jar"
-    destinationDirectory = layout.projectDirectory.dir("build")
-    isPreserveFileTimestamps = false
-    manifest { }
+    into(layout.projectDirectory.dir("build"))
 }
 
 tasks.named("assemble") { dependsOn(hsJar) }

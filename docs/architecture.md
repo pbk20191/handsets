@@ -58,5 +58,5 @@ every verb so two daemon builds can be compared on a device.
 src/dev/handsets/daemon/      on-device daemon (Kotlin → dex → jar)
 handsets-cli/                 host CLI — short-verb surface (`hs use`, `hs see`, …)
 handsets-viewer/              GUI mirror — winit + Metal + zero-copy VideoToolbox
-build.gradle.kts              kotlinc → R8 (SDK) → dex → build/hs.jar  (build.sh wraps it)
+build.gradle.kts              AGP: kotlinc → R8 → unsigned APK → build/hs.jar  (build.sh wraps it)
 ```
