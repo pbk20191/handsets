@@ -19,7 +19,7 @@ Handsets is designed exactly for that loop. You drop one jar on the device, the 
 You need `adb` on `$PATH` (`brew install android-platform-tools` on macOS, the matching `android-tools` package on Linux). Then:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/elliotgao2/handsets/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/pbk20191/handsets/main/install.sh | bash
 ```
 
 USB debugging on, plug the phone in, confirm `adb devices` lists it, and you're ready.
@@ -88,7 +88,7 @@ That deliberate small alphabet is the thing scripts actually branch on. The full
 {"verb":"tap","ok":false,"error":{"code":"NOT_FOUND","detail":"no node matched"}}
 ```
 
-That's the shape any subprocess driver should consume. A first-party Python SDK lives under [`bindings/python/`](https://github.com/elliotgao2/handsets/tree/main/bindings/python); other languages can drive the CLI in ~30 lines of subprocess code.
+That's the shape any subprocess driver should consume. A first-party Python SDK lives under [`bindings/python/`](https://github.com/pbk20191/handsets/tree/main/bindings/python); other languages can drive the CLI in ~30 lines of subprocess code.
 
 ## Where to next
 

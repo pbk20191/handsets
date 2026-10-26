@@ -3,10 +3,14 @@
   <br><br>
   <em>Drive Android from the shell, in milliseconds. One jar; no app, no root.</em>
   <br><br>
-  <a href="https://github.com/elliotgao2/handsets/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/elliotgao2/handsets?color=blue"></a>
+  <a href="https://github.com/pbk20191/handsets/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/pbk20191/handsets?color=blue"></a>
   <a href="https://pypi.org/project/handsets/"><img alt="pypi" src="https://img.shields.io/pypi/v/handsets?color=blue"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>
+
+> Fork of [elliotgao2/handsets](https://github.com/elliotgao2/handsets). The
+> daemon here is built with the Android Gradle Plugin and listens on an
+> abstract Unix socket; `pip install handsets` and the blog are upstream's.
 
 ---
 
@@ -115,7 +119,7 @@ Full protocol: [docs/wire.md](docs/wire.md). Reflection details and sharp edges:
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/elliotgao2/handsets/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/pbk20191/handsets/main/install.sh | bash
 ```
 
 Needs `adb` on `$PATH`. macOS and Linux. Pin a version with `HANDSETS_VERSION=v0.1.26`.

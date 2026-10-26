@@ -90,7 +90,7 @@ class Session:
         if shutil.which(binary) is None:
             raise FileNotFoundError(
                 f"`{binary}` not on $PATH — install handsets first "
-                "(see https://github.com/elliotgao2/handsets#install)"
+                "(see https://github.com/pbk20191/handsets#install)"
             )
 
     # ─── context manager ──────────────────────────────────────────────

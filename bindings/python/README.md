@@ -1,6 +1,6 @@
 # handsets — Python bindings
 
-A small, Pythonic wrapper around the [Handsets](https://github.com/elliotgao2/handsets)
+A small, Pythonic wrapper around the [Handsets](https://github.com/pbk20191/handsets)
 CLI (`hs`). Drives Android devices from Python without reimplementing the
 subprocess + JSON-parse + exit-code boilerplate every caller used to write
 by hand.
@@ -12,7 +12,7 @@ pip install handsets
 ```
 
 You also need the `hs` binary on `$PATH`. See the project
-[install instructions](https://github.com/elliotgao2/handsets#install).
+[install instructions](https://github.com/pbk20191/handsets#install).
 
 ## Usage
 
