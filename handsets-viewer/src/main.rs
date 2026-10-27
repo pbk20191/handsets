@@ -14,8 +14,7 @@
 //             zero-copy IOSurface path.
 //   Windows — DXGI flip swap chain + D3D11 video-processor blit; H.264 is
 //             decoded by the Media Foundation MFT on the shared D3D11 device
-//             (DXVA), so NV12 surfaces never leave the GPU. Falls back to
-//             softbuffer if D3D11 is unavailable.
+//             (DXVA), so NV12 surfaces never leave the GPU.
 //   other   — softbuffer CPU blit (JPEG / tilejpeg only).
 
 use std::io::{Read, Write};
@@ -30,7 +29,7 @@ mod metal_renderer;
 mod videotoolbox_decoder;
 #[cfg(target_os = "macos")]
 use metal_renderer::MetalRenderer;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 mod soft_renderer;
 #[cfg(windows)]
 mod d3d_renderer;
@@ -38,7 +37,7 @@ mod d3d_renderer;
 mod mf_decoder;
 #[cfg(windows)]
 mod win_gpu;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 use soft_renderer::SoftRenderer;
 
 use winit::application::ApplicationHandler;
@@ -211,11 +210,10 @@ struct App {
     window: Option<Arc<Window>>,
     #[cfg(target_os = "macos")]
     renderer: Option<MetalRenderer>,
-    #[cfg(not(target_os = "macos"))]
-    renderer: Option<SoftRenderer>,
-    /// Preferred on Windows; `renderer` (software) is the fallback.
     #[cfg(windows)]
-    d3d: Option<d3d_renderer::D3dRenderer>,
+    renderer: Option<d3d_renderer::D3dRenderer>,
+    #[cfg(not(any(target_os = "macos", windows)))]
+    renderer: Option<SoftRenderer>,
     latest: Arc<Mutex<Option<DecodedFrame>>>,
     frame_count: u64,
     bytes_count: u64,
@@ -262,15 +260,18 @@ impl ApplicationHandler<UserEvent> for App {
         }
         #[cfg(windows)]
         {
+            let _ = (dev_w, dev_h);
             let size = win.inner_size();
-            self.d3d = d3d_renderer::hwnd_of(&win)
+            self.renderer = d3d_renderer::hwnd_of(&win)
                 .and_then(|h| d3d_renderer::D3dRenderer::new(h, size.width, size.height));
-            if self.d3d.is_some() {
+            if self.renderer.is_some() {
                 eprintln!("viewer: D3D11 renderer attached");
+            } else {
+                eprintln!("viewer: failed to set up D3D11 renderer — window will be blank");
             }
         }
-        #[cfg(not(target_os = "macos"))]
-        if !self.has_gpu_renderer() {
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
             let _ = (dev_w, dev_h);
             match SoftRenderer::new(&win) {
                 Some(r) => {
@@ -401,14 +402,6 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
-    #[cfg(not(target_os = "macos"))]
-    fn has_gpu_renderer(&self) -> bool {
-        #[cfg(windows)]
-        return self.d3d.is_some();
-        #[cfg(not(windows))]
-        false
-    }
-
     fn render(&mut self) {
         #[cfg(target_os = "macos")]
         {
@@ -428,7 +421,8 @@ impl App {
             }
         }
         #[cfg(windows)]
-        if let (Some(r), Some(window)) = (self.d3d.as_mut(), self.window.as_ref()) {
+        {
+            let (Some(r), Some(window)) = (self.renderer.as_mut(), self.window.as_ref()) else { return };
             let size = window.inner_size();
             let guard = self.latest.lock().unwrap();
             let m = match guard.as_ref() {
@@ -445,22 +439,13 @@ impl App {
             drop(guard);
             if m.is_some() {
                 *self.mapping.lock().unwrap() = m;
-                return;
-            }
-            // The GPU path failed on a real frame: fall back to the software
-            // renderer for the rest of the session.
-            eprintln!("viewer: D3D11 present failed; switching to the software renderer");
-            self.d3d = None;
-            if let Some(w) = self.window.as_ref() {
-                self.renderer = SoftRenderer::new(w);
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let (Some(r), Some(window)) = (self.renderer.as_mut(), self.window.as_ref()) else { return };
             let size = window.inner_size();
             let guard = self.latest.lock().unwrap();
-            #[allow(irrefutable_let_patterns)]
             if let Some(DecodedFrame::Bgra { rgb, width, height }) = guard.as_ref() {
                 let device = self.device_size.unwrap_or((*width, *height));
                 let m = r.present(rgb, *width, *height, size.width, size.height, device);
@@ -1166,8 +1151,6 @@ fn main() {
     let mut app = App {
         window: None,
         renderer: None,
-        #[cfg(windows)]
-        d3d: None,
         latest,
         frame_count: 0,
         bytes_count: 0,

@@ -21,8 +21,8 @@ metal = "0.29"
 core-graphics-types = "0.1"
 objc = "0.2"
 
-# Other hosts (Windows, Linux): CPU blit through softbuffer; JPEG / tilejpeg only.
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+# Other hosts (Linux, …): CPU blit through softbuffer; JPEG / tilejpeg only.
+[target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
 softbuffer = "0.4"
 
 # Windows: D3D11 swap chain + video-processor blit; Media Foundation H.264.

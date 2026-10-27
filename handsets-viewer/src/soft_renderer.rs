@@ -1,8 +1,9 @@
-// CPU presentation path for non-macOS hosts (Windows, Linux): letterbox-fits
+// CPU presentation path for hosts without a GPU path (Linux, …): letterbox-fits
 // the latest BGRA frame into the window with nearest-neighbour scaling and
-// hands it to softbuffer. Good enough for the JPEG / tilejpeg streams; the
-// macOS build keeps its Metal + VideoToolbox path.
-#![cfg(not(target_os = "macos"))]
+// hands it to softbuffer. Good enough for the JPEG / tilejpeg streams;
+// macOS (Metal + VideoToolbox) and Windows (D3D11 + Media Foundation) use
+// their hardware paths only.
+#![cfg(not(any(target_os = "macos", windows)))]
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
