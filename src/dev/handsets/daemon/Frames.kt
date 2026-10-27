@@ -4,6 +4,7 @@ import android.view.Choreographer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Vsync ticks on the main looper. Falls back to a 16 ms delay if the
@@ -21,7 +22,7 @@ internal object Frames {
     /** Suspends until the next vsync; returns its frame time in uptime milliseconds. */
     suspend fun next(): Long {
         val ch = choreographer ?: run {
-            delay(16)
+            delay(16.milliseconds)
             return android.os.SystemClock.uptimeMillis()
         }
         return suspendCancellableCoroutine { k ->

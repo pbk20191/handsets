@@ -17,6 +17,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.OutputStream
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Receives a PackageInstaller status through a local Binder implementing only
@@ -30,7 +31,7 @@ class StatusReceiver : Binder() {
         .getDeclaredConstructor(IBinder::class.java).apply { isAccessible = true }.newInstance(this)
 
     /** null on timeout. */
-    suspend fun await(timeoutMs: Long): Intent? = withTimeoutOrNull(timeoutMs) { result.await() }
+    suspend fun await(timeoutMs: Long): Intent? = withTimeoutOrNull(timeoutMs.milliseconds) { result.await() }
 
     override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
         if (code != 1) return super.onTransact(code, data, reply, flags)
@@ -61,7 +62,7 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
         while (true) {
             val n = readInt()
             if (n == 0) return total
-            if (n < 0 || n > MAX_CHUNK) throw IOException("bad-chunk-size:$n")
+            if (n !in 0..MAX_CHUNK) throw IOException("bad-chunk-size:$n")
             val chunk = readFully(n)
             withContext(Loop.Work) { sink.write(chunk) }
             total += n
@@ -73,10 +74,10 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
         try {
             while (true) {
                 val n = readInt()
-                if (n <= 0 || n > MAX_CHUNK) return
+                if (n !in 1..MAX_CHUNK) return
                 readFully(n)
             }
-        } catch (e: IOException) {
+        } catch (_: IOException) {
         }
     }
 
@@ -93,7 +94,7 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
             while (true) {
                 val chunk = withContext(Loop.Work) {
                     val buf = ByteArray(CHUNK)
-                    val n = input!!.read(buf)
+                    val n = input.read(buf)
                     if (n > 0) buf.copyOf(n) else null
                 } ?: break
                 c.send(chunk)

@@ -1,0 +1,63 @@
+{
+  "manifest_version": "0.3",
+  "name": "handsets",
+  "display_name": "Handsets",
+  "version": "0.0.0",
+  "description": "Control Android devices and emulators: read the screen, tap, type, swipe and wait, over adb.",
+  "long_description": "Runs the `hs` CLI as a stdio MCP server (`hs mcp`); the bundle carries `hs` and its on-device daemon. Start with the `use` tool, then read the screen with `ui` or `screenshot` and act with `tap`, `type`, `fill`, `swipe` and `go`. adb is found through Google's Android CLI (`android info`), ANDROID_HOME, PATH or Android Studio's default SDK; set ADB path below to override.",
+  "author": {
+    "name": "Elliot Gao",
+    "url": "https://github.com/elliotgao2/handsets"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pbk20191/handsets"
+  },
+  "homepage": "https://github.com/pbk20191/handsets",
+  "license": "MIT",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/hs",
+    "mcp_config": {
+      "command": "${__dirname}/server/hs",
+      "args": ["mcp"],
+      "env": {
+        "HANDSETS_ADB": "${user_config.adb_path}"
+      },
+      "platform_overrides": {
+        "win32": {
+          "command": "${__dirname}/server/hs.exe"
+        }
+      }
+    }
+  },
+  "user_config": {
+    "adb_path": {
+      "type": "file",
+      "title": "ADB path",
+      "description": "Optional. Path to the adb executable, if it isn't found automatically.",
+      "required": false
+    }
+  },
+  "tools": [
+    { "name": "use", "description": "Connect to a device and start the on-device daemon. Call this first." },
+    { "name": "ui", "description": "List what is on screen: tappable nodes with text, #resource-id and centre x,y." },
+    { "name": "screenshot", "description": "Capture the screen as a JPEG image." },
+    { "name": "find", "description": "Find nodes matching a selector without acting." },
+    { "name": "tap", "description": "Tap a node by text / #resource_id / selector, or tap x,y." },
+    { "name": "type", "description": "Type text into the focused field." },
+    { "name": "fill", "description": "Set the text of an edit field in one step." },
+    { "name": "swipe", "description": "Swipe up, down, left or right." },
+    { "name": "go", "description": "Press back, home, recents, enter or another key." },
+    { "name": "wait", "description": "Wait until text or a selector appears." },
+    { "name": "open", "description": "Launch an app by package, activity or label." },
+    { "name": "close", "description": "Force-stop an app." },
+    { "name": "logcat", "description": "Recent device log lines, filtered by app, priority, tag or pattern." },
+    { "name": "info", "description": "Device and daemon info." },
+    { "name": "drop", "description": "Stop the on-device daemon." },
+    { "name": "hs", "description": "Run any other hs CLI verb." }
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"]
+  }
+}

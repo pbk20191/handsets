@@ -7,6 +7,7 @@ import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Single owner of `UiAutomation.setOnAccessibilityEventListener` (it only
@@ -92,7 +93,7 @@ class Waits {
             val since = now - lastEventTs
             if (since >= idleMs) return since
             if (now >= deadline) return -1
-            withTimeoutOrNull(minOf(idleMs - since, deadline - now)) { nextEvent() }
+            withTimeoutOrNull(minOf(idleMs - since, deadline - now).milliseconds) { nextEvent() }
         }
     }
 
@@ -107,7 +108,7 @@ class Waits {
             if (now >= deadline) return -1
             // A check may suspend (node lookup on Work): if events arrived
             // meanwhile, recheck at once instead of waiting for the next one.
-            if (eventSeq == seen) withTimeoutOrNull(deadline - now) { nextEvent() }
+            if (eventSeq == seen) withTimeoutOrNull((deadline - now).milliseconds) { nextEvent() }
             seen = eventSeq
             if (safeCheck(check)) return System.currentTimeMillis() - start
         }
@@ -115,7 +116,7 @@ class Waits {
 
     private suspend fun safeCheck(check: suspend () -> Boolean) = try { check() } catch (_: Throwable) { false }
 
-    private suspend fun nextEvent() = suspendCancellableCoroutine<Unit> { c ->
+    private suspend fun nextEvent() = suspendCancellableCoroutine { c ->
         waiters.add(c)
         c.invokeOnCancellation { waiters.remove(c) }
     }

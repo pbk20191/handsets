@@ -1,6 +1,7 @@
 // `hs mirror` — launch the standalone GUI viewer at
-// `handsets-viewer/`, which renders the daemon's frames through Metal (macOS)
-// with a zero-copy VideoToolbox path for H.264.
+// `handsets-viewer/`, which renders the daemon's frames on the GPU: Metal +
+// VideoToolbox (macOS), D3D11 + Media Foundation (Windows), OpenGL ES +
+// VA-API (Linux).
 //
 // The previous Kitty-graphics-protocol terminal mirror has been removed; this
 // crate just locates the viewer binary and exec's it with the right

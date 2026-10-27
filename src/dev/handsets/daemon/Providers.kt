@@ -1,7 +1,6 @@
 package dev.handsets.daemon
 
 import android.content.ContentResolver
-import android.content.Context
 import android.database.Cursor
 import android.net.Uri
 import android.os.Binder
@@ -32,7 +31,7 @@ import kotlin.concurrent.Volatile
  * Output is NDJSON: first line is the column-name array, subsequent
  * lines are row-value arrays.
  */
-internal class Providers(sysCtx: Context?) {
+internal class Providers {
     private val token: IBinder = Binder()
     private val providerCache = java.util.concurrent.ConcurrentHashMap<String, Any>()
 
@@ -59,16 +58,15 @@ internal class Providers(sysCtx: Context?) {
 
     // ---------- public verb entry points ----------
     fun sms(kind: String?, limit: Int): ByteArray {
-        val path: String?
-        when (if (kind == null) "inbox" else kind) {
-            "inbox" -> path = "/inbox"
-            "sent" -> path = "/sent"
-            "all" -> path = ""
-            else -> return err("bad-type:" + kind)
+        val path = when (kind ?: "inbox") {
+            "inbox" -> "/inbox"
+            "sent" -> "/sent"
+            "all" -> ""
+            else -> return err("bad-type:$kind")
         }
         return query(
             "sms",
-            Uri.parse("content://sms" + path),
+            Uri.parse("content://sms$path"),
             arrayOf<String>("_id", "address", "body", "date", "type", "read", "thread_id"),
             null, null, "date DESC", limit
         )
@@ -77,7 +75,7 @@ internal class Providers(sysCtx: Context?) {
     fun calls(kind: String?, limit: Int): ByteArray {
         var sel: String? = null
         var args: Array<String>? = null
-        when (if (kind == null) "all" else kind) {
+        when (kind ?: "all") {
             "all" -> {}
             "in" -> {
                 sel = "type=?"
@@ -94,7 +92,7 @@ internal class Providers(sysCtx: Context?) {
                 args = arrayOf<String>("3")
             }
 
-            else -> return err("bad-type:" + kind)
+            else -> return err("bad-type:$kind")
         }
         return query(
             "call_log",
@@ -152,8 +150,7 @@ internal class Providers(sysCtx: Context?) {
         selection: String?, selectionArgs: Array<String>?,
         sort: String?, limit: Int
     ): ByteArray {
-        val provider = acquire(authority)
-        if (provider == null) return err("provider-acquire-failed:" + authority)
+        val provider = acquire(authority) ?: return err("provider-acquire-failed:$authority")
 
         val m: Method?
         try {
@@ -177,7 +174,7 @@ internal class Providers(sysCtx: Context?) {
         try {
             val args = buildQueryArgs(uri, proj, qa)
             c = m.invoke(provider, *args) as Cursor?
-            if (c == null) return err("provider-null:" + authority)
+            if (c == null) return err("provider-null:$authority")
             return encodeNdjson(c, limit)
         } catch (t: Throwable) {
             // Unwrap InvocationTargetException to surface the real cause.
@@ -223,8 +220,8 @@ internal class Providers(sysCtx: Context?) {
         // No lock: racing callers compute the same overload; queryWired is published last.
         var best: Method? = null
         for (m in providerCls.getMethods()) {
-            if ("query" != m.getName()) continue
-            if (m.getReturnType() != Cursor::class.java) continue
+            if ("query" != m.name) continue
+            if (m.returnType != Cursor::class.java) continue
             val p = m.getParameterTypes()
             if (p.size < 4) continue
             val n = p.size
@@ -289,7 +286,7 @@ internal class Providers(sysCtx: Context?) {
                     out[i] = attribution
                 } else if (c == String::class.java) {
                     // First leftover String slot is callingPkg.
-                    out[i] = if (out[i] == null) CALLER else out[i]
+                    out[i] = out[i] ?: CALLER
                 } else {
                     out[i] = null
                 }
@@ -301,7 +298,7 @@ internal class Providers(sysCtx: Context?) {
 
         private fun buildShellAttribution(): Any? {
             try {
-                val b = Class.forName("android.content.AttributionSource\$Builder")
+                val b = Class.forName($$"android.content.AttributionSource$Builder")
                 val ctor: Constructor<*> = b.getConstructor(Int::class.javaPrimitiveType)
                 val builder: Any = ctor.newInstance(Process.myUid())
                 b.getMethod("setPackageName", String::class.java).invoke(builder, CALLER)
@@ -313,7 +310,7 @@ internal class Providers(sysCtx: Context?) {
 
         // ---------- Cursor → NDJSON ----------
         private fun encodeNdjson(c: Cursor, limit: Int): ByteArray {
-            val cols = c.getColumnNames()
+            val cols = c.columnNames
             val out = StringBuilder(4096)
             out.append('[')
             for (i in cols.indices) {
@@ -324,7 +321,7 @@ internal class Providers(sysCtx: Context?) {
 
             var rows = 0
             while (c.moveToNext()) {
-                if (limit > 0 && rows >= limit) break
+                if (limit in 1..rows) break
                 out.append('[')
                 for (i in cols.indices) {
                     if (i > 0) out.append(',')
@@ -375,7 +372,7 @@ internal class Providers(sysCtx: Context?) {
             out.append('"')
             val n = s.length
             for (i in 0..<n) {
-                val ch = s.get(i)
+                val ch = s[i]
                 when (ch) {
                     '\\' -> out.append("\\\\")
                     '"' -> out.append("\\\"")
@@ -395,7 +392,7 @@ internal class Providers(sysCtx: Context?) {
         }
 
         private fun err(tail: String?): ByteArray {
-            return ("ERR:" + tail).toByteArray(StandardCharsets.UTF_8)
+            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
 }

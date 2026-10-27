@@ -25,7 +25,7 @@ internal class Manifest(private val ctx: Context) {
             val pi = ctx.packageManager.getPackageInfo(pkg, 0)
             val ai = pi.applicationInfo
             apkPath = ai?.sourceDir
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
             return err("pkg-not-found:$pkg")
         }
         if (apkPath == null) return err("apk-path-missing:$pkg")
@@ -85,7 +85,7 @@ internal class Manifest(private val ctx: Context) {
                         val pa = p.getAttributeValue(null, "package")
                         if (pa != null && pa.isNotEmpty()) pkgAttr = pa
                     } else if ("activity" == name || "activity-alias" == name) {
-                        currentComp = Companion.resolveComponent(
+                        currentComp = resolveComponent(
                             pkgAttr!!,
                             p.getAttributeValue(ANDROID, "name")
                         )
@@ -130,7 +130,7 @@ internal class Manifest(private val ctx: Context) {
         }
 
         /** Build a `scheme://host[:port][path]` template from one &lt;data&gt; tag.  */
-        private fun describeData(p: XmlResourceParser): kotlin.String {
+        private fun describeData(p: XmlResourceParser): String {
             val scheme = p.getAttributeValue(ANDROID, "scheme")
             val host = p.getAttributeValue(ANDROID, "host")
             val port = p.getAttributeValue(ANDROID, "port")
@@ -166,7 +166,7 @@ internal class Manifest(private val ctx: Context) {
             return ComponentName(pkg, full).flattenToShortString()
         }
 
-        private fun pad(s: kotlin.String, w: Int): kotlin.String {
+        private fun pad(s: String, w: Int): String {
             if (s.length >= w) return s
             val b = StringBuilder(s)
             while (b.length < w) b.append(' ')

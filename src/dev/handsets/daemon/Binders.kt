@@ -4,7 +4,6 @@ import android.content.Context
 import android.os.IBinder
 import android.os.Looper
 import android.os.Process
-import kotlin.concurrent.Volatile
 
 /**
  * Central pool for Binder + system-Context lookups.
@@ -34,7 +33,7 @@ internal object Binders {
     }
 
     @JvmStatic
-    fun systemContext(): Context? = systemContextLazy
+    fun systemContext(): Context = systemContextLazy
 
     @JvmStatic
     fun service(name: String?): IBinder {
@@ -42,10 +41,9 @@ internal object Binders {
             val sm = Class.forName("android.os.ServiceManager")
             val get = sm.getMethod("getService", String::class.java)
             val b = get.invoke(null, name) as IBinder
-            checkNotNull(b) { "service '" + name + "' not registered" }
             return b
         } catch (t: Throwable) {
-            throw RuntimeException("ServiceManager.getService(" + name + ") failed", t)
+            throw RuntimeException("ServiceManager.getService($name) failed", t)
         }
     }
 
@@ -57,13 +55,13 @@ internal object Binders {
             val m = stub.getMethod("asInterface", IBinder::class.java)
             return m.invoke(null, b)
         } catch (t: Throwable) {
-            throw RuntimeException("asInterface failed for " + stubFqcn, t)
+            throw RuntimeException("asInterface failed for $stubFqcn", t)
         }
     }
 
     @JvmStatic
     fun iPackageManager(): Any? {
-        return asInterface("android.content.pm.IPackageManager\$Stub", service("package"))
+        return asInterface($$"android.content.pm.IPackageManager$Stub", service("package"))
     }
 
     /**
@@ -73,18 +71,18 @@ internal object Binders {
      */
     @JvmStatic
     fun iPermissionManagerOrNull(): Any? {
-        try {
-            return asInterface(
-                "android.permission.IPermissionManager\$Stub", service("permissionmgr")
+        return try {
+            asInterface(
+                $$"android.permission.IPermissionManager$Stub", service("permissionmgr")
             )
-        } catch (t: Throwable) {
-            return null
+        } catch (_: Throwable) {
+            null
         }
     }
 
     @JvmStatic
     fun iActivityManager(): Any? {
-        return asInterface("android.app.IActivityManager\$Stub", service("activity"))
+        return asInterface($$"android.app.IActivityManager$Stub", service("activity"))
     }
 
     /** `UserHandle.myUserId()` is @hide; reach it via reflection.  */
@@ -92,8 +90,8 @@ internal object Binders {
     fun myUserId(): Int {
         try {
             val m = Class.forName("android.os.UserHandle").getMethod("myUserId")
-            return (m.invoke(null) as kotlin.Int?)!!
-        } catch (t: Throwable) {
+            return (m.invoke(null) as Int?)!!
+        } catch (_: Throwable) {
             // Decode user-id directly from our UID (userId * 100000 + appId).
             return Process.myUid() / 100000
         }
@@ -102,12 +100,12 @@ internal object Binders {
     /** API 30+. May be unavailable on older surfaces — callers handle null.  */
     @JvmStatic
     fun iActivityTaskManagerOrNull(): Any? {
-        try {
-            return asInterface(
-                "android.app.IActivityTaskManager\$Stub", service("activity_task")
+        return try {
+            asInterface(
+                $$"android.app.IActivityTaskManager$Stub", service("activity_task")
             )
-        } catch (t: Throwable) {
-            return null
+        } catch (_: Throwable) {
+            null
         }
     }
 }

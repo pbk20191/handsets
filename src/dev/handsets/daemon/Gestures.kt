@@ -7,6 +7,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.nio.charset.StandardCharsets
+import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -54,7 +55,9 @@ internal class Gestures(private val h: Server.Handlers) {
         do {
             at = maxOf(Frames.next(), t0 + 1)
             val f = minOf(1f, (at - t0).toFloat() / durMs)
-            motion(t0, at, MotionEvent.ACTION_MOVE, Math.round(x1 + (x2 - x1) * f), Math.round(y1 + (y2 - y1) * f))
+            motion(t0, at, MotionEvent.ACTION_MOVE, (x1 + (x2 - x1) * f).roundToInt(),
+                (y1 + (y2 - y1) * f).roundToInt()
+            )
         } while (at - t0 < durMs)
         motion(t0, at, MotionEvent.ACTION_UP, x2, y2)
     }

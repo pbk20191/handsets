@@ -1,6 +1,6 @@
 [package]
 name = "handsets-viewer"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Live device-screen viewer for the handsets daemon"
 
@@ -10,19 +10,52 @@ path = "src/main.rs"
 
 [dependencies]
 winit = "0.30"
-zune-jpeg = "0.4"
 raw-window-handle = "0.6"
 
 # macOS path: direct CAMetalLayer presentation + VideoToolbox hardware H.264
-# decode (zero-copy IOSurface → MTLTexture → drawable blit). VT FFI is
-# hand-rolled in src/videotoolbox_decoder.rs to avoid extra crates.
+# and JPEG decode (zero-copy IOSurface → MTLTexture → drawable blit), through
+# the objc2 framework bindings.
 [target.'cfg(target_os = "macos")'.dependencies]
-metal = "0.29"
-core-graphics-types = "0.1"
-objc = "0.2"
+objc2 = "0.6"
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "objc2-core-video", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "objc2-io-surface", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn"] }
+objc2-video-toolbox = { version = "0.3", default-features = false, features = ["std", "objc2-core-media", "objc2-core-video", "VTBase", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession"] }
+objc2-io-surface = { version = "0.3", default-features = false, features = ["std", "objc2", "objc2-core-foundation", "IOSurfaceRef"] }
+objc2-metal = { version = "0.3", default-features = false, features = ["std", "objc2-io-surface", "MTLAllocation", "MTLBlitCommandEncoder", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLDevice", "MTLDrawable", "MTLPixelFormat", "MTLResource", "MTLTexture", "MTLTypes"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-metal", "objc2-core-foundation", "CALayer", "CAMetalLayer"] }
+
+# Everywhere but macOS, JPEG / tilejpeg decode on the CPU.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+zune-jpeg = "0.5.15"
+
+# Linux: OpenGL ES 3 through EGL (Wayland / X11); libEGL is loaded at run time.
+[target.'cfg(target_os = "linux")'.dependencies]
+glutin = { version = "0.32", default-features = false, features = ["egl", "wayland", "x11"] }
+glow = "0.18"
+# H.264 through libavcodec with VA-API; links the system libavcodec / libavutil.
+ffmpeg-sys-next = { version = "9", default-features = false, features = ["avcodec"] }
+
+# Any other host: CPU blit through softbuffer; JPEG / tilejpeg only.
+[target.'cfg(not(any(target_os = "macos", windows, target_os = "linux")))'.dependencies]
+softbuffer = "0.4"
+
+# Windows: D3D11 swap chain + video-processor blit; Media Foundation H.264.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
 
 [profile.release]
-opt-level = "z"          # optimise for size (still inlines hot loops)
+# Speed first: the JPEG decoders are the hot path, and opt-level "z" roughly
+# doubles their decode time for ~26 KB less binary.
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"          # drop unwind tables (~10–20% binary size)

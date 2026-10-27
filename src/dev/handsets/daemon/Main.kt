@@ -77,7 +77,7 @@ data object Main {
         h.installer = Installer(sysCtx)
         h.pm = Pm(sysCtx)
         h.manifest = Manifest(sysCtx)
-        h.providers = Providers(sysCtx)
+        h.providers = Providers()
         h.location = Location()
         h.notifs = Notifications()
         h.clip = Clipboard()
@@ -87,7 +87,7 @@ data object Main {
         h.wm = Wm(sysCtx.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
         h.uiEvents = UiEvents(ua)
         h.nodes = NodeActions(ua)
-        h.state = State(sysCtx, ua, h.uiEvents)
+        h.state = State(sysCtx, h.uiEvents)
 
         // Warm the dump path: the first dump_active on a cold VM costs ~1 s.
         Loop.scope.launch(Loop.Work) {

@@ -5,8 +5,9 @@
 use std::io;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -70,6 +71,8 @@ pub(crate) fn locate_tui() -> Option<PathBuf> {
 }
 
 fn locate_sibling_binary(name: &str) -> Option<PathBuf> {
+    // `handsets-viewer.exe` on Windows.
+    let name = &format!("{name}{}", std::env::consts::EXE_SUFFIX);
     if let Ok(p) = which(name) { return Some(p); }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -110,11 +113,138 @@ struct AdbOut {
     stderr: String,
 }
 
+/// The adb to run, resolved once per process. Probes (in order):
+///   1. $HANDSETS_ADB, then $ADB
+///   2. ~/.handsets/adb-path      — cached result of 3 (`android info` takes ~0.7 s)
+///   3. `android info` → `sdk: <dir>` → <dir>/platform-tools/adb  (Google's Android CLI)
+///   4. $ANDROID_HOME, then $ANDROID_SDK_ROOT → platform-tools/adb
+///   5. `adb` on PATH
+///   6. Android Studio's default SDK (~/Library/Android/sdk, ~/Android/Sdk,
+///      %LOCALAPPDATA%\Android\Sdk) — GUI hosts such as an MCP client often
+///      start hs without the shell's PATH
+fn adb_program() -> &'static Path {
+    static ADB: OnceLock<PathBuf> = OnceLock::new();
+    ADB.get_or_init(resolve_adb)
+}
+
+fn resolve_adb() -> PathBuf {
+    for var in ["HANDSETS_ADB", "ADB"] {
+        if let Some(v) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+            return PathBuf::from(v);
+        }
+    }
+    let cache = home_dir().map(|h| h.join(".handsets").join("adb-path"));
+    if let Some(p) = cache.as_ref().and_then(|c| std::fs::read_to_string(c).ok()) {
+        let p = PathBuf::from(p.trim());
+        if p.is_file() {
+            return p;
+        }
+    }
+    if let Some(p) = android_cli_sdk().map(|sdk| sdk_adb(&sdk)).filter(|p| p.is_file()) {
+        if let Some(c) = cache {
+            let _ = std::fs::create_dir_all(c.parent().unwrap_or(Path::new(".")));
+            let _ = std::fs::write(&c, p.to_string_lossy().as_bytes());
+        }
+        return p;
+    }
+    for var in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
+        if let Some(sdk) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+            let p = sdk_adb(Path::new(&sdk));
+            if p.is_file() {
+                return p;
+            }
+        }
+    }
+    if which(&format!("adb{}", std::env::consts::EXE_SUFFIX)).is_ok() {
+        return PathBuf::from("adb");
+    }
+    let studio = [
+        home_dir().map(|h| h.join("Library/Android/sdk")),
+        home_dir().map(|h| h.join("Android/Sdk")),
+        std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Android").join("Sdk")),
+    ];
+    studio
+        .into_iter()
+        .flatten()
+        .map(|sdk| sdk_adb(&sdk))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("adb"))
+}
+
+/// The SDK directory Google's Android CLI reports, if it is installed.
+fn android_cli_sdk() -> Option<PathBuf> {
+    let mut cmd = Command::new("android");
+    // A set-but-empty ANDROID_HOME makes the CLI report an empty SDK path.
+    for var in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
+        if std::env::var_os(var).is_some_and(|v| v.is_empty()) {
+            cmd.env_remove(var);
+        }
+    }
+    let out = cmd
+        .arg("info")
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    parse_android_info_sdk(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The `sdk: <dir>` line of `android info`, ANSI colours stripped.
+fn parse_android_info_sdk(info: &str) -> Option<PathBuf> {
+    info.lines().find_map(|line| {
+        let line = strip_ansi(line);
+        let dir = line.trim().strip_prefix("sdk:")?.trim();
+        (!dir.is_empty()).then(|| PathBuf::from(dir))
+    })
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // CSI: ESC [ params final-byte
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn sdk_adb(sdk: &Path) -> PathBuf {
+    sdk.join("platform-tools").join(format!("adb{}", std::env::consts::EXE_SUFFIX))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 fn adb(serial: Option<&str>, args: &[&str]) -> io::Result<AdbOut> {
-    let mut cmd = Command::new("adb");
+    let mut cmd = Command::new(adb_program());
     if let Some(s) = serial { cmd.args(["-s", s]); }
     cmd.args(args).stdin(Stdio::null());
-    let out = cmd.output()?;
+    let out = cmd.output().map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                e.kind(),
+                "adb not found: install Google's Android CLI (`android`) or the SDK \
+                 platform-tools, or set HANDSETS_ADB",
+            )
+        } else {
+            e
+        }
+    })?;
     Ok(AdbOut {
         code: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -607,6 +737,18 @@ fn adb_server_list_forwards() -> io::Result<Vec<ForwardEntry>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn android_info_sdk_line() {
+        let info = "sdk: E:\\packages\\Android\\Sdk\nversion: 1.0.16625370\n";
+        assert_eq!(
+            super::parse_android_info_sdk(info),
+            Some(std::path::PathBuf::from("E:\\packages\\Android\\Sdk"))
+        );
+        let coloured = "\u{1b}[33mA new version is available\u{1b}[39m\n\u{1b}[1msdk:\u{1b}[0m /opt/android\n";
+        assert_eq!(super::parse_android_info_sdk(coloured), Some(std::path::PathBuf::from("/opt/android")));
+        assert_eq!(super::parse_android_info_sdk("version: 1\n"), None);
+    }
+
     use super::is_listed;
 
     #[test]

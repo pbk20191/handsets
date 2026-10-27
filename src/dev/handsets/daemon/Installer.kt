@@ -10,11 +10,11 @@ import java.lang.reflect.Method
 import java.nio.charset.StandardCharsets
 
 /**
- * Stream-install an APK via [PackageInstaller], the same path
+ * Stream-install an APK via [android.content.pm.PackageInstaller], the same path
  * `adb install` uses internally. We skip the /data/local/tmp staging
  * copy by writing chunked frames straight into `session.openWrite`.
  * 
- * Install result is reported back via a local [Binder] that implements
+ * Install result is reported back via a local [android.os.Binder] that implements
  * just the `IIntentSender.send` transaction (transaction code 1, stable
  * across all known API levels). That dodges the BroadcastReceiver dance that
  * would require a proper package name for our app_process daemon.
@@ -59,11 +59,11 @@ internal class Installer(private val ctx: Context) {
                 }
                 try {
                     grant.invoke(svc, *args)
-                } catch (ignored: Throwable) { /* non-runtime perms throw — that's fine */
+                } catch (_: Throwable) { /* non-runtime perms throw — that's fine */
                 }
             }
         } catch (t: Throwable) {
-            System.err.println("warn: grantAllRequested failed: " + t)
+            Logx.w("grantAllRequested failed", t)
         }
     }
 
@@ -79,14 +79,14 @@ internal class Installer(private val ctx: Context) {
                 f.isAccessible = true
                 val prev = f.getInt(params)
                 m.invoke(params, prev or flag)
-            } catch (t: Throwable) {
+            } catch (_: Throwable) {
                 // Fallback: write the field directly.
                 try {
                     val f =
                         SessionParams::class.java.getDeclaredField("installFlags")
                     f.isAccessible = true
                     f.setInt(params, f.getInt(params) or flag)
-                } catch (ignored: Throwable) {
+                } catch (_: Throwable) {
                 }
             }
         }
@@ -96,7 +96,7 @@ internal class Installer(private val ctx: Context) {
                 val m = SessionParams::class.java
                     .getDeclaredMethod("setRequireUserAction", Int::class.javaPrimitiveType)
                 m.invoke(params, mode)
-            } catch (ignored: Throwable) {
+            } catch (_: Throwable) {
                 // pre-API-31; default behaviour is fine.
             }
         }
@@ -113,12 +113,5 @@ internal class Installer(private val ctx: Context) {
             return picked
         }
 
-        private fun ok(s: String): ByteArray {
-            return s.toByteArray(StandardCharsets.UTF_8)
-        }
-
-        private fun err(tail: String?): ByteArray {
-            return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
-        }
     }
 }

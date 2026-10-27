@@ -1,30 +1,32 @@
 // handsets-viewer — live device-screen window backed by the handsets daemon.
 //
 // Codec modes:
-//   --codec jpeg      (default): length-prefixed JPEG frames, zune-jpeg → BGRA.
-//   --codec tilejpeg          : tiled JPEG deltas patched into a framebuffer.
+//   --codec jpeg      (default): length-prefixed JPEG frames; on macOS
+//                               VideoToolbox decodes them into IOSurfaces
+//                               like H.264, elsewhere zune-jpeg → BGRA.
+//   --codec tilejpeg          : tiled JPEG deltas patched into a framebuffer
+//                               (on macOS, composited by Metal blits).
 //   --codec h264              : length-prefixed Annex-B H.264 access units;
 //                               on macOS, VideoToolbox decodes straight into
 //                               an IOSurface-backed CVPixelBuffer which the
 //                               Metal renderer wraps as an MTLTexture and
 //                               blits to the drawable (zero-copy GPU path).
 //
-// UI thread (winit 0.30) renders the most recent frame via the Metal-backed
-// renderer. JPEG / tilejpeg take the CPU upload path; H.264 takes the
-// zero-copy IOSurface path.
+// UI thread (winit 0.30) renders the most recent frame:
+//   macOS   — Metal; every codec decodes on VideoToolbox and takes the
+//             zero-copy IOSurface path.
+//   Windows — DXGI flip swap chain + D3D11 video-processor blit; H.264 is
+//             decoded by the Media Foundation MFT on the shared D3D11 device
+//             (DXVA), so NV12 surfaces never leave the GPU.
+//   other   — softbuffer CPU blit (JPEG / tilejpeg only).
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
-mod metal_renderer;
-#[cfg(target_os = "macos")]
-mod videotoolbox_decoder;
-#[cfg(target_os = "macos")]
-use metal_renderer::MetalRenderer;
+mod platform;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
@@ -32,12 +34,6 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
-
-use zune_jpeg::zune_core::colorspace::ColorSpace;
-use zune_jpeg::zune_core::options::DecoderOptions;
-use zune_jpeg::JpegDecoder;
-
-const DAEMON_ADDR: &str = "127.0.0.1:9008";
 
 // Default window: native aspect (1440x3120) at 1/4 scale.
 const INITIAL_W: u32 = 360;
@@ -137,23 +133,23 @@ enum UserEvent {
     Disconnected(String),
 }
 
-/// Latest frame ready to present. Two backings depending on the codec:
-/// `Bgra` is a CPU-side BGRA8888 buffer (JPEG / tilejpeg paths); `Hardware`
-/// is a CVPixelBuffer that lives entirely on the GPU (H.264 / VideoToolbox).
+/// Latest frame ready to present: a CPU-side BGRA8888 buffer (JPEG /
+/// tilejpeg) or a decoded H.264 frame that stays on the GPU (see
+/// [platform::GpuFrame]).
 enum DecodedFrame {
+    #[cfg(not(target_os = "macos"))]
     Bgra {
         rgb: Vec<u8>,
         width: u32,
         height: u32,
     },
-    #[cfg(target_os = "macos")]
-    Hardware {
-        pb: videotoolbox_decoder::PixelBuffer,
-    },
+    Gpu(platform::GpuFrame),
 }
 
-/// Window→device mapping snapshot, refreshed every render.
+/// Window→device mapping snapshot, refreshed every render. The Metal layer
+/// letterboxes on its own, so macOS never builds one.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 struct Mapping {
     pad_x: u32,
     pad_y: u32,
@@ -163,6 +159,7 @@ struct Mapping {
     src_h: u32,
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 impl Mapping {
     /// Convert window-space coordinates to device pixels.
     /// Returns None if the point falls outside the letterboxed device area.
@@ -191,8 +188,7 @@ enum InputCmd {
 
 struct App {
     window: Option<Arc<Window>>,
-    #[cfg(target_os = "macos")]
-    renderer: Option<MetalRenderer>,
+    renderer: Option<platform::Renderer>,
     latest: Arc<Mutex<Option<DecodedFrame>>>,
     frame_count: u64,
     bytes_count: u64,
@@ -218,24 +214,16 @@ impl ApplicationHandler<UserEvent> for App {
             .with_inner_size(winit::dpi::LogicalSize::new(INITIAL_W, INITIAL_H));
         let win = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
-        // Attach a CAMetalLayer directly to the NSView. Drawable size is the
-        // device's native pixel dimensions; the layer scales aspect-fit to the
-        // current view bounds (window size). Each frame we upload our BGRA
-        // framebuffer straight into the drawable's texture and present —
-        // skipping the ~16–32 ms WindowServer compositor batching that
-        // softbuffer's CALayer path pays.
-        let (dev_w, dev_h) = self.device_size.unwrap_or((1440, 3120));
-        #[cfg(target_os = "macos")]
-        {
-            match MetalRenderer::new(&win, dev_w, dev_h) {
-                Some(r) => {
-                    eprintln!("viewer: Metal renderer attached ({}x{} device texture)", dev_w, dev_h);
-                    self.renderer = Some(r);
-                }
-                None => {
-                    eprintln!("viewer: failed to set up Metal renderer — window will be blank");
-                }
-            }
+        // macOS: CAMetalLayer whose drawable is the device's native size and
+        // scales aspect-fit to the view. Windows: DXGI swap chain on the HWND.
+        // Elsewhere: softbuffer.
+        let device = self.device_size.unwrap_or((1440, 3120));
+        let name = platform::Renderer::NAME;
+        self.renderer = platform::Renderer::new(&win, device);
+        if self.renderer.is_some() {
+            eprintln!("viewer: {name} renderer attached ({}x{} device)", device.0, device.1);
+        } else {
+            eprintln!("viewer: failed to set up {name} renderer — window will be blank");
         }
 
         self.window = Some(win);
@@ -246,9 +234,8 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => self.render(),
             WindowEvent::Resized(new_size) => {
-                #[cfg(target_os = "macos")]
-                if let Some(r) = self.renderer.as_ref() {
-                    r.resize_window(new_size.width.max(1), new_size.height.max(1));
+                if let Some(r) = self.renderer.as_mut() {
+                    r.resized(new_size.width.max(1), new_size.height.max(1));
                 }
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
@@ -355,45 +342,23 @@ impl ApplicationHandler<UserEvent> for App {
 
 impl App {
     fn render(&mut self) {
-        #[cfg(target_os = "macos")]
-        {
-            let Some(r) = self.renderer.as_mut() else { return };
-            let guard = self.latest.lock().unwrap();
-            match guard.as_ref() {
-                Some(DecodedFrame::Bgra { rgb, width, height }) => {
-                    // BGRA8888 at frame dimensions (smaller than the device
-                    // for H.264 paths capped to 2048; renderer reconfigures
-                    // its drawable each call).
-                    r.present(rgb, *width, *height);
-                }
-                Some(DecodedFrame::Hardware { pb }) => {
-                    r.present_pixel_buffer(pb);
-                }
-                None => {}
-            }
+        let (Some(r), Some(window)) = (self.renderer.as_mut(), self.window.as_ref()) else { return };
+        let size = window.inner_size();
+        let guard = self.latest.lock().unwrap();
+        let Some(frame) = guard.as_ref() else { return };
+        let m = r.present(frame, (size.width, size.height), self.device_size);
+        drop(guard);
+        if m.is_some() {
+            *self.mapping.lock().unwrap() = m;
         }
     }
 
     /// Map the current cursor position to device pixel coordinates.
-    /// On macOS this asks the Metal renderer which knows the drawable size +
-    /// current window bounds.
     fn current_device_xy(&self) -> Option<(i32, i32)> {
-        #[cfg(target_os = "macos")]
-        {
-            let renderer = self.renderer.as_ref()?;
-            let window = self.window.as_ref()?;
-            let size = window.inner_size();
-            return renderer.window_pos_to_pixel(
-                size.width.max(1),
-                size.height.max(1),
-                self.cursor_pos.x,
-                self.cursor_pos.y,
-            );
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            None
-        }
+        let r = self.renderer.as_ref()?;
+        let size = self.window.as_ref()?.inner_size();
+        let mapping = *self.mapping.lock().unwrap();
+        r.device_xy(mapping, (size.width, size.height), self.cursor_pos.x, self.cursor_pos.y)
     }
 
     /// Push an input command toward the input thread. Drops silently if the
@@ -527,74 +492,111 @@ fn network_thread_jpeg(
         return;
     }
 
-    let mut len_buf = [0u8; 4];
-    let mut jpeg_buf: Vec<u8> = Vec::with_capacity(256 * 1024);
+    // Reading and decoding run on separate threads so the socket keeps
+    // draining (and the daemon keeps encoding) while a frame decodes. The
+    // slot holds only the newest JPEG; a frame that arrives mid-decode
+    // replaces any older one still waiting.
+    let slot: Arc<(Mutex<JpegSlot>, Condvar)> = Arc::default();
+    {
+        let slot = slot.clone();
+        let proxy = proxy.clone();
+        std::thread::Builder::new()
+            .name("jpeg-decode".into())
+            .spawn(move || jpeg_decode_thread(&slot, &latest, &proxy))
+            .expect("spawn jpeg decoder");
+    }
+    let err = read_jpeg_frames(&mut sock, &slot);
+    let (lock, cv) = &*slot;
+    lock.lock().unwrap().closed = true;
+    cv.notify_one();
+    let _ = proxy.send_event(UserEvent::Disconnected(err));
+}
 
+#[derive(Default)]
+struct JpegSlot {
+    frame: Option<Vec<u8>>,
+    /// A buffer the decoder is done with, reused for the next read.
+    spare: Option<Vec<u8>>,
+    closed: bool,
+}
+
+/// Reads length-prefixed JPEGs into the slot until the stream ends; returns why.
+fn read_jpeg_frames(sock: &mut TcpStream, slot: &(Mutex<JpegSlot>, Condvar)) -> String {
+    let (lock, cv) = slot;
+    let mut len_buf = [0u8; 4];
     loop {
         if sock.read_exact(&mut len_buf).is_err() {
-            let _ = proxy.send_event(UserEvent::Disconnected("read header eof".into()));
-            return;
+            return "read header eof".into();
         }
         let n = u32::from_be_bytes(len_buf) as usize;
         if n == 0 || n > 256 * 1024 * 1024 {
-            let _ = proxy.send_event(UserEvent::Disconnected(format!("bad length {n}")));
-            return;
+            return format!("bad length {n}");
         }
-        jpeg_buf.resize(n, 0);
-        if sock.read_exact(&mut jpeg_buf).is_err() {
-            let _ = proxy.send_event(UserEvent::Disconnected("read payload eof".into()));
-            return;
+        let mut buf = lock.lock().unwrap().spare.take().unwrap_or_default();
+        buf.resize(n, 0);
+        if sock.read_exact(&mut buf).is_err() {
+            return "read payload eof".into();
         }
+        if buf.starts_with(b"ERR:") {
+            return String::from_utf8_lossy(&buf).into_owned();
+        }
+        let mut s = lock.lock().unwrap();
+        if let Some(old) = s.frame.replace(buf) {
+            s.spare = Some(old);
+        }
+        cv.notify_one();
+    }
+}
 
-        if jpeg_buf.len() >= 4 && &jpeg_buf[..4] == b"ERR:" {
-            let msg = String::from_utf8_lossy(&jpeg_buf).into_owned();
-            let _ = proxy.send_event(UserEvent::Disconnected(msg));
-            return;
-        }
-
-        let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::BGRA);
-        let mut decoder = JpegDecoder::new_with_options(jpeg_buf.as_slice(), opts);
-        match decoder.decode() {
-            Ok(rgba) => {
-                let info = match decoder.info() {
-                    Some(i) => i,
-                    None => continue,
-                };
-                let frame = DecodedFrame::Bgra {
-                    rgb: rgba,
-                    width: info.width as u32,
-                    height: info.height as u32,
-                };
-                *latest.lock().unwrap() = Some(frame);
-                let _ = proxy.send_event(UserEvent::NewFrame { bytes: n as u32 });
+fn jpeg_decode_thread(
+    slot: &(Mutex<JpegSlot>, Condvar),
+    latest: &Mutex<Option<DecodedFrame>>,
+    proxy: &EventLoopProxy<UserEvent>,
+) {
+    let (lock, cv) = slot;
+    let mut decoder = platform::JpegDecoder::new();
+    let mut dec_logger = DecLogger::new(platform::JpegDecoder::LABEL);
+    loop {
+        let jpeg = {
+            let mut s = lock.lock().unwrap();
+            loop {
+                if let Some(f) = s.frame.take() {
+                    break f;
+                }
+                if s.closed {
+                    return;
+                }
+                s = cv.wait(s).unwrap();
             }
-            Err(e) => {
-                eprintln!("jpeg decode error: {e:?}");
+        };
+        let t0 = Instant::now();
+        let frame = decoder.decode(&jpeg).map_err(|e| eprintln!("{e}")).ok();
+        dec_logger.tick(t0.elapsed().as_secs_f64() * 1000.0);
+        if let Some(frame) = frame {
+            let old = latest.lock().unwrap().replace(frame);
+            if let Some(old) = old {
+                decoder.recycle(old);
             }
+            let _ = proxy.send_event(UserEvent::NewFrame { bytes: jpeg.len() as u32 });
         }
+        lock.lock().unwrap().spare = Some(jpeg);
     }
 }
 
 // ---------- network thread, H.264 ----------
 
-#[cfg(not(target_os = "macos"))]
-fn network_thread_h264(
-    _args: Args,
-    _latest: Arc<Mutex<Option<DecodedFrame>>>,
-    proxy: EventLoopProxy<UserEvent>,
-) {
-    let _ = proxy.send_event(UserEvent::Disconnected(
-        "h264 decode is only implemented on macOS (VideoToolbox)".into(),
-    ));
-}
-
-#[cfg(target_os = "macos")]
 fn network_thread_h264(
     args: Args,
     latest: Arc<Mutex<Option<DecodedFrame>>>,
     proxy: EventLoopProxy<UserEvent>,
 ) {
-    use videotoolbox_decoder::VtDecoder;
+    let mut decoder = match platform::H264Decoder::new() {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = proxy.send_event(UserEvent::Disconnected(e));
+            return;
+        }
+    };
 
     let mut sock = match TcpStream::connect((args.host.as_str(), args.port)) {
         Ok(s) => s,
@@ -621,11 +623,8 @@ fn network_thread_h264(
     }
 
     let mut dec_logger = DecLogger::new("h264");
-    let mut decoder = VtDecoder::new();
-
     let mut len_buf = [0u8; 4];
     let mut pkt: Vec<u8> = Vec::with_capacity(256 * 1024);
-
     loop {
         if sock.read_exact(&mut len_buf).is_err() {
             let _ = proxy.send_event(UserEvent::Disconnected("read header eof".into()));
@@ -641,30 +640,28 @@ fn network_thread_h264(
             let _ = proxy.send_event(UserEvent::Disconnected("read payload eof".into()));
             return;
         }
-
         if pkt.len() >= 4 && &pkt[..4] == b"ERR:" {
             let msg = String::from_utf8_lossy(&pkt).into_owned();
             let _ = proxy.send_event(UserEvent::Disconnected(msg));
             return;
         }
 
-        let t_dec_start = std::time::Instant::now();
+        let t_dec_start = Instant::now();
         match decoder.decode(&pkt) {
-            Ok(Some(pb)) => {
-                let dec_ms = t_dec_start.elapsed().as_secs_f64() * 1000.0;
-                *latest.lock().unwrap() = Some(DecodedFrame::Hardware { pb });
-                dec_logger.tick(dec_ms);
+            Ok(Some(frame)) => {
+                dec_logger.tick(t_dec_start.elapsed().as_secs_f64() * 1000.0);
+                *latest.lock().unwrap() = Some(DecodedFrame::Gpu(frame));
                 let _ = proxy.send_event(UserEvent::NewFrame { bytes: n as u32 });
             }
-            Ok(None) => {
-                // Config-only packet (SPS/PPS before first IDR) — no frame.
-            }
-            Err(e) => {
-                eprintln!("h264 decode error: {e}");
-            }
+            // Config-only packet (SPS/PPS before the first IDR), or the
+            // decoder is still buffering.
+            Ok(None) => {}
+            Err(e) => eprintln!("h264 decode error: {e}"),
         }
     }
 }
+
+
 
 /// Rolling per-frame decode-time logger. Coalesces output to one line every
 /// ~60 frames so we can see decode latency without spamming.
@@ -739,10 +736,14 @@ fn network_thread_tilejpeg(
         return;
     }
 
-    // Persistent RGBA framebuffer at device size. Patched in-place by deltas
-    // and replaced wholesale by keyframes.
-    let fb_len = (dev_w as usize) * (dev_h as usize) * 4;
-    let mut fb: Vec<u8> = vec![0u8; fb_len];
+    // Device-size canvas, replaced wholesale by keyframes and patched by deltas.
+    let mut canvas = match platform::TileCanvas::new(dev_w, dev_h) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = proxy.send_event(UserEvent::Disconnected(e));
+            return;
+        }
+    };
 
     let mut len_buf = [0u8; 4];
     let mut pkt: Vec<u8> = Vec::with_capacity(256 * 1024);
@@ -771,7 +772,7 @@ fn network_thread_tilejpeg(
 
         let t_dec = std::time::Instant::now();
         let kind = pkt[0];
-        match kind {
+        let frame = match kind {
             TILE_TYPE_KEYFRAME => {
                 if pkt.len() < 5 {
                     eprintln!("tilejpeg: short keyframe packet");
@@ -782,19 +783,7 @@ fn network_thread_tilejpeg(
                     eprintln!("tilejpeg: keyframe length mismatch");
                     continue;
                 }
-                let jpeg = &pkt[5..5 + jlen];
-                match decode_jpeg_rgba(jpeg) {
-                    Some((w, h, rgb)) => {
-                        if (w as u32, h as u32) == (dev_w, dev_h) && rgb.len() == fb.len() {
-                            fb.copy_from_slice(&rgb);
-                        } else {
-                            // Source dimensions don't match — letterbox into fb.
-                            blit_rgba_into(&mut fb, dev_w as usize, 0, 0,
-                                          w as usize, h as usize, &rgb);
-                        }
-                    }
-                    None => continue,
-                }
+                canvas.keyframe(&pkt[5..5 + jlen])
             }
             TILE_TYPE_DELTA => {
                 if pkt.len() < 3 {
@@ -803,6 +792,7 @@ fn network_thread_tilejpeg(
                 }
                 let num = u16::from_be_bytes([pkt[1], pkt[2]]) as usize;
                 let mut cursor = 3;
+                let mut tiles = Vec::with_capacity(num);
                 for _ in 0..num {
                     if cursor + 10 > pkt.len() { break; }
                     let idx = u16::from_be_bytes([pkt[cursor], pkt[cursor + 1]]) as u32;
@@ -813,69 +803,38 @@ fn network_thread_tilejpeg(
                     ]) as usize;
                     cursor += 10;
                     if cursor + jlen > pkt.len() { break; }
-                    let jpeg = &pkt[cursor..cursor + jlen];
+                    tiles.push(platform::Tile {
+                        x: (idx % tiles_x) * tile_edge,
+                        y: (idx / tiles_x) * tile_edge,
+                        w: tw,
+                        h: th,
+                        jpeg: &pkt[cursor..cursor + jlen],
+                    });
                     cursor += jlen;
-                    if let Some((w, h, rgb)) = decode_jpeg_rgba(jpeg) {
-                        if w as u32 != tw || h as u32 != th {
-                            eprintln!(
-                                "tilejpeg: tile size mismatch (jpeg {}x{}, hdr {}x{})",
-                                w, h, tw, th
-                            );
-                            continue;
-                        }
-                        let row = idx / tiles_x;
-                        let col = idx % tiles_x;
-                        let dx = (col * tile_edge) as usize;
-                        let dy = (row * tile_edge) as usize;
-                        blit_rgba_into(
-                            &mut fb, dev_w as usize, dx, dy,
-                            tw as usize, th as usize, &rgb,
-                        );
-                    }
                 }
+                canvas.patch(&tiles)
             }
             _ => {
                 eprintln!("tilejpeg: unknown packet type {kind:#x}");
                 continue;
             }
-        }
+        };
+        let frame = match frame {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("tilejpeg: {e}");
+                continue;
+            }
+        };
 
         dec_logger.tick(t_dec.elapsed().as_secs_f64() * 1000.0);
 
-        // Publish the patched framebuffer to the UI thread.
-        *latest.lock().unwrap() = Some(DecodedFrame::Bgra {
-            rgb: fb.clone(),
-            width: dev_w,
-            height: dev_h,
-        });
+        // Publish the new frame to the UI thread; reuse the one it replaces.
+        let old = latest.lock().unwrap().replace(frame);
+        if let Some(old) = old {
+            canvas.recycle(old);
+        }
         let _ = proxy.send_event(UserEvent::NewFrame { bytes: n as u32 });
-    }
-}
-
-/// Decode a JPEG byte slice to an RGBA8888 buffer using zune-jpeg.
-fn decode_jpeg_rgba(jpeg: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
-    let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::BGRA);
-    let mut dec = JpegDecoder::new_with_options(jpeg, opts);
-    let rgba = dec.decode().ok()?;
-    let info = dec.info()?;
-    Some((info.width as usize, info.height as usize, rgba))
-}
-
-/// Copy a tile from `src` (RGBA8888, tw*th*4 bytes) into `fb` at offset (dx, dy).
-/// `fb_w` is the row stride in pixels of the destination framebuffer.
-fn blit_rgba_into(
-    fb: &mut [u8], fb_w: usize, dx: usize, dy: usize,
-    tw: usize, th: usize, src: &[u8],
-) {
-    if tw == 0 || th == 0 { return; }
-    let row_bytes = tw * 4;
-    for y in 0..th {
-        let src_off = y * row_bytes;
-        let dst_off = ((dy + y) * fb_w + dx) * 4;
-        if dst_off + row_bytes > fb.len() { break; }
-        if src_off + row_bytes > src.len() { break; }
-        fb[dst_off..dst_off + row_bytes]
-            .copy_from_slice(&src[src_off..src_off + row_bytes]);
     }
 }
 
@@ -987,7 +946,6 @@ fn main() {
 
     let mut app = App {
         window: None,
-        #[cfg(target_os = "macos")]
         renderer: None,
         latest,
         frame_count: 0,

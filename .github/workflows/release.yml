@@ -46,7 +46,7 @@ jobs:
           path: build/hs.jar
           if-no-files-found: error
 
-  # ─── Cross-build `hs` (and `handsets-viewer` on macOS) for every target ──
+  # ─── Cross-build `hs` (and `handsets-viewer` where it has a GPU backend) ─
   build-cli:
     needs: build-jar
     strategy:
@@ -56,11 +56,14 @@ jobs:
           # Both macOS targets cross-build from the Apple Silicon runner —
           # macos-13 (Intel) is notably slower and the x86_64 binary cross-
           # builds cleanly via Rust's standard target install.
-          - { name: macos-arm64,     os: macos-14,       target: aarch64-apple-darwin,         viewer: true,  exe: '',     archive: tar.gz }
-          - { name: macos-x86_64,    os: macos-14,       target: x86_64-apple-darwin,          viewer: true,  exe: '',     archive: tar.gz }
-          - { name: linux-x86_64,    os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,     viewer: false, exe: '',     archive: tar.gz }
-          - { name: linux-aarch64,   os: ubuntu-latest,  target: aarch64-unknown-linux-gnu,    viewer: false, exe: '',     archive: tar.gz, cross: true }
-          - { name: windows-x86_64,  os: windows-latest, target: x86_64-pc-windows-msvc,       viewer: false, exe: '.exe', archive: zip }
+          - { name: macos-arm64,     os: macos-14,       target: aarch64-apple-darwin,         viewer: true,  exe: '',     archive: tar.gz, mcpb: darwin }
+          - { name: macos-x86_64,    os: macos-14,       target: x86_64-apple-darwin,          viewer: true,  exe: '',     archive: tar.gz, mcpb: darwin }
+          # The Linux viewer links the system ffmpeg (libavcodec / libavutil,
+          # for VA-API H.264), so it ships on x86_64 only: the aarch64 cross
+          # build would need arm64 ffmpeg libraries.
+          - { name: linux-x86_64,    os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,     viewer: true,  exe: '',     archive: tar.gz, mcpb: linux }
+          - { name: linux-aarch64,   os: ubuntu-latest,  target: aarch64-unknown-linux-gnu,    viewer: false, exe: '',     archive: tar.gz, mcpb: linux, cross: true }
+          - { name: windows-x86_64,  os: windows-latest, target: x86_64-pc-windows-msvc,       viewer: true,  exe: '.exe', archive: zip, mcpb: win32 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -69,6 +72,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      # Link the C runtime statically on Windows so the binaries start on a
+      # PC without the Visual C++ Redistributable (~+97 KB per exe). Set
+      # before the cache step, whose key includes RUSTFLAGS.
+      - name: Static CRT (Windows only)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
@@ -85,6 +96,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Install viewer build deps (Linux)
+        if: matrix.viewer && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev
 
       - name: Build hs
         shell: bash
@@ -147,12 +164,34 @@ jobs:
             shasum -a 256 "$asset" > "$asset.sha256"
           fi
 
+      # MCP bundle: `hs` + hs.jar run as `hs mcp` (see mcpb/manifest.json),
+      # one per platform since the bundle carries a native binary.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Pack MCP bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/mcpb-stage.mjs             --version "${{ steps.ver.outputs.tag }}"             --platform "${{ matrix.mcpb }}"             --hs "handsets-cli/target/${{ matrix.target }}/release/hs${{ matrix.exe }}"             --jar build/hs.jar             --out dist/mcpb
+          npx -y @anthropic-ai/mcpb@2.1.2 validate dist/mcpb/manifest.json
+          bundle="handsets-${{ matrix.name }}.mcpb"
+          npx -y @anthropic-ai/mcpb@2.1.2 pack dist/mcpb "$bundle"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$bundle" > "$bundle.sha256"
+          else
+            shasum -a 256 "$bundle" > "$bundle.sha256"
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: handsets-${{ matrix.name }}
           path: |
             handsets-${{ matrix.name }}.${{ matrix.archive }}
             handsets-${{ matrix.name }}.${{ matrix.archive }}.sha256
+            handsets-${{ matrix.name }}.mcpb
+            handsets-${{ matrix.name }}.mcpb.sha256
           if-no-files-found: error
 
   # ─── Publish the GitHub release (tag pushes only) ──────────────────────

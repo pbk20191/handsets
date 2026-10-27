@@ -13,6 +13,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.ByteBuffer
+import kotlin.math.roundToInt
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Screen streams. Each owns its connection until the client leaves; frames
@@ -54,7 +56,7 @@ internal object Streams {
             var next = SystemClock.uptimeMillis() + intervalMs
             while (true) {
                 // Bounded wait: the periodic re-send doubles as a keep-alive.
-                withTimeoutOrNull(IDLE_INTERVAL_MS) { wake.receive() }
+                withTimeoutOrNull(IDLE_INTERVAL_MS.milliseconds) { wake.receive() }
                 if (intervalMs > 0) {
                     // fps cap: send on the first vsync at or after the slot.
                     var now = SystemClock.uptimeMillis()
@@ -79,7 +81,7 @@ internal object Streams {
         try {
             var first = true
             while (true) {
-                if (!first) withTimeoutOrNull(TileStreamer.IDLE_INTERVAL_MS) { wake.receive() }
+                if (!first) withTimeoutOrNull(TileStreamer.IDLE_INTERVAL_MS.milliseconds) { wake.receive() }
                 val force = first
                 val body = ts.nextPacket(force)
                 first = false
@@ -131,8 +133,8 @@ internal object Streams {
         var scale = minOf(1f, targetLongEdge.toFloat() / maxOf(srcW, srcH))
         scale = minOf(scale, minOf(ENCODER_MAX_DIM.toFloat() / srcW, ENCODER_MAX_DIM.toFloat() / srcH))
         val key = H264Key(
-            minOf(ENCODER_MAX_DIM, roundEven(maxOf(2, Math.round(srcW * scale)))),
-            minOf(ENCODER_MAX_DIM, roundEven(maxOf(2, Math.round(srcH * scale)))),
+            minOf(ENCODER_MAX_DIM, roundEven(maxOf(2, (srcW * scale).roundToInt()))),
+            minOf(ENCODER_MAX_DIM, roundEven(maxOf(2, (srcH * scale).roundToInt()))),
             if (fps0 > 0) fps0 else 60,
             if (bitrateKbps0 > 0) bitrateKbps0 else 6000,
             if (gopSec0 > 0) gopSec0 else 1,
@@ -206,7 +208,6 @@ internal object Streams {
                     if (released) return
                     var payload: ByteArray? = null
                     try {
-                        if (released) return
                         val buf = codec.getOutputBuffer(index)
                         if (buf != null && info.size > 0) {
                             buf.position(info.offset)

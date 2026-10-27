@@ -20,8 +20,8 @@ import kotlin.math.min
  * can detect disconnects without burning bandwidth on a static screen.
  */
 internal class TileStreamer(private val mirror: Screenshot.Mirror, quality: Int, tileEdge: Int) {
-    private val quality: Int
-    private val tileEdge: Int
+    private val quality: Int = if (quality in 1..100) quality else 80
+    private val tileEdge: Int = if (tileEdge > 0) tileEdge else DEFAULT_TILE
 
     // Per-stream state, lazily sized in initIfNeeded().
     private var srcW = -1
@@ -40,10 +40,10 @@ internal class TileStreamer(private val mirror: Screenshot.Mirror, quality: Int,
 
     /** Next wire packet. `forceKeyframe` for the first one. */
     suspend fun nextPacket(forceKeyframe: Boolean): ByteArray =
-        mirror.withFrame { bmp, stride -> buildPacket(bmp, stride, forceKeyframe) }
+        mirror.withFrame { bmp, _ -> buildPacket(bmp, forceKeyframe) }
 
     /** Runs while the mirror's frame is held, so `bmp` can't be swapped mid-read. */
-    private fun buildPacket(bmp: Bitmap?, stride: Int, forceKeyframe: Boolean): ByteArray {
+    private fun buildPacket(bmp: Bitmap?, forceKeyframe: Boolean): ByteArray {
         if (bmp == null) {
             // No frame yet — send an empty delta so the viewer at least sees
             // liveness.
@@ -62,7 +62,7 @@ internal class TileStreamer(private val mirror: Screenshot.Mirror, quality: Int,
                 val tx = col * tileEdge
                 val tw = min(tileEdge, dispW - tx)
                 bmp.getPixels(tilePix!!, 0, tw, tx, ty, tw, th)
-                val hh: Int = Companion.arrayHash(tilePix!!, tw * th)
+                val hh: Int = arrayHash(tilePix!!, tw * th)
                 val idx = row * tilesX + col
                 if (forceKeyframe || hh != prevHashes[idx]) {
                     prevHashes[idx] = hh
@@ -83,7 +83,7 @@ internal class TileStreamer(private val mirror: Screenshot.Mirror, quality: Int,
             } else {
                 writeDelta(dos, bmp, changed)
             }
-        } catch (ioe: IOException) {
+        } catch (_: IOException) {
             // Buffer writes don't really throw IOException, but the contract
             // forces us to handle it.
             return EMPTY_DELTA
@@ -148,11 +148,6 @@ internal class TileStreamer(private val mirror: Screenshot.Mirror, quality: Int,
         changedH = IntArray(totalTiles)
         tilePix = IntArray(tileEdge * tileEdge)
         Logx.i("tilejpeg: stream ${w}x$h tile=$tileEdge ($tilesX x $tilesY = $totalTiles tiles), q=$quality")
-    }
-
-    init {
-        this.quality = if (quality > 0 && quality <= 100) quality else 80
-        this.tileEdge = if (tileEdge > 0) tileEdge else DEFAULT_TILE
     }
 
     companion object {

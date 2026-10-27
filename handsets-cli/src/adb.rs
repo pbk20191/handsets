@@ -25,6 +25,10 @@ pub(crate) enum Cmd {
     GetProp(String),
     SetProp(String, String),
     Logcat(Vec<String>),
+    /// logcat with `hs logs` filters: `pkg` becomes `--pid=` (resolved on the
+    /// device); `tail` keeps the last N lines on the host, since logcat's own
+    /// `-t` counts lines before its priority / tag / regex filters.
+    LogcatFiltered { pkg: Option<String>, args: Vec<String>, tail: Option<usize> },
     SettingsGet { namespace: String, key: String },
     SettingsPut { namespace: String, key: String, value: String },
     Shell(Vec<String>),
@@ -84,6 +88,29 @@ pub(crate) fn run(host: &str, port: u16, cmd: &Cmd) -> io::Result<()> {
             let mut wire = String::from("logcat");
             for a in args { wire.push(' '); wire.push_str(a); }
             stream_call(&mut conn, &wire)
+        }
+        Cmd::LogcatFiltered { pkg, args, tail } => {
+            let mut wire = String::from("logcat");
+            if let Some(pkg) = pkg {
+                let pids = shell_capture(&mut conn, &format!("shell pidof {pkg}"))
+                    .map_err(|_| io::Error::other(format!("{pkg} is not running")))?;
+                // pidof lists every process of the package; the main one is first.
+                let pid = pids.split_whitespace().next()
+                    .ok_or_else(|| io::Error::other(format!("{pkg} is not running")))?;
+                wire.push_str(&format!(" --pid={pid}"));
+            }
+            for a in args { wire.push(' '); wire.push_str(a); }
+            let Some(n) = *tail else { return stream_call(&mut conn, &wire) };
+            conn.send_cmd(&wire)?;
+            let mut all = Vec::new();
+            conn.recv_chunks_to(&mut all)?;
+            let text = String::from_utf8_lossy(&all);
+            let lines: Vec<&str> = text.lines().filter(|l| !l.starts_with("--------- beginning of")).collect();
+            let mut out = io::stdout().lock();
+            for l in &lines[lines.len().saturating_sub(n)..] {
+                writeln!(out, "{l}")?;
+            }
+            out.flush()
         }
         Cmd::SettingsGet { namespace, key } =>
             text_call(&mut conn, &format!("settings_get {namespace} {key}")),
@@ -187,6 +214,29 @@ fn parse_exit_trailer(b: &[u8]) -> Option<i32> {
 
 /// Server-streamed call. Sends the command, then dumps chunked frames to
 /// stdout until the 0-length terminator.
+/// Runs a `shell` wire command and returns its stdout; a non-zero exit is
+/// an error.
+fn shell_capture(conn: &mut Conn, wire: &str) -> io::Result<String> {
+    conn.send_cmd(wire)?;
+    let mut out = Vec::new();
+    loop {
+        let frame = conn.read_frame()?;
+        if frame.is_empty() { break; }
+        if out.is_empty() && frame.starts_with(b"ERR:") {
+            return Err(io::Error::other(String::from_utf8_lossy(&frame).into_owned()));
+        }
+        if let Some(code) = parse_exit_trailer(&frame) {
+            let _ = conn.read_frame();
+            if code != 0 {
+                return Err(io::Error::other(format!("shell exited {code}")));
+            }
+            break;
+        }
+        out.extend_from_slice(&frame);
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
 fn stream_call(conn: &mut Conn, wire: &str) -> io::Result<()> {
     conn.send_cmd(wire)?;
     let mut out = io::stdout().lock();

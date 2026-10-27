@@ -53,7 +53,7 @@ internal class SettingsDirect {
             val args = buildCallArgs(n, "GET_" + ns.lowercase(Locale.getDefault()), key, extras)
             val res = callMethod!!.invoke(prov, *args) as Bundle?
             return res?.getString("value")
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
             return null
         }
     }
@@ -70,7 +70,7 @@ internal class SettingsDirect {
             val args = buildCallArgs(n, "PUT_" + ns.lowercase(Locale.getDefault()), key, extras)
             callMethod!!.invoke(prov, *args)
             return true
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
             return false
         }
     }
@@ -109,7 +109,7 @@ internal class SettingsDirect {
             callMethod = call
             provider = prov
             return prov
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
             failed = true
             return null
         }
@@ -202,13 +202,13 @@ internal class SettingsDirect {
 
         private fun makeAttributionSource(): Any? {
             try {
-                val b = Class.forName("android.content.AttributionSource\$Builder")
+                val b = Class.forName($$"android.content.AttributionSource$Builder")
                 val ctor: Constructor<*> = b.getConstructor(Int::class.javaPrimitiveType)
                 val builder: Any = ctor.newInstance(Process.myUid())
                 val setPkg = b.getMethod("setPackageName", String::class.java)
                 setPkg.invoke(builder, "com.android.shell")
                 return b.getMethod("build").invoke(builder)
-            } catch (t: Throwable) {
+            } catch (_: Throwable) {
                 return null
             }
         }

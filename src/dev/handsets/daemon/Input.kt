@@ -34,11 +34,10 @@ internal class Input(private val ua: UiAutomation) {
     private var pointerLastY = 0
 
     init {
-        var kcm: KeyCharacterMap?
-        try {
-            kcm = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
-        } catch (t: Throwable) {
-            kcm = null
+        var kcm: KeyCharacterMap? = try {
+            KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
+        } catch (_: Throwable) {
+            null
         }
         this.virtualKeyMap = kcm
     }
@@ -97,7 +96,7 @@ internal class Input(private val ua: UiAutomation) {
 
     /** Resolve a friendly name (BACK, HOME, etc.) to a KEYCODE_* and press.  */
     fun keyByName(name: String?) {
-        val code = requireNotNull(keycodeForName(name)) { "unknown key name: " + name }
+        val code = requireNotNull(keycodeForName(name)) { "unknown key name: $name" }
         keyPress(code)
     }
 
@@ -109,7 +108,7 @@ internal class Input(private val ua: UiAutomation) {
 
     fun text(s: String?) {
         checkNotNull(virtualKeyMap) { "no virtual key map" }
-        if (s == null || s.isEmpty()) return
+        if (s.isNullOrEmpty()) return
         val events = virtualKeyMap.getEvents(s.toCharArray())
         requireNotNull(events) { "char(s) unsupported by virtual keymap" }
         val base = SystemClock.uptimeMillis()
@@ -120,13 +119,13 @@ internal class Input(private val ua: UiAutomation) {
             val ke = KeyEvent(
                 base,  // downTime
                 base + i,  // eventTime
-                src.getAction(),
-                src.getKeyCode(),
+                src.action,
+                src.keyCode,
                 0,  // repeat
-                src.getMetaState(),
+                src.metaState,
                 KeyCharacterMap.VIRTUAL_KEYBOARD,
-                src.getScanCode(),
-                src.getFlags() or KeyEvent.FLAG_FROM_SYSTEM,
+                src.scanCode,
+                src.flags or KeyEvent.FLAG_FROM_SYSTEM,
                 InputDevice.SOURCE_KEYBOARD
             )
             ua.injectInputEvent(ke, true)
@@ -151,8 +150,8 @@ internal class Input(private val ua: UiAutomation) {
         val ev = MotionEvent.obtain(
             downTime, eventTime, action,
             1,
-            arrayOf<PointerProperties>(pp),
-            arrayOf<PointerCoords>(pc),  /* metaState */
+            arrayOf(pp),
+            arrayOf(pc),  /* metaState */
             0,  /* buttonState */
             0,  /* xPrecision */
             1.0f,  /* yPrecision */
@@ -203,9 +202,9 @@ internal class Input(private val ua: UiAutomation) {
             }
             // Try KEYCODE_<NAME> via reflection — covers anything we didn't enumerate.
             try {
-                val f = KeyEvent::class.java.getField("KEYCODE_" + name)
+                val f = KeyEvent::class.java.getField("KEYCODE_$name")
                 return f.getInt(null)
-            } catch (t: Throwable) {
+            } catch (_: Throwable) {
                 return null
             }
         }

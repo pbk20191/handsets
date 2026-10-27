@@ -56,11 +56,6 @@ class JsonOut(private val sb: StringBuilder) {
         return this
     }
 
-    fun rawKey(k: String?, rawJson: String?): JsonOut {
-        key(k).append(rawJson).append(',')
-        return this
-    }
-
     fun append(s: String?): StringBuilder {
         return sb.append(s)
     }
@@ -75,7 +70,7 @@ class JsonOut(private val sb: StringBuilder) {
 
     fun trimComma() {
         val n = sb.length
-        if (n > 0 && sb.get(n - 1) == ',') sb.setLength(n - 1)
+        if (n > 0 && sb[n - 1] == ',') sb.setLength(n - 1)
     }
 
     fun finish(): String {
@@ -87,7 +82,7 @@ class JsonOut(private val sb: StringBuilder) {
         sb.append('"')
         val n = v.length
         for (i in 0..<n) {
-            val c = v.get(i)
+            val c = v[i]
             when (c) {
                 '"' -> sb.append("\\\"")
                 '\\' -> sb.append("\\\\")
