@@ -2,31 +2,33 @@
 //
 // Skips `softbuffer`'s `CALayer` + Core Animation compositor path, which on
 // macOS adds ~16–32 ms of WindowServer batching latency per frame. We attach
-// a `CAMetalLayer` directly to the window's NSView and use Metal to copy
-// our RGBA framebuffer into the drawable's texture, then present.
+// a `CAMetalLayer` directly to the window's NSView and blit each decoded
+// IOSurface into the drawable's texture, then present. Every codec decodes
+// on VideoToolbox, so no frame is ever uploaded from the CPU.
 //
 // Drawable size is fixed at the device's native pixel dimensions; the layer's
 // view bounds (set by NSView resize) handle visual letterboxing automatically
 // via the contentsGravity = resizeAspect default.
 
-use core_graphics_types::geometry::CGSize;
-use metal::foreign_types::ForeignType;
-use metal::{
-    CommandQueue, Device, MTLOrigin, MTLPixelFormat, MTLRegion, MTLSize, MetalLayer, Texture,
-    TextureDescriptor,
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::msg_send;
+use objc2_core_foundation::CGSize;
+use objc2_metal::{
+    MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
+    MTLCreateSystemDefaultDevice, MTLDevice, MTLOrigin, MTLPixelFormat, MTLSize, MTLTexture,
+    MTLTextureDescriptor,
 };
-use objc::runtime::{Object, BOOL, YES};
-use objc::{msg_send, sel, sel_impl};
+use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 use super::videotoolbox::PixelBuffer;
 
 pub struct MetalRenderer {
-    #[allow(dead_code)] // kept alive for layer lifetime
-    device: Device,
-    queue: CommandQueue,
-    layer: MetalLayer,
+    device: Retained<ProtocolObject<dyn MTLDevice>>,
+    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    layer: Retained<CAMetalLayer>,
     /// Current drawable size — auto-reconfigured on every `present()` call
     /// whose framebuffer dimensions differ.
     fb_w: u32,
@@ -43,30 +45,27 @@ impl MetalRenderer {
         let fb_w = dev_w;
         let fb_h = dev_h;
         // Resolve the underlying NSView from winit (raw-window-handle 0.6).
-        let handle = window.window_handle().ok()?.as_raw();
-        let ns_view_ptr: *mut Object = match handle {
-            RawWindowHandle::AppKit(h) => h.ns_view.as_ptr() as *mut Object,
-            _ => return None,
-        };
-        if ns_view_ptr.is_null() {
+        let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else {
             return None;
-        }
+        };
+        // SAFETY: winit keeps the NSView alive as long as the window.
+        let ns_view: &AnyObject = unsafe { handle.ns_view.cast().as_ref() };
 
-        let device = Device::system_default()?;
-        let queue = device.new_command_queue();
-        let layer = MetalLayer::new();
-        layer.set_device(&device);
-        layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        layer.set_framebuffer_only(true);
-        layer.set_presents_with_transaction(false);
-        layer.set_drawable_size(CGSize::new(fb_w as f64, fb_h as f64));
+        let device = MTLCreateSystemDefaultDevice()?;
+        let queue = device.newCommandQueue()?;
+        let layer = CAMetalLayer::new();
+        layer.setDevice(Some(&device));
+        layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        layer.setFramebufferOnly(true);
+        layer.setPresentsWithTransaction(false);
+        layer.setDrawableSize(CGSize::new(fb_w as f64, fb_h as f64));
 
         // Attach the Metal layer to the NSView. We replace the view's layer
         // entirely; `setWantsLayer:YES` is required to opt the view into
         // layer-backed rendering before macOS will look at `layer`.
         unsafe {
-            let _: () = msg_send![ns_view_ptr, setWantsLayer: YES];
-            let _: () = msg_send![ns_view_ptr, setLayer: layer.as_ptr()];
+            let _: () = msg_send![ns_view, setWantsLayer: true];
+            let _: () = msg_send![ns_view, setLayer: &*layer];
         }
 
         Some(Self {
@@ -88,42 +87,12 @@ impl MetalRenderer {
         // Intentionally empty — see comment above.
     }
 
-    /// Upload the BGRA framebuffer to the next drawable and present.
-    /// Reconfigures the layer's drawable size to (w, h) if it differs from
-    /// the previous frame — supports codecs (e.g. H.264) that produce frames
-    /// smaller than the device's native resolution due to encoder caps.
-    pub fn present(&mut self, bgra: &[u8], w: u32, h: u32) {
-        if w == 0 || h == 0 {
-            return;
-        }
+    fn fit_drawable(&mut self, w: u32, h: u32) {
         if w != self.fb_w || h != self.fb_h {
-            self.layer
-                .set_drawable_size(CGSize::new(w as f64, h as f64));
+            self.layer.setDrawableSize(CGSize::new(w as f64, h as f64));
             self.fb_w = w;
             self.fb_h = h;
         }
-        let expected = (w as usize) * (h as usize) * 4;
-        if bgra.len() != expected {
-            return;
-        }
-        let Some(drawable) = self.layer.next_drawable() else {
-            return;
-        };
-        let texture = drawable.texture();
-        let region = MTLRegion {
-            origin: MTLOrigin { x: 0, y: 0, z: 0 },
-            size: MTLSize {
-                width: w as u64,
-                height: h as u64,
-                depth: 1,
-            },
-        };
-        let bytes_per_row = (w as u64) * 4;
-        texture.replace_region(region, 0, bgra.as_ptr() as *const _, bytes_per_row);
-
-        let cmd_buf = self.queue.new_command_buffer();
-        cmd_buf.present_drawable(&drawable);
-        cmd_buf.commit();
     }
 
     /// Zero-copy present from a VideoToolbox-decoded `CVPixelBuffer`.
@@ -139,64 +108,35 @@ impl MetalRenderer {
         if w == 0 || h == 0 {
             return;
         }
-        let iosurface = pb.iosurface();
-        if iosurface.is_null() {
-            return;
-        }
-
-        if w != self.fb_w || h != self.fb_h {
-            self.layer
-                .set_drawable_size(CGSize::new(w as f64, h as f64));
-            self.fb_w = w;
-            self.fb_h = h;
-        }
-
-        // Build a descriptor matching the IOSurface and ask Metal to wrap it.
-        // `newTextureWithDescriptor:iosurface:plane:` isn't exposed by the
-        // `metal` crate so we call directly via the ObjC runtime. The
-        // returned MTLTexture has +1 retain (ObjC `new...` convention) which
-        // `Texture::from_ptr` takes ownership of.
-        let descriptor = TextureDescriptor::new();
-        descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        descriptor.set_width(w as u64);
-        descriptor.set_height(h as u64);
-
-        let device_obj = self.device.as_ptr() as *mut Object;
-        let desc_obj = descriptor.as_ptr() as *mut Object;
-        let tex_ptr: *mut Object = unsafe {
-            msg_send![device_obj,
-                newTextureWithDescriptor: desc_obj
-                iosurface: iosurface
-                plane: 0usize]
-        };
-        if tex_ptr.is_null() {
-            return;
-        }
-        let src_texture: Texture = unsafe { Texture::from_ptr(tex_ptr as *mut _) };
-
-        let Some(drawable) = self.layer.next_drawable() else {
+        let Some(src_texture) = texture_for(&self.device, pb) else {
             return;
         };
+        self.fit_drawable(w, h);
 
-        let cmd_buf = self.queue.new_command_buffer();
-        let blit = cmd_buf.new_blit_command_encoder();
-        blit.copy_from_texture(
-            &src_texture,
-            0,
-            0,
-            MTLOrigin { x: 0, y: 0, z: 0 },
-            MTLSize {
-                width: w as u64,
-                height: h as u64,
-                depth: 1,
-            },
-            drawable.texture(),
-            0,
-            0,
-            MTLOrigin { x: 0, y: 0, z: 0 },
-        );
-        blit.end_encoding();
-        cmd_buf.present_drawable(&drawable);
+        let Some(drawable) = self.layer.nextDrawable() else {
+            return;
+        };
+        let Some(cmd_buf) = self.queue.commandBuffer() else {
+            return;
+        };
+        let Some(blit) = cmd_buf.blitCommandEncoder() else {
+            return;
+        };
+        unsafe {
+            blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+                &src_texture,
+                0,
+                0,
+                origin(),
+                size(w, h),
+                &drawable.texture(),
+                0,
+                0,
+                origin(),
+            );
+        }
+        blit.endEncoding();
+        cmd_buf.presentDrawable(ProtocolObject::from_ref(&*drawable));
         cmd_buf.commit();
         // `src_texture` drops here; the command buffer retains it (and
         // transitively the IOSurface) until GPU execution completes.
@@ -244,6 +184,24 @@ impl MetalRenderer {
     }
 }
 
-// Suppress unused import warning for BOOL when compiling against newer objc.
-#[allow(dead_code)]
-const _: BOOL = YES;
+/// Wraps a pixel buffer's IOSurface as an MTLTexture (no copy).
+pub(super) fn texture_for(
+    device: &ProtocolObject<dyn MTLDevice>, pb: &PixelBuffer,
+) -> Option<Retained<ProtocolObject<dyn MTLTexture>>> {
+    let iosurface = pb.iosurface()?;
+    let descriptor = MTLTextureDescriptor::new();
+    descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+    unsafe {
+        descriptor.setWidth(pb.width() as usize);
+        descriptor.setHeight(pb.height() as usize);
+    }
+    device.newTextureWithDescriptor_iosurface_plane(&descriptor, &iosurface, 0)
+}
+
+pub(super) fn origin() -> MTLOrigin {
+    MTLOrigin { x: 0, y: 0, z: 0 }
+}
+
+pub(super) fn size(w: u32, h: u32) -> MTLSize {
+    MTLSize { width: w as usize, height: h as usize, depth: 1 }
+}

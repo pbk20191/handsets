@@ -10,16 +10,24 @@ path = "src/main.rs"
 
 [dependencies]
 winit = "0.30"
-zune-jpeg = "0.4"
 raw-window-handle = "0.6"
 
 # macOS path: direct CAMetalLayer presentation + VideoToolbox hardware H.264
-# decode (zero-copy IOSurface → MTLTexture → drawable blit). VT FFI is
-# hand-rolled in src/videotoolbox_decoder.rs to avoid extra crates.
+# and JPEG decode (zero-copy IOSurface → MTLTexture → drawable blit), through
+# the objc2 framework bindings.
 [target.'cfg(target_os = "macos")'.dependencies]
-metal = "0.29"
-core-graphics-types = "0.1"
-objc = "0.2"
+objc2 = "0.6"
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "objc2-core-video", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "objc2-io-surface", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn"] }
+objc2-video-toolbox = { version = "0.3", default-features = false, features = ["std", "objc2-core-media", "objc2-core-video", "VTBase", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession"] }
+objc2-io-surface = { version = "0.3", default-features = false, features = ["std", "objc2", "objc2-core-foundation", "IOSurfaceRef"] }
+objc2-metal = { version = "0.3", default-features = false, features = ["std", "objc2-io-surface", "MTLAllocation", "MTLBlitCommandEncoder", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLDevice", "MTLDrawable", "MTLPixelFormat", "MTLResource", "MTLTexture", "MTLTypes"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-metal", "objc2-core-foundation", "CALayer", "CAMetalLayer"] }
+
+# Everywhere but macOS, JPEG / tilejpeg decode on the CPU.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+zune-jpeg = "0.4"
 
 # Linux: OpenGL ES 3 through EGL (Wayland / X11); libEGL is loaded at run time.
 [target.'cfg(target_os = "linux")'.dependencies]
