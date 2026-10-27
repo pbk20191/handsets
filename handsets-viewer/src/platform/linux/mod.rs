@@ -1,6 +1,8 @@
-// Linux: OpenGL ES 3 through EGL on Wayland or X11.
+// Linux: OpenGL ES 3 through EGL on Wayland or X11, and libavcodec + VA-API
+// H.264 whose DRM PRIME output is imported into GL as dma-buf EGLImages.
 
 mod gl;
+mod vaapi;
 
 use std::sync::Arc;
 
@@ -8,8 +10,7 @@ use winit::window::Window;
 
 use crate::{DecodedFrame, Mapping};
 
-/// No H.264 decoder on Linux yet, so there are no GPU frames.
-pub enum GpuFrame {}
+pub use vaapi::GpuFrame;
 
 pub struct Renderer(gl::GlRenderer);
 
@@ -37,7 +38,10 @@ impl Renderer {
                 let device = device.unwrap_or((*width, *height));
                 self.0.present_bgra(rgb, *width, *height, window.0, window.1, device)
             }
-            DecodedFrame::Gpu(f) => match *f {},
+            DecodedFrame::Gpu(f) => {
+                let device = device.unwrap_or((f.width, f.height));
+                self.0.present_dmabuf(f, window.0, window.1, device)
+            }
         }
     }
 
@@ -48,14 +52,14 @@ impl Renderer {
     }
 }
 
-pub struct H264Decoder(std::convert::Infallible);
+pub struct H264Decoder(vaapi::VaapiDecoder);
 
 impl H264Decoder {
     pub fn new() -> Result<Self, String> {
-        Err("h264 decode is not implemented on Linux yet".into())
+        vaapi::VaapiDecoder::new().map(Self).map_err(|e| format!("h264 decoder: {e}"))
     }
 
-    pub fn decode(&mut self, _au: &[u8]) -> Result<Option<GpuFrame>, String> {
-        match self.0 {}
+    pub fn decode(&mut self, au: &[u8]) -> Result<Option<GpuFrame>, String> {
+        self.0.decode(au)
     }
 }

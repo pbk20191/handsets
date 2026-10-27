@@ -1,8 +1,11 @@
 // OpenGL ES 3 presentation through EGL (Wayland or X11): an EGL window
 // surface on the winit window, one textured full-viewport triangle per frame
 // drawn into a letterboxed glViewport. BGRA frames are uploaded as RGBA8 and
-// swizzled in the shader.
+// swizzled in the shader; decoded H.264 frames arrive as DRM PRIME dma-bufs,
+// imported per plane as EGLImages (Y → R8, CbCr → GR88) and converted to RGB
+// in the shader.
 
+use std::ffi::{c_void, CStr};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -11,11 +14,12 @@ use glutin::config::{ConfigTemplateBuilder, GlConfig};
 use glutin::context::{
     ContextApi, ContextAttributesBuilder, NotCurrentGlContext, PossiblyCurrentContext, Version,
 };
-use glutin::display::{Display, DisplayApiPreference, GlDisplay};
+use glutin::display::{AsRawDisplay, Display, DisplayApiPreference, GlDisplay, RawDisplay};
 use glutin::surface::{GlSurface, Surface, SurfaceAttributesBuilder, SwapInterval, WindowSurface};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 
+use super::vaapi::GpuFrame;
 use crate::Mapping;
 
 const VERTEX: &str = r#"#version 300 es
@@ -39,6 +43,63 @@ void main() {
 }
 "#;
 
+const FRAGMENT_NV12: &str = r#"#version 300 es
+precision mediump float;
+in vec2 uv;
+uniform sampler2D luma;
+uniform sampler2D chroma;
+out vec4 color;
+void main() {
+    // BT.601, limited range — what Android's AVC encoder emits.
+    float y = (texture(luma, uv).r - 0.0625) * 1.1644;
+    vec2 c = texture(chroma, uv).rg - vec2(0.5);
+    color = vec4(y + 1.5960 * c.y, y - 0.3918 * c.x - 0.8130 * c.y, y + 2.0172 * c.x, 1.0);
+}
+"#;
+
+// EGL_EXT_image_dma_buf_import(_modifiers) and DRM fourccs.
+const EGL_LINUX_DMA_BUF_EXT: u32 = 0x3270;
+const EGL_WIDTH: i32 = 0x3057;
+const EGL_HEIGHT: i32 = 0x3056;
+const EGL_LINUX_DRM_FOURCC_EXT: i32 = 0x3271;
+const EGL_DMA_BUF_PLANE0_FD_EXT: i32 = 0x3272;
+const EGL_DMA_BUF_PLANE0_OFFSET_EXT: i32 = 0x3273;
+const EGL_DMA_BUF_PLANE0_PITCH_EXT: i32 = 0x3274;
+const EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT: i32 = 0x3443;
+const EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT: i32 = 0x3444;
+const EGL_NONE: i32 = 0x3038;
+const EGL_EXTENSIONS: i32 = 0x3055;
+const DRM_FORMAT_R8: u32 = 0x2020_3852;
+const DRM_FORMAT_GR88: u32 = 0x3838_5247;
+const DRM_FORMAT_NV12: u32 = 0x3231_564E;
+const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+
+type EglCreateImage =
+    unsafe extern "C" fn(*const c_void, *const c_void, u32, *const c_void, *const i32) -> *const c_void;
+type EglDestroyImage = unsafe extern "C" fn(*const c_void, *const c_void) -> u32;
+type EglQueryString = unsafe extern "C" fn(*const c_void, i32) -> *const std::ffi::c_char;
+type GlImageTargetTexture = unsafe extern "C" fn(u32, *const c_void);
+
+/// dma-buf import entry points; None if EGL lacks the extension.
+struct DmaBufImport {
+    display: *const c_void,
+    create: EglCreateImage,
+    destroy: EglDestroyImage,
+    target: GlImageTargetTexture,
+    modifiers: bool,
+}
+
+/// One plane to import: dma-buf fd, layout, format and size.
+struct Plane {
+    fd: i32,
+    offset: i32,
+    pitch: i32,
+    modifier: u64,
+    fourcc: u32,
+    width: u32,
+    height: u32,
+}
+
 pub struct GlRenderer {
     gl: glow::Context,
     context: PossiblyCurrentContext,
@@ -48,6 +109,10 @@ pub struct GlRenderer {
     vao: glow::VertexArray,
     texture: glow::Texture,
     tex_size: (u32, u32),
+    nv12_program: glow::Program,
+    luma: glow::Texture,
+    chroma: glow::Texture,
+    dmabuf: Option<DmaBufImport>,
     // Keeps the window (and so the native surface) alive as long as the EGL surface.
     _window: Arc<Window>,
 }
@@ -86,17 +151,15 @@ impl GlRenderer {
 
             let gl = glow::Context::from_loader_function_cstr(|s| display.get_proc_address(s));
             let bgra_program = program(&gl, VERTEX, FRAGMENT_BGRA)?;
+            let nv12_program = program(&gl, VERTEX, FRAGMENT_NV12)?;
+            gl.use_program(Some(nv12_program));
+            gl.uniform_1_i32(gl.get_uniform_location(nv12_program, "luma").as_ref(), 0);
+            gl.uniform_1_i32(gl.get_uniform_location(nv12_program, "chroma").as_ref(), 1);
             let vao = gl.create_vertex_array()?;
-            let texture = gl.create_texture()?;
-            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            for (k, v) in [
-                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
-                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
-                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
-                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
-            ] {
-                gl.tex_parameter_i32(glow::TEXTURE_2D, k, v as i32);
-            }
+            let texture = linear_texture(&gl)?;
+            let luma = linear_texture(&gl)?;
+            let chroma = linear_texture(&gl)?;
+            let dmabuf = dmabuf_import(&display);
             Ok(Self {
                 gl,
                 context,
@@ -106,6 +169,10 @@ impl GlRenderer {
                 vao,
                 texture,
                 tex_size: (0, 0),
+                nv12_program,
+                luma,
+                chroma,
+                dmabuf,
                 _window: window.clone(),
             })
         }
@@ -134,6 +201,35 @@ impl GlRenderer {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
         })
+    }
+
+    /// Imports the frame's two planes as EGLImages and draws them through the
+    /// NV12 shader.
+    pub fn present_dmabuf(
+        &mut self, frame: &GpuFrame, win_w: u32, win_h: u32, device: (u32, u32),
+    ) -> Option<Mapping> {
+        let Some(import) = self.dmabuf.as_ref() else {
+            eprintln!("viewer: EGL lacks EGL_EXT_image_dma_buf_import; cannot show H.264");
+            return None;
+        };
+        let (y, uv) = planes(frame)?;
+        let images = [import.image(&y)?, import.image(&uv)?];
+        let (luma, chroma, program) = (self.luma, self.chroma, self.nv12_program);
+        let target = import.target;
+        let m = self.draw(program, frame.width, frame.height, win_w, win_h, device, move |gl| unsafe {
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(luma));
+            target(glow::TEXTURE_2D, images[0]);
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(chroma));
+            target(glow::TEXTURE_2D, images[1]);
+        });
+        if let Some(import) = self.dmabuf.as_ref() {
+            for img in images {
+                unsafe { (import.destroy)(import.display, img) };
+            }
+        }
+        m
     }
 
     /// Clears to black, draws `program` into the letterboxed viewport for a
@@ -193,4 +289,96 @@ unsafe fn program(gl: &glow::Context, vs: &str, fs: &str) -> Result<glow::Progra
         gl.delete_shader(s);
     }
     Ok(p)
+}
+
+unsafe fn linear_texture(gl: &glow::Context) -> Result<glow::Texture, String> {
+    let t = gl.create_texture()?;
+    gl.bind_texture(glow::TEXTURE_2D, Some(t));
+    for (k, v) in [
+        (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+        (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+        (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+        (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+    ] {
+        gl.tex_parameter_i32(glow::TEXTURE_2D, k, v as i32);
+    }
+    Ok(t)
+}
+
+unsafe fn dmabuf_import(display: &Display) -> Option<DmaBufImport> {
+    let RawDisplay::Egl(egl) = display.raw_display();
+    let sym = |name: &CStr| {
+        let p = display.get_proc_address(name);
+        (!p.is_null()).then_some(p)
+    };
+    let query: EglQueryString = std::mem::transmute(sym(c"eglQueryString")?);
+    let ext = query(egl, EGL_EXTENSIONS);
+    let ext = if ext.is_null() { "" } else { CStr::from_ptr(ext).to_str().unwrap_or("") };
+    if !ext.contains("EGL_EXT_image_dma_buf_import") {
+        return None;
+    }
+    Some(DmaBufImport {
+        display: egl,
+        create: std::mem::transmute(sym(c"eglCreateImageKHR")?),
+        destroy: std::mem::transmute(sym(c"eglDestroyImageKHR")?),
+        target: std::mem::transmute(sym(c"glEGLImageTargetTexture2DOES")?),
+        modifiers: ext.contains("EGL_EXT_image_dma_buf_import_modifiers"),
+    })
+}
+
+impl DmaBufImport {
+    fn image(&self, p: &Plane) -> Option<*const c_void> {
+        let mut attrs = vec![
+            EGL_WIDTH, p.width as i32,
+            EGL_HEIGHT, p.height as i32,
+            EGL_LINUX_DRM_FOURCC_EXT, p.fourcc as i32,
+            EGL_DMA_BUF_PLANE0_FD_EXT, p.fd,
+            EGL_DMA_BUF_PLANE0_OFFSET_EXT, p.offset,
+            EGL_DMA_BUF_PLANE0_PITCH_EXT, p.pitch,
+        ];
+        if self.modifiers && p.modifier != DRM_FORMAT_MOD_INVALID {
+            attrs.extend([
+                EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, p.modifier as u32 as i32,
+                EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, (p.modifier >> 32) as u32 as i32,
+            ]);
+        }
+        attrs.push(EGL_NONE);
+        let img = unsafe {
+            (self.create)(self.display, std::ptr::null(), EGL_LINUX_DMA_BUF_EXT, std::ptr::null(), attrs.as_ptr())
+        };
+        if img.is_null() {
+            eprintln!("viewer: eglCreateImage(dma-buf) failed for fourcc {:#x}", p.fourcc);
+            return None;
+        }
+        Some(img)
+    }
+}
+
+/// The luma and chroma planes of an NV12 frame, whether the driver exported
+/// one NV12 layer with two planes or separate R8 and GR88 layers.
+fn planes(frame: &GpuFrame) -> Option<(Plane, Plane)> {
+    let d = frame.descriptor();
+    let (w, h) = (frame.width, frame.height);
+    let plane = |layer: usize, idx: usize, fourcc: u32, pw: u32, ph: u32| {
+        let pl = &d.layers[layer].planes[idx];
+        let obj = &d.objects[pl.object_index as usize];
+        Plane {
+            fd: obj.fd,
+            offset: pl.offset as i32,
+            pitch: pl.pitch as i32,
+            modifier: obj.format_modifier,
+            fourcc,
+            width: pw,
+            height: ph,
+        }
+    };
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    if d.nb_layers == 1 && d.layers[0].format == DRM_FORMAT_NV12 && d.layers[0].nb_planes >= 2 {
+        Some((plane(0, 0, DRM_FORMAT_R8, w, h), plane(0, 1, DRM_FORMAT_GR88, cw, ch)))
+    } else if d.nb_layers >= 2 {
+        Some((plane(0, 0, d.layers[0].format, w, h), plane(1, 0, d.layers[1].format, cw, ch)))
+    } else {
+        eprintln!("viewer: unsupported DRM PRIME layout ({} layers, fourcc {:#x})", d.nb_layers, d.layers[0].format);
+        None
+    }
 }
