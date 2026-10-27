@@ -1,8 +1,7 @@
-// CPU presentation path for hosts without a GPU path (Linux, …): letterbox-fits
+// CPU presentation path for hosts without a GPU backend: letterbox-fits
 // the latest BGRA frame into the window with nearest-neighbour scaling and
 // hands it to softbuffer. Good enough for the JPEG / tilejpeg streams;
-// macOS (Metal + VideoToolbox) and Windows (D3D11 + Media Foundation) use
-// their hardware paths only.
+// macOS, Windows and Linux use their GPU backends.
 use std::num::NonZeroU32;
 use std::sync::Arc;
 

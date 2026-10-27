@@ -1,4 +1,4 @@
-// Other hosts (Linux, …): softbuffer CPU blit of JPEG / tilejpeg frames.
+// Any other host (BSDs, …): softbuffer CPU blit of JPEG / tilejpeg frames.
 // There is no H.264 decoder here, so GpuFrame has no values.
 
 mod renderer;

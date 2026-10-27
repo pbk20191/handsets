@@ -8,7 +8,8 @@
 //
 //   macos/ — CAMetalLayer + VideoToolbox (IOSurface, zero-copy)
 //   win/   — DXGI swap chain + D3D11 video processor + Media Foundation (DXVA)
-//   soft/  — softbuffer CPU blit; no H.264
+//   linux/ — OpenGL ES 3 through EGL (Wayland / X11)
+//   soft/  — softbuffer CPU blit for any other host; no H.264
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -20,7 +21,12 @@ mod win;
 #[cfg(windows)]
 pub use win::{GpuFrame, H264Decoder, Renderer};
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{GpuFrame, H264Decoder, Renderer};
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 mod soft;
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub use soft::{GpuFrame, H264Decoder, Renderer};
