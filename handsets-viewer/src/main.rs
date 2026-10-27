@@ -9,9 +9,14 @@
 //                               Metal renderer wraps as an MTLTexture and
 //                               blits to the drawable (zero-copy GPU path).
 //
-// UI thread (winit 0.30) renders the most recent frame via the Metal-backed
-// renderer. JPEG / tilejpeg take the CPU upload path; H.264 takes the
-// zero-copy IOSurface path.
+// UI thread (winit 0.30) renders the most recent frame:
+//   macOS   — Metal; JPEG / tilejpeg upload from the CPU, H.264 is the
+//             zero-copy IOSurface path.
+//   Windows — DXGI flip swap chain + D3D11 video-processor blit; H.264 is
+//             decoded by the Media Foundation MFT on the shared D3D11 device
+//             (DXVA), so NV12 surfaces never leave the GPU. Falls back to
+//             softbuffer if D3D11 is unavailable.
+//   other   — softbuffer CPU blit (JPEG / tilejpeg only).
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -27,6 +32,12 @@ mod videotoolbox_decoder;
 use metal_renderer::MetalRenderer;
 #[cfg(not(target_os = "macos"))]
 mod soft_renderer;
+#[cfg(windows)]
+mod d3d_renderer;
+#[cfg(windows)]
+mod mf_decoder;
+#[cfg(windows)]
+mod win_gpu;
 #[cfg(not(target_os = "macos"))]
 use soft_renderer::SoftRenderer;
 
@@ -154,6 +165,9 @@ enum DecodedFrame {
     Hardware {
         pb: videotoolbox_decoder::PixelBuffer,
     },
+    /// Media Foundation output: an NV12 surface on the shared D3D11 device.
+    #[cfg(windows)]
+    Gpu(mf_decoder::GpuFrame),
 }
 
 /// Window→device mapping snapshot, refreshed every render.
@@ -199,6 +213,9 @@ struct App {
     renderer: Option<MetalRenderer>,
     #[cfg(not(target_os = "macos"))]
     renderer: Option<SoftRenderer>,
+    /// Preferred on Windows; `renderer` (software) is the fallback.
+    #[cfg(windows)]
+    d3d: Option<d3d_renderer::D3dRenderer>,
     latest: Arc<Mutex<Option<DecodedFrame>>>,
     frame_count: u64,
     bytes_count: u64,
@@ -243,8 +260,17 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
         {
+            let size = win.inner_size();
+            self.d3d = d3d_renderer::hwnd_of(&win)
+                .and_then(|h| d3d_renderer::D3dRenderer::new(h, size.width, size.height));
+            if self.d3d.is_some() {
+                eprintln!("viewer: D3D11 renderer attached");
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        if !self.has_gpu_renderer() {
             let _ = (dev_w, dev_h);
             match SoftRenderer::new(&win) {
                 Some(r) => {
@@ -375,6 +401,14 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
+    #[cfg(not(target_os = "macos"))]
+    fn has_gpu_renderer(&self) -> bool {
+        #[cfg(windows)]
+        return self.d3d.is_some();
+        #[cfg(not(windows))]
+        false
+    }
+
     fn render(&mut self) {
         #[cfg(target_os = "macos")]
         {
@@ -393,11 +427,40 @@ impl App {
                 None => {}
             }
         }
+        #[cfg(windows)]
+        if let (Some(r), Some(window)) = (self.d3d.as_mut(), self.window.as_ref()) {
+            let size = window.inner_size();
+            let guard = self.latest.lock().unwrap();
+            let m = match guard.as_ref() {
+                Some(DecodedFrame::Bgra { rgb, width, height }) => {
+                    let device = self.device_size.unwrap_or((*width, *height));
+                    r.present_bgra(rgb, *width, *height, size.width, size.height, device)
+                }
+                Some(DecodedFrame::Gpu(f)) => {
+                    let device = self.device_size.unwrap_or((f.width, f.height));
+                    r.present_texture(&f.texture, f.slice, f.width, f.height, size.width, size.height, device)
+                }
+                None => return,
+            };
+            drop(guard);
+            if m.is_some() {
+                *self.mapping.lock().unwrap() = m;
+                return;
+            }
+            // The GPU path failed on a real frame: fall back to the software
+            // renderer for the rest of the session.
+            eprintln!("viewer: D3D11 present failed; switching to the software renderer");
+            self.d3d = None;
+            if let Some(w) = self.window.as_ref() {
+                self.renderer = SoftRenderer::new(w);
+            }
+        }
         #[cfg(not(target_os = "macos"))]
         {
             let (Some(r), Some(window)) = (self.renderer.as_mut(), self.window.as_ref()) else { return };
             let size = window.inner_size();
             let guard = self.latest.lock().unwrap();
+            #[allow(irrefutable_let_patterns)]
             if let Some(DecodedFrame::Bgra { rgb, width, height }) = guard.as_ref() {
                 let device = self.device_size.unwrap_or((*width, *height));
                 let m = r.present(rgb, *width, *height, size.width, size.height, device);
@@ -613,15 +676,94 @@ fn network_thread_jpeg(
 
 // ---------- network thread, H.264 ----------
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn network_thread_h264(
     _args: Args,
     _latest: Arc<Mutex<Option<DecodedFrame>>>,
     proxy: EventLoopProxy<UserEvent>,
 ) {
     let _ = proxy.send_event(UserEvent::Disconnected(
-        "h264 decode is only implemented on macOS (VideoToolbox)".into(),
+        "h264 decode is only implemented on macOS and Windows".into(),
     ));
+}
+
+#[cfg(windows)]
+fn network_thread_h264(
+    args: Args,
+    latest: Arc<Mutex<Option<DecodedFrame>>>,
+    proxy: EventLoopProxy<UserEvent>,
+) {
+    let Some(gpu) = win_gpu::gpu() else {
+        let _ = proxy.send_event(UserEvent::Disconnected("h264 needs a D3D11 device".into()));
+        return;
+    };
+    let mut decoder = match mf_decoder::MfDecoder::new(gpu) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = proxy.send_event(UserEvent::Disconnected(format!("h264 decoder: {e}")));
+            return;
+        }
+    };
+
+    let mut sock = match TcpStream::connect((args.host.as_str(), args.port)) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = proxy.send_event(UserEvent::Disconnected(format!("connect failed: {e}")));
+            return;
+        }
+    };
+    let _ = sock.set_nodelay(true);
+
+    let mut cmd = String::from("stream_h264");
+    if args.native {
+        cmd.push_str(" max=1");
+    } else if let Some(s) = args.size {
+        cmd.push_str(&format!(" size={s}"));
+    }
+    cmd.push_str(&format!(" bitrate={}", args.bitrate_kbps));
+    if let Some(f) = args.fps {
+        cmd.push_str(&format!(" fps={f}"));
+    }
+    if write_cmd(&mut sock, cmd.as_bytes()).is_err() {
+        let _ = proxy.send_event(UserEvent::Disconnected("stream_h264 write failed".into()));
+        return;
+    }
+
+    let mut dec_logger = DecLogger::new("h264");
+    let mut len_buf = [0u8; 4];
+    let mut pkt: Vec<u8> = Vec::with_capacity(256 * 1024);
+    loop {
+        if sock.read_exact(&mut len_buf).is_err() {
+            let _ = proxy.send_event(UserEvent::Disconnected("read header eof".into()));
+            return;
+        }
+        let n = u32::from_be_bytes(len_buf) as usize;
+        if n == 0 || n > 256 * 1024 * 1024 {
+            let _ = proxy.send_event(UserEvent::Disconnected(format!("bad length {n}")));
+            return;
+        }
+        pkt.resize(n, 0);
+        if sock.read_exact(&mut pkt).is_err() {
+            let _ = proxy.send_event(UserEvent::Disconnected("read payload eof".into()));
+            return;
+        }
+        if pkt.len() >= 4 && &pkt[..4] == b"ERR:" {
+            let msg = String::from_utf8_lossy(&pkt).into_owned();
+            let _ = proxy.send_event(UserEvent::Disconnected(msg));
+            return;
+        }
+
+        let t_dec_start = Instant::now();
+        match decoder.decode(&pkt) {
+            Ok(Some(frame)) => {
+                dec_logger.tick(t_dec_start.elapsed().as_secs_f64() * 1000.0);
+                *latest.lock().unwrap() = Some(DecodedFrame::Gpu(frame));
+                let _ = proxy.send_event(UserEvent::NewFrame { bytes: n as u32 });
+            }
+            Ok(None) => {} // SPS/PPS, or the decoder is still buffering
+            Err(e) => eprintln!("h264 decode error: {e}"),
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1024,6 +1166,8 @@ fn main() {
     let mut app = App {
         window: None,
         renderer: None,
+        #[cfg(windows)]
+        d3d: None,
         latest,
         frame_count: 0,
         bytes_count: 0,
