@@ -1,10 +1,11 @@
-// macOS hardware H.264 decoder using VideoToolbox.
+// macOS hardware H.264 and JPEG decoders using VideoToolbox.
 //
 // Hand-rolled FFI to CoreFoundation / CoreMedia / CoreVideo / VideoToolbox so
-// we don't pull in extra crates. The decoder consumes the same Annex-B packets
-// the Android H264Streamer emits (length-prefixed NAL access units) and emits
-// IOSurface-backed CVPixelBuffers that the Metal renderer wraps as MTLTextures
-// — CPU never touches BGRA pixel data once it leaves the network buffer.
+// we don't pull in extra crates. The H.264 decoder consumes the same Annex-B
+// packets the Android H264Streamer emits (length-prefixed NAL access units);
+// the JPEG decoder takes the `stream` frames whole. Both emit IOSurface-backed
+// CVPixelBuffers that the Metal renderer wraps as MTLTextures — CPU never
+// touches BGRA pixel data once it leaves the network buffer.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -35,6 +36,7 @@ type VTDecodeInfoFlags = u32;
 
 const K_CF_NUMBER_SINT32_TYPE: CFNumberType = 3;
 const K_CV_PIXEL_FORMAT_TYPE_32_BGRA: u32 = 0x4247_5241; // 'BGRA'
+const K_CM_VIDEO_CODEC_TYPE_JPEG: u32 = 0x6A70_6567; // 'jpeg'
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -99,6 +101,15 @@ extern "C" {
         parameter_set_pointers: *const *const u8,
         parameter_set_sizes: *const usize,
         nal_unit_header_length: i32,
+        format_description_out: *mut CMFormatDescriptionRef,
+    ) -> OSStatus;
+
+    fn CMVideoFormatDescriptionCreate(
+        allocator: CFAllocatorRef,
+        codec_type: u32,
+        width: i32,
+        height: i32,
+        extensions: CFDictionaryRef,
         format_description_out: *mut CMFormatDescriptionRef,
     ) -> OSStatus;
 
@@ -344,127 +355,219 @@ impl VtDecoder {
                 ));
             }
             self.format_desc = fmt;
-
-            // Destination attrs:
-            //   kCVPixelBufferPixelFormatTypeKey      = 32BGRA
-            //   kCVPixelBufferMetalCompatibilityKey  = true  (forces IOSurface
-            //                                                 backing usable
-            //                                                 as MTLTexture)
-            let pix_val = K_CV_PIXEL_FORMAT_TYPE_32_BGRA;
-            let cf_num = CFNumberCreate(
-                ptr::null(),
-                K_CF_NUMBER_SINT32_TYPE,
-                &pix_val as *const _ as *const c_void,
-            );
-            if cf_num.is_null() {
-                return Err("CFNumberCreate".into());
-            }
-            let keys: [*const c_void; 2] = [
-                kCVPixelBufferPixelFormatTypeKey,
-                kCVPixelBufferMetalCompatibilityKey,
-            ];
-            let values: [*const c_void; 2] = [cf_num, kCFBooleanTrue];
-            let dest = CFDictionaryCreate(
-                ptr::null(),
-                keys.as_ptr(),
-                values.as_ptr(),
-                2,
-                &kCFTypeDictionaryKeyCallBacks,
-                &kCFTypeDictionaryValueCallBacks,
-            );
-            CFRelease(cf_num);
-            if dest.is_null() {
-                return Err("CFDictionaryCreate".into());
-            }
-
-            let cb = VTDecompressionOutputCallbackRecord {
-                callback: Some(vt_output_callback),
-                refcon: ptr::null_mut(),
-            };
-
-            let mut session: VTDecompressionSessionRef = ptr::null();
-            let s = VTDecompressionSessionCreate(
-                ptr::null(),
-                fmt,
-                ptr::null(),
-                dest,
-                &cb,
-                &mut session,
-            );
-            CFRelease(dest);
-            if s != 0 || session.is_null() {
-                return Err(format!("VTDecompressionSessionCreate: {s}"));
-            }
-            self.session = session;
+            self.session = create_session(fmt)?;
         }
         Ok(())
     }
 
     fn decode_avcc(&mut self) -> Result<Option<PixelBuffer>, String> {
+        // SAFETY: session and format_desc are live; avcc_buf outlives the call.
+        unsafe { decode_sample(self.session, self.format_desc, &self.avcc_buf) }
+    }
+}
+
+/// Hardware JPEG decode: VideoToolbox's Motion-JPEG decoder, one session per
+/// frame size (rebuilt when the device rotates).
+pub struct VtJpegDecoder {
+    session: VTDecompressionSessionRef,
+    format_desc: CMFormatDescriptionRef,
+    size: (i32, i32),
+}
+
+impl Drop for VtJpegDecoder {
+    fn drop(&mut self) {
+        self.reset();
+    }
+}
+
+impl VtJpegDecoder {
+    pub fn new() -> Self {
+        Self { session: ptr::null(), format_desc: ptr::null(), size: (0, 0) }
+    }
+
+    pub fn decode(&mut self, jpeg: &[u8]) -> Result<PixelBuffer, String> {
+        let size = jpeg_size(jpeg).ok_or("no JPEG frame header")?;
+        if size != self.size || self.session.is_null() {
+            self.reset();
+            unsafe {
+                let mut fmt: CMFormatDescriptionRef = ptr::null();
+                let s = CMVideoFormatDescriptionCreate(
+                    ptr::null(), K_CM_VIDEO_CODEC_TYPE_JPEG, size.0, size.1, ptr::null(), &mut fmt,
+                );
+                if s != 0 || fmt.is_null() {
+                    return Err(format!("CMVideoFormatDescriptionCreate: {s}"));
+                }
+                self.format_desc = fmt;
+                self.session = create_session(fmt)?;
+            }
+            self.size = size;
+        }
+        // SAFETY: session and format_desc were just checked or built.
+        unsafe { decode_sample(self.session, self.format_desc, jpeg) }?
+            .ok_or_else(|| "VT produced no image".into())
+    }
+
+    fn reset(&mut self) {
         unsafe {
-            // Wrap self.avcc_buf in a CMBlockBuffer with kCFAllocatorNull as
-            // the block allocator — VT must NOT try to free Rust-owned memory.
-            let mut block: CMBlockBufferRef = ptr::null();
-            let s = CMBlockBufferCreateWithMemoryBlock(
-                ptr::null(),
-                self.avcc_buf.as_mut_ptr() as *mut c_void,
-                self.avcc_buf.len(),
-                kCFAllocatorNull,
-                ptr::null(),
-                0,
-                self.avcc_buf.len(),
-                0,
-                &mut block,
-            );
-            if s != 0 || block.is_null() {
-                return Err(format!("CMBlockBufferCreateWithMemoryBlock: {s}"));
+            if !self.session.is_null() {
+                VTDecompressionSessionInvalidate(self.session);
+                CFRelease(self.session);
+                self.session = ptr::null();
             }
-
-            let sizes: [usize; 1] = [self.avcc_buf.len()];
-            let mut sample: CMSampleBufferRef = ptr::null();
-            let s = CMSampleBufferCreate(
-                ptr::null(),
-                block,
-                1, // dataReady = true
-                ptr::null(),
-                ptr::null_mut(),
-                self.format_desc,
-                1, // numSamples
-                0, // no timing info — we present immediately
-                ptr::null(),
-                1,
-                sizes.as_ptr(),
-                &mut sample,
-            );
-            // Sample buffer retains the block buffer — safe to release our ref.
-            CFRelease(block);
-            if s != 0 || sample.is_null() {
-                return Err(format!("CMSampleBufferCreate: {s}"));
+            if !self.format_desc.is_null() {
+                CFRelease(self.format_desc);
+                self.format_desc = ptr::null();
             }
-
-            let mut slot = DecodedSlot { pb: None, status: 0 };
-            let mut info_flags: VTDecodeInfoFlags = 0;
-            let s = VTDecompressionSessionDecodeFrame(
-                self.session,
-                sample,
-                0, // no special flags — default sync-ish behaviour
-                &mut slot as *mut _ as *mut c_void,
-                &mut info_flags,
-            );
-            CFRelease(sample);
-            if s != 0 {
-                return Err(format!("VTDecompressionSessionDecodeFrame: {s}"));
-            }
-            // Flush any deferred decodes so the callback has run before we
-            // return — avoids reusing self.avcc_buf while VT still references it.
-            VTDecompressionSessionWaitForAsynchronousFrames(self.session);
-
-            if slot.status != 0 {
-                return Err(format!("VT decode callback status: {}", slot.status));
-            }
-            Ok(slot.pb)
         }
     }
+}
+
+// Same reasoning as PixelBuffer: the session is only used from the thread
+// that owns the decoder.
+unsafe impl Send for VtJpegDecoder {}
+
+/// Width and height from the first SOF marker.
+fn jpeg_size(jpeg: &[u8]) -> Option<(i32, i32)> {
+    let mut i = 2;
+    while i + 9 <= jpeg.len() {
+        if jpeg[i] != 0xFF {
+            return None;
+        }
+        let marker = jpeg[i + 1];
+        let len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+        // SOF0..SOF15, minus DHT (C4), JPG (C8) and DAC (CC).
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            let h = u16::from_be_bytes([jpeg[i + 5], jpeg[i + 6]]) as i32;
+            let w = u16::from_be_bytes([jpeg[i + 7], jpeg[i + 8]]) as i32;
+            return Some((w, h));
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+/// A decompression session that writes Metal-compatible BGRA pixel buffers.
+unsafe fn create_session(fmt: CMFormatDescriptionRef) -> Result<VTDecompressionSessionRef, String> {
+    // Destination attrs:
+    //   kCVPixelBufferPixelFormatTypeKey      = 32BGRA
+    //   kCVPixelBufferMetalCompatibilityKey  = true  (forces IOSurface
+    //                                                 backing usable
+    //                                                 as MTLTexture)
+    let pix_val = K_CV_PIXEL_FORMAT_TYPE_32_BGRA;
+    let cf_num = CFNumberCreate(
+        ptr::null(),
+        K_CF_NUMBER_SINT32_TYPE,
+        &pix_val as *const _ as *const c_void,
+    );
+    if cf_num.is_null() {
+        return Err("CFNumberCreate".into());
+    }
+    let keys: [*const c_void; 2] = [
+        kCVPixelBufferPixelFormatTypeKey,
+        kCVPixelBufferMetalCompatibilityKey,
+    ];
+    let values: [*const c_void; 2] = [cf_num, kCFBooleanTrue];
+    let dest = CFDictionaryCreate(
+        ptr::null(),
+        keys.as_ptr(),
+        values.as_ptr(),
+        2,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks,
+    );
+    CFRelease(cf_num);
+    if dest.is_null() {
+        return Err("CFDictionaryCreate".into());
+    }
+
+    let cb = VTDecompressionOutputCallbackRecord {
+        callback: Some(vt_output_callback),
+        refcon: ptr::null_mut(),
+    };
+
+    let mut session: VTDecompressionSessionRef = ptr::null();
+    let s = VTDecompressionSessionCreate(
+        ptr::null(),
+        fmt,
+        ptr::null(),
+        dest,
+        &cb,
+        &mut session,
+    );
+    CFRelease(dest);
+    if s != 0 || session.is_null() {
+        return Err(format!("VTDecompressionSessionCreate: {s}"));
+    }
+    Ok(session)
+}
+
+/// Decodes one sample synchronously; `data` only has to live for the call.
+unsafe fn decode_sample(
+    session: VTDecompressionSessionRef,
+    format_desc: CMFormatDescriptionRef,
+    data: &[u8],
+) -> Result<Option<PixelBuffer>, String> {
+    // Wrap the bytes in a CMBlockBuffer with kCFAllocatorNull as the block
+    // allocator — VT must NOT try to free Rust-owned memory, and only reads it.
+    let mut block: CMBlockBufferRef = ptr::null();
+    let s = CMBlockBufferCreateWithMemoryBlock(
+        ptr::null(),
+        data.as_ptr() as *mut c_void,
+        data.len(),
+        kCFAllocatorNull,
+        ptr::null(),
+        0,
+        data.len(),
+        0,
+        &mut block,
+    );
+    if s != 0 || block.is_null() {
+        return Err(format!("CMBlockBufferCreateWithMemoryBlock: {s}"));
+    }
+
+    let sizes: [usize; 1] = [data.len()];
+    let mut sample: CMSampleBufferRef = ptr::null();
+    let s = CMSampleBufferCreate(
+        ptr::null(),
+        block,
+        1, // dataReady = true
+        ptr::null(),
+        ptr::null_mut(),
+        format_desc,
+        1, // numSamples
+        0, // no timing info — we present immediately
+        ptr::null(),
+        1,
+        sizes.as_ptr(),
+        &mut sample,
+    );
+    // Sample buffer retains the block buffer — safe to release our ref.
+    CFRelease(block);
+    if s != 0 || sample.is_null() {
+        return Err(format!("CMSampleBufferCreate: {s}"));
+    }
+
+    let mut slot = DecodedSlot { pb: None, status: 0 };
+    let mut info_flags: VTDecodeInfoFlags = 0;
+    let s = VTDecompressionSessionDecodeFrame(
+        session,
+        sample,
+        0, // no special flags — default sync-ish behaviour
+        &mut slot as *mut _ as *mut c_void,
+        &mut info_flags,
+    );
+    CFRelease(sample);
+    if s != 0 {
+        return Err(format!("VTDecompressionSessionDecodeFrame: {s}"));
+    }
+    // Flush any deferred decodes so the callback has run before we
+    // return — the caller may reuse `data` while VT would still reference it.
+    VTDecompressionSessionWaitForAsynchronousFrames(session);
+
+    if slot.status != 0 {
+        return Err(format!("VT decode callback status: {}", slot.status));
+    }
+    Ok(slot.pb)
 }
 
 // ---------- Annex-B NAL splitter ----------

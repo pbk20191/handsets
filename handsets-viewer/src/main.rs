@@ -1,7 +1,9 @@
 // handsets-viewer — live device-screen window backed by the handsets daemon.
 //
 // Codec modes:
-//   --codec jpeg      (default): length-prefixed JPEG frames, zune-jpeg → BGRA.
+//   --codec jpeg      (default): length-prefixed JPEG frames; on macOS
+//                               VideoToolbox decodes them into IOSurfaces
+//                               like H.264, elsewhere zune-jpeg → BGRA.
 //   --codec tilejpeg          : tiled JPEG deltas patched into a framebuffer.
 //   --codec h264              : length-prefixed Annex-B H.264 access units;
 //                               on macOS, VideoToolbox decodes straight into
@@ -10,8 +12,8 @@
 //                               blits to the drawable (zero-copy GPU path).
 //
 // UI thread (winit 0.30) renders the most recent frame:
-//   macOS   — Metal; JPEG / tilejpeg upload from the CPU, H.264 is the
-//             zero-copy IOSurface path.
+//   macOS   — Metal; tilejpeg uploads from the CPU, JPEG and H.264 take
+//             the zero-copy IOSurface path.
 //   Windows — DXGI flip swap chain + D3D11 video-processor blit; H.264 is
 //             decoded by the Media Foundation MFT on the shared D3D11 device
 //             (DXVA), so NV12 surfaces never leave the GPU.
@@ -553,7 +555,8 @@ fn jpeg_decode_thread(
     proxy: &EventLoopProxy<UserEvent>,
 ) {
     let (lock, cv) = slot;
-    let mut dec_logger = DecLogger::new("jpeg");
+    let mut hw = platform::JpegDecoder::new();
+    let mut dec_logger = DecLogger::new(if hw.is_some() { "jpeg-hw" } else { "jpeg" });
     loop {
         let jpeg = {
             let mut s = lock.lock().unwrap();
@@ -568,8 +571,17 @@ fn jpeg_decode_thread(
             }
         };
         let t0 = Instant::now();
-        let frame = decode_jpeg_bgra(&jpeg)
-            .map(|(w, h, bgra)| DecodedFrame::Bgra { rgb: bgra, width: w as u32, height: h as u32 });
+        let frame = match hw.as_mut().map(|d| d.decode(&jpeg)) {
+            Some(Ok(pb)) => Some(DecodedFrame::Gpu(pb)),
+            hw_result => {
+                if let Some(Err(e)) = hw_result {
+                    eprintln!("jpeg hw decode failed, using zune-jpeg from now on: {e}");
+                    hw = None;
+                }
+                decode_jpeg_bgra(&jpeg)
+                    .map(|(w, h, bgra)| DecodedFrame::Bgra { rgb: bgra, width: w as u32, height: h as u32 })
+            }
+        };
         dec_logger.tick(t0.elapsed().as_secs_f64() * 1000.0);
         if let Some(frame) = frame {
             *latest.lock().unwrap() = Some(frame);

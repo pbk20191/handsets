@@ -1,5 +1,5 @@
-// macOS: CAMetalLayer presentation, VideoToolbox H.264 straight into
-// IOSurface-backed CVPixelBuffers that Metal samples without a copy.
+// macOS: CAMetalLayer presentation, VideoToolbox H.264 and JPEG straight
+// into IOSurface-backed CVPixelBuffers that Metal samples without a copy.
 
 mod metal;
 mod videotoolbox;
@@ -53,5 +53,17 @@ impl H264Decoder {
 
     pub fn decode(&mut self, au: &[u8]) -> Result<Option<GpuFrame>, String> {
         self.0.decode(au)
+    }
+}
+
+pub struct JpegDecoder(videotoolbox::VtJpegDecoder);
+
+impl JpegDecoder {
+    pub fn new() -> Option<Self> {
+        Some(Self(videotoolbox::VtJpegDecoder::new()))
+    }
+
+    pub fn decode(&mut self, jpeg: &[u8]) -> Result<GpuFrame, String> {
+        self.0.decode(jpeg)
     }
 }
