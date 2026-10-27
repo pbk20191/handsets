@@ -25,6 +25,10 @@ mod metal_renderer;
 mod videotoolbox_decoder;
 #[cfg(target_os = "macos")]
 use metal_renderer::MetalRenderer;
+#[cfg(not(target_os = "macos"))]
+mod soft_renderer;
+#[cfg(not(target_os = "macos"))]
+use soft_renderer::SoftRenderer;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
@@ -193,6 +197,8 @@ struct App {
     window: Option<Arc<Window>>,
     #[cfg(target_os = "macos")]
     renderer: Option<MetalRenderer>,
+    #[cfg(not(target_os = "macos"))]
+    renderer: Option<SoftRenderer>,
     latest: Arc<Mutex<Option<DecodedFrame>>>,
     frame_count: u64,
     bytes_count: u64,
@@ -237,6 +243,19 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (dev_w, dev_h);
+            match SoftRenderer::new(&win) {
+                Some(r) => {
+                    eprintln!("viewer: software renderer attached");
+                    self.renderer = Some(r);
+                }
+                None => {
+                    eprintln!("viewer: failed to set up software renderer — window will be blank");
+                }
+            }
+        }
 
         self.window = Some(win);
     }
@@ -246,6 +265,8 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => self.render(),
             WindowEvent::Resized(new_size) => {
+                #[cfg(not(target_os = "macos"))]
+                let _ = new_size; // the software renderer resizes on each present
                 #[cfg(target_os = "macos")]
                 if let Some(r) = self.renderer.as_ref() {
                     r.resize_window(new_size.width.max(1), new_size.height.max(1));
@@ -372,6 +393,20 @@ impl App {
                 None => {}
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let (Some(r), Some(window)) = (self.renderer.as_mut(), self.window.as_ref()) else { return };
+            let size = window.inner_size();
+            let guard = self.latest.lock().unwrap();
+            if let Some(DecodedFrame::Bgra { rgb, width, height }) = guard.as_ref() {
+                let device = self.device_size.unwrap_or((*width, *height));
+                let m = r.present(rgb, *width, *height, size.width, size.height, device);
+                drop(guard);
+                if m.is_some() {
+                    *self.mapping.lock().unwrap() = m;
+                }
+            }
+        }
     }
 
     /// Map the current cursor position to device pixel coordinates.
@@ -392,7 +427,8 @@ impl App {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            None
+            let m = (*self.mapping.lock().unwrap())?;
+            m.map(self.cursor_pos.x, self.cursor_pos.y)
         }
     }
 
@@ -987,7 +1023,6 @@ fn main() {
 
     let mut app = App {
         window: None,
-        #[cfg(target_os = "macos")]
         renderer: None,
         latest,
         frame_count: 0,
