@@ -122,7 +122,7 @@ Full protocol: [docs/wire.md](docs/wire.md). Reflection details and sharp edges:
 curl -fsSL https://raw.githubusercontent.com/pbk20191/handsets/main/install.sh | bash
 ```
 
-Needs `adb` on `$PATH`. macOS and Linux. Pin a version with `HANDSETS_VERSION=v0.3.0`.
+Needs `adb`: `hs` finds it through Google's Android CLI (`android info`), then `$ANDROID_HOME`, then `$PATH`; `HANDSETS_ADB` overrides. macOS and Linux (Windows: the release zip). Pin a version with `HANDSETS_VERSION=v0.3.0`.
 
 Python bindings: `pip install handsets`.
 
