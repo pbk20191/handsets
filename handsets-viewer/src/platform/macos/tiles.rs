@@ -66,6 +66,9 @@ impl TileCanvas {
     }
 
     /// Changed tiles, drawn over the previous frame.
+    /// Frames come from a CVPixelBuffer pool; there is nothing to reuse.
+    pub fn recycle(&mut self, _old: DecodedFrame) {}
+
     pub fn patch(&mut self, tiles: &[Tile]) -> Result<DecodedFrame, String> {
         let mut decoded = Vec::with_capacity(tiles.len());
         for t in tiles {

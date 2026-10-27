@@ -573,7 +573,10 @@ fn jpeg_decode_thread(
         let frame = decoder.decode(&jpeg).map_err(|e| eprintln!("{e}")).ok();
         dec_logger.tick(t0.elapsed().as_secs_f64() * 1000.0);
         if let Some(frame) = frame {
-            *latest.lock().unwrap() = Some(frame);
+            let old = latest.lock().unwrap().replace(frame);
+            if let Some(old) = old {
+                decoder.recycle(old);
+            }
             let _ = proxy.send_event(UserEvent::NewFrame { bytes: jpeg.len() as u32 });
         }
         lock.lock().unwrap().spare = Some(jpeg);
@@ -826,8 +829,11 @@ fn network_thread_tilejpeg(
 
         dec_logger.tick(t_dec.elapsed().as_secs_f64() * 1000.0);
 
-        // Publish the new frame to the UI thread.
-        *latest.lock().unwrap() = Some(frame);
+        // Publish the new frame to the UI thread; reuse the one it replaces.
+        let old = latest.lock().unwrap().replace(frame);
+        if let Some(old) = old {
+            canvas.recycle(old);
+        }
         let _ = proxy.send_event(UserEvent::NewFrame { bytes: n as u32 });
     }
 }

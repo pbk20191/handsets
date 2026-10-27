@@ -69,4 +69,7 @@ impl JpegDecoder {
     pub fn decode(&mut self, jpeg: &[u8]) -> Result<DecodedFrame, String> {
         self.0.decode(jpeg).map(DecodedFrame::Gpu)
     }
+
+    /// Frames come from VideoToolbox's pool; there is nothing to reuse.
+    pub fn recycle(&mut self, _old: DecodedFrame) {}
 }

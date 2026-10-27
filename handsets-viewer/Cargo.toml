@@ -27,7 +27,7 @@ objc2-quartz-core = { version = "0.3", default-features = false, features = ["st
 
 # Everywhere but macOS, JPEG / tilejpeg decode on the CPU.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-zune-jpeg = "0.4"
+zune-jpeg = "0.5.15"
 
 # Linux: OpenGL ES 3 through EGL (Wayland / X11); libEGL is loaded at run time.
 [target.'cfg(target_os = "linux")'.dependencies]
