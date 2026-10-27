@@ -6,8 +6,6 @@
 // IOSurface-backed CVPixelBuffers that the Metal renderer wraps as MTLTextures
 // — CPU never touches BGRA pixel data once it leaves the network buffer.
 
-#![cfg(target_os = "macos")]
-
 use std::ffi::c_void;
 use std::ptr;
 

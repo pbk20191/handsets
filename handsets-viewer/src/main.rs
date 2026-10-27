@@ -23,22 +23,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
-mod metal_renderer;
-#[cfg(target_os = "macos")]
-mod videotoolbox_decoder;
-#[cfg(target_os = "macos")]
-use metal_renderer::MetalRenderer;
-#[cfg(not(any(target_os = "macos", windows)))]
-mod soft_renderer;
-#[cfg(windows)]
-mod d3d_renderer;
-#[cfg(windows)]
-mod mf_decoder;
-#[cfg(windows)]
-mod win_gpu;
-#[cfg(not(any(target_os = "macos", windows)))]
-use soft_renderer::SoftRenderer;
+mod platform;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
@@ -151,22 +136,16 @@ enum UserEvent {
     Disconnected(String),
 }
 
-/// Latest frame ready to present. Two backings depending on the codec:
-/// `Bgra` is a CPU-side BGRA8888 buffer (JPEG / tilejpeg paths); `Hardware`
-/// is a CVPixelBuffer that lives entirely on the GPU (H.264 / VideoToolbox).
+/// Latest frame ready to present: a CPU-side BGRA8888 buffer (JPEG /
+/// tilejpeg) or a decoded H.264 frame that stays on the GPU (see
+/// [platform::GpuFrame]).
 enum DecodedFrame {
     Bgra {
         rgb: Vec<u8>,
         width: u32,
         height: u32,
     },
-    #[cfg(target_os = "macos")]
-    Hardware {
-        pb: videotoolbox_decoder::PixelBuffer,
-    },
-    /// Media Foundation output: an NV12 surface on the shared D3D11 device.
-    #[cfg(windows)]
-    Gpu(mf_decoder::GpuFrame),
+    Gpu(platform::GpuFrame),
 }
 
 /// Window→device mapping snapshot, refreshed every render.
@@ -208,12 +187,7 @@ enum InputCmd {
 
 struct App {
     window: Option<Arc<Window>>,
-    #[cfg(target_os = "macos")]
-    renderer: Option<MetalRenderer>,
-    #[cfg(windows)]
-    renderer: Option<d3d_renderer::D3dRenderer>,
-    #[cfg(not(any(target_os = "macos", windows)))]
-    renderer: Option<SoftRenderer>,
+    renderer: Option<platform::Renderer>,
     latest: Arc<Mutex<Option<DecodedFrame>>>,
     frame_count: u64,
     bytes_count: u64,
@@ -239,49 +213,16 @@ impl ApplicationHandler<UserEvent> for App {
             .with_inner_size(winit::dpi::LogicalSize::new(INITIAL_W, INITIAL_H));
         let win = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
-        // Attach a CAMetalLayer directly to the NSView. Drawable size is the
-        // device's native pixel dimensions; the layer scales aspect-fit to the
-        // current view bounds (window size). Each frame we upload our BGRA
-        // framebuffer straight into the drawable's texture and present —
-        // skipping the ~16–32 ms WindowServer compositor batching that
-        // softbuffer's CALayer path pays.
-        let (dev_w, dev_h) = self.device_size.unwrap_or((1440, 3120));
-        #[cfg(target_os = "macos")]
-        {
-            match MetalRenderer::new(&win, dev_w, dev_h) {
-                Some(r) => {
-                    eprintln!("viewer: Metal renderer attached ({}x{} device texture)", dev_w, dev_h);
-                    self.renderer = Some(r);
-                }
-                None => {
-                    eprintln!("viewer: failed to set up Metal renderer — window will be blank");
-                }
-            }
-        }
-        #[cfg(windows)]
-        {
-            let _ = (dev_w, dev_h);
-            let size = win.inner_size();
-            self.renderer = d3d_renderer::hwnd_of(&win)
-                .and_then(|h| d3d_renderer::D3dRenderer::new(h, size.width, size.height));
-            if self.renderer.is_some() {
-                eprintln!("viewer: D3D11 renderer attached");
-            } else {
-                eprintln!("viewer: failed to set up D3D11 renderer — window will be blank");
-            }
-        }
-        #[cfg(not(any(target_os = "macos", windows)))]
-        {
-            let _ = (dev_w, dev_h);
-            match SoftRenderer::new(&win) {
-                Some(r) => {
-                    eprintln!("viewer: software renderer attached");
-                    self.renderer = Some(r);
-                }
-                None => {
-                    eprintln!("viewer: failed to set up software renderer — window will be blank");
-                }
-            }
+        // macOS: CAMetalLayer whose drawable is the device's native size and
+        // scales aspect-fit to the view. Windows: DXGI swap chain on the HWND.
+        // Elsewhere: softbuffer.
+        let device = self.device_size.unwrap_or((1440, 3120));
+        let name = platform::Renderer::NAME;
+        self.renderer = platform::Renderer::new(&win, device);
+        if self.renderer.is_some() {
+            eprintln!("viewer: {name} renderer attached ({}x{} device)", device.0, device.1);
+        } else {
+            eprintln!("viewer: failed to set up {name} renderer — window will be blank");
         }
 
         self.window = Some(win);
@@ -292,11 +233,8 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => self.render(),
             WindowEvent::Resized(new_size) => {
-                #[cfg(not(target_os = "macos"))]
-                let _ = new_size; // the software renderer resizes on each present
-                #[cfg(target_os = "macos")]
-                if let Some(r) = self.renderer.as_ref() {
-                    r.resize_window(new_size.width.max(1), new_size.height.max(1));
+                if let Some(r) = self.renderer.as_mut() {
+                    r.resized(new_size.width.max(1), new_size.height.max(1));
                 }
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
@@ -403,81 +341,23 @@ impl ApplicationHandler<UserEvent> for App {
 
 impl App {
     fn render(&mut self) {
-        #[cfg(target_os = "macos")]
-        {
-            let Some(r) = self.renderer.as_mut() else { return };
-            let guard = self.latest.lock().unwrap();
-            match guard.as_ref() {
-                Some(DecodedFrame::Bgra { rgb, width, height }) => {
-                    // BGRA8888 at frame dimensions (smaller than the device
-                    // for H.264 paths capped to 2048; renderer reconfigures
-                    // its drawable each call).
-                    r.present(rgb, *width, *height);
-                }
-                Some(DecodedFrame::Hardware { pb }) => {
-                    r.present_pixel_buffer(pb);
-                }
-                None => {}
-            }
-        }
-        #[cfg(windows)]
-        {
-            let (Some(r), Some(window)) = (self.renderer.as_mut(), self.window.as_ref()) else { return };
-            let size = window.inner_size();
-            let guard = self.latest.lock().unwrap();
-            let m = match guard.as_ref() {
-                Some(DecodedFrame::Bgra { rgb, width, height }) => {
-                    let device = self.device_size.unwrap_or((*width, *height));
-                    r.present_bgra(rgb, *width, *height, size.width, size.height, device)
-                }
-                Some(DecodedFrame::Gpu(f)) => {
-                    let device = self.device_size.unwrap_or((f.width, f.height));
-                    r.present_texture(&f.texture, f.slice, f.width, f.height, size.width, size.height, device)
-                }
-                None => return,
-            };
-            drop(guard);
-            if m.is_some() {
-                *self.mapping.lock().unwrap() = m;
-            }
-        }
-        #[cfg(not(any(target_os = "macos", windows)))]
-        {
-            let (Some(r), Some(window)) = (self.renderer.as_mut(), self.window.as_ref()) else { return };
-            let size = window.inner_size();
-            let guard = self.latest.lock().unwrap();
-            if let Some(DecodedFrame::Bgra { rgb, width, height }) = guard.as_ref() {
-                let device = self.device_size.unwrap_or((*width, *height));
-                let m = r.present(rgb, *width, *height, size.width, size.height, device);
-                drop(guard);
-                if m.is_some() {
-                    *self.mapping.lock().unwrap() = m;
-                }
-            }
+        let (Some(r), Some(window)) = (self.renderer.as_mut(), self.window.as_ref()) else { return };
+        let size = window.inner_size();
+        let guard = self.latest.lock().unwrap();
+        let Some(frame) = guard.as_ref() else { return };
+        let m = r.present(frame, (size.width, size.height), self.device_size);
+        drop(guard);
+        if m.is_some() {
+            *self.mapping.lock().unwrap() = m;
         }
     }
 
     /// Map the current cursor position to device pixel coordinates.
-    /// On macOS this asks the Metal renderer which knows the drawable size +
-    /// current window bounds.
     fn current_device_xy(&self) -> Option<(i32, i32)> {
-        #[cfg(target_os = "macos")]
-        {
-            let renderer = self.renderer.as_ref()?;
-            let window = self.window.as_ref()?;
-            let size = window.inner_size();
-            return renderer.window_pos_to_pixel(
-                size.width.max(1),
-                size.height.max(1),
-                self.cursor_pos.x,
-                self.cursor_pos.y,
-            );
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let m = (*self.mapping.lock().unwrap())?;
-            m.map(self.cursor_pos.x, self.cursor_pos.y)
-        }
+        let r = self.renderer.as_ref()?;
+        let size = self.window.as_ref()?.inner_size();
+        let mapping = *self.mapping.lock().unwrap();
+        r.device_xy(mapping, (size.width, size.height), self.cursor_pos.x, self.cursor_pos.y)
     }
 
     /// Push an input command toward the input thread. Drops silently if the
@@ -661,31 +541,15 @@ fn network_thread_jpeg(
 
 // ---------- network thread, H.264 ----------
 
-#[cfg(not(any(target_os = "macos", windows)))]
-fn network_thread_h264(
-    _args: Args,
-    _latest: Arc<Mutex<Option<DecodedFrame>>>,
-    proxy: EventLoopProxy<UserEvent>,
-) {
-    let _ = proxy.send_event(UserEvent::Disconnected(
-        "h264 decode is only implemented on macOS and Windows".into(),
-    ));
-}
-
-#[cfg(windows)]
 fn network_thread_h264(
     args: Args,
     latest: Arc<Mutex<Option<DecodedFrame>>>,
     proxy: EventLoopProxy<UserEvent>,
 ) {
-    let Some(gpu) = win_gpu::gpu() else {
-        let _ = proxy.send_event(UserEvent::Disconnected("h264 needs a D3D11 device".into()));
-        return;
-    };
-    let mut decoder = match mf_decoder::MfDecoder::new(gpu) {
+    let mut decoder = match platform::H264Decoder::new() {
         Ok(d) => d,
         Err(e) => {
-            let _ = proxy.send_event(UserEvent::Disconnected(format!("h264 decoder: {e}")));
+            let _ = proxy.send_event(UserEvent::Disconnected(e));
             return;
         }
     };
@@ -745,89 +609,15 @@ fn network_thread_h264(
                 *latest.lock().unwrap() = Some(DecodedFrame::Gpu(frame));
                 let _ = proxy.send_event(UserEvent::NewFrame { bytes: n as u32 });
             }
-            Ok(None) => {} // SPS/PPS, or the decoder is still buffering
+            // Config-only packet (SPS/PPS before the first IDR), or the
+            // decoder is still buffering.
+            Ok(None) => {}
             Err(e) => eprintln!("h264 decode error: {e}"),
         }
     }
 }
 
-#[cfg(target_os = "macos")]
-fn network_thread_h264(
-    args: Args,
-    latest: Arc<Mutex<Option<DecodedFrame>>>,
-    proxy: EventLoopProxy<UserEvent>,
-) {
-    use videotoolbox_decoder::VtDecoder;
 
-    let mut sock = match TcpStream::connect((args.host.as_str(), args.port)) {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = proxy.send_event(UserEvent::Disconnected(format!("connect failed: {e}")));
-            return;
-        }
-    };
-    let _ = sock.set_nodelay(true);
-
-    let mut cmd = String::from("stream_h264");
-    if args.native {
-        cmd.push_str(" max=1");
-    } else if let Some(s) = args.size {
-        cmd.push_str(&format!(" size={s}"));
-    }
-    cmd.push_str(&format!(" bitrate={}", args.bitrate_kbps));
-    if let Some(f) = args.fps {
-        cmd.push_str(&format!(" fps={f}"));
-    }
-    if write_cmd(&mut sock, cmd.as_bytes()).is_err() {
-        let _ = proxy.send_event(UserEvent::Disconnected("stream_h264 write failed".into()));
-        return;
-    }
-
-    let mut dec_logger = DecLogger::new("h264");
-    let mut decoder = VtDecoder::new();
-
-    let mut len_buf = [0u8; 4];
-    let mut pkt: Vec<u8> = Vec::with_capacity(256 * 1024);
-
-    loop {
-        if sock.read_exact(&mut len_buf).is_err() {
-            let _ = proxy.send_event(UserEvent::Disconnected("read header eof".into()));
-            return;
-        }
-        let n = u32::from_be_bytes(len_buf) as usize;
-        if n == 0 || n > 256 * 1024 * 1024 {
-            let _ = proxy.send_event(UserEvent::Disconnected(format!("bad length {n}")));
-            return;
-        }
-        pkt.resize(n, 0);
-        if sock.read_exact(&mut pkt).is_err() {
-            let _ = proxy.send_event(UserEvent::Disconnected("read payload eof".into()));
-            return;
-        }
-
-        if pkt.len() >= 4 && &pkt[..4] == b"ERR:" {
-            let msg = String::from_utf8_lossy(&pkt).into_owned();
-            let _ = proxy.send_event(UserEvent::Disconnected(msg));
-            return;
-        }
-
-        let t_dec_start = std::time::Instant::now();
-        match decoder.decode(&pkt) {
-            Ok(Some(pb)) => {
-                let dec_ms = t_dec_start.elapsed().as_secs_f64() * 1000.0;
-                *latest.lock().unwrap() = Some(DecodedFrame::Hardware { pb });
-                dec_logger.tick(dec_ms);
-                let _ = proxy.send_event(UserEvent::NewFrame { bytes: n as u32 });
-            }
-            Ok(None) => {
-                // Config-only packet (SPS/PPS before first IDR) — no frame.
-            }
-            Err(e) => {
-                eprintln!("h264 decode error: {e}");
-            }
-        }
-    }
-}
 
 /// Rolling per-frame decode-time logger. Coalesces output to one line every
 /// ~60 frames so we can see decode latency without spamming.

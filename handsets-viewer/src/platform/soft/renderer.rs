@@ -3,8 +3,6 @@
 // hands it to softbuffer. Good enough for the JPEG / tilejpeg streams;
 // macOS (Metal + VideoToolbox) and Windows (D3D11 + Media Foundation) use
 // their hardware paths only.
-#![cfg(not(any(target_os = "macos", windows)))]
-
 use std::num::NonZeroU32;
 use std::sync::Arc;
 

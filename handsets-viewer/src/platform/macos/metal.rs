@@ -9,8 +9,6 @@
 // view bounds (set by NSView resize) handle visual letterboxing automatically
 // via the contentsGravity = resizeAspect default.
 
-#![cfg(target_os = "macos")]
-
 use core_graphics_types::geometry::CGSize;
 use metal::foreign_types::ForeignType;
 use metal::{
@@ -22,7 +20,7 @@ use objc::{msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
-use crate::videotoolbox_decoder::PixelBuffer;
+use super::videotoolbox::PixelBuffer;
 
 pub struct MetalRenderer {
     #[allow(dead_code)] // kept alive for layer lifetime

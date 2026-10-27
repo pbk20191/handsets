@@ -3,8 +3,6 @@
 // the D3D renderer's video processor blits straight to the swap chain. Input
 // is the daemon's stream_h264 framing: one Annex-B access unit (or SPS/PPS)
 // per frame.
-#![cfg(windows)]
-
 use std::mem::ManuallyDrop;
 
 use windows::core::Interface;
@@ -23,7 +21,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 
-use crate::win_gpu::Gpu;
+use super::gpu::Gpu;
 
 /// A decoded frame: `slice` of the decoder's NV12 texture array, `w`×`h`
 /// visible pixels. Holding the sample keeps the surface out of the

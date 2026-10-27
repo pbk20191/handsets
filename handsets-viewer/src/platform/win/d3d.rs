@@ -3,8 +3,6 @@
 // letterboxed rectangle (and converts NV12 → RGB for decoded H.264). BGRA
 // frames from the JPEG / tilejpeg streams are uploaded into a texture
 // first; H.264 frames are decoder textures used in place.
-#![cfg(windows)]
-
 use std::mem::ManuallyDrop;
 
 use windows::core::BOOL;
@@ -30,7 +28,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 
-use crate::win_gpu::{gpu, Gpu};
+use super::gpu::{gpu, Gpu};
 use crate::Mapping;
 
 /// The video processor is tied to input and output sizes; rebuilt when they change.

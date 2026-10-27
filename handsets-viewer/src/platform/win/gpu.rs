@@ -2,8 +2,6 @@
 // (UI thread) and the Media Foundation H.264 decoder (network thread) share
 // it, so decoded NV12 textures reach the screen without leaving the GPU.
 // Multithread protection lets both threads use the immediate context.
-#![cfg(windows)]
-
 use std::sync::OnceLock;
 
 use windows::core::Interface;
