@@ -4,7 +4,8 @@
 //   --codec jpeg      (default): length-prefixed JPEG frames; on macOS
 //                               VideoToolbox decodes them into IOSurfaces
 //                               like H.264, elsewhere zune-jpeg → BGRA.
-//   --codec tilejpeg          : tiled JPEG deltas patched into a framebuffer.
+//   --codec tilejpeg          : tiled JPEG deltas patched into a framebuffer
+//                               (on macOS, composited by Metal blits).
 //   --codec h264              : length-prefixed Annex-B H.264 access units;
 //                               on macOS, VideoToolbox decodes straight into
 //                               an IOSurface-backed CVPixelBuffer which the
@@ -12,8 +13,8 @@
 //                               blits to the drawable (zero-copy GPU path).
 //
 // UI thread (winit 0.30) renders the most recent frame:
-//   macOS   — Metal; tilejpeg uploads from the CPU, JPEG and H.264 take
-//             the zero-copy IOSurface path.
+//   macOS   — Metal; every codec decodes on VideoToolbox and takes the
+//             zero-copy IOSurface path.
 //   Windows — DXGI flip swap chain + D3D11 video-processor blit; H.264 is
 //             decoded by the Media Foundation MFT on the shared D3D11 device
 //             (DXVA), so NV12 surfaces never leave the GPU.
@@ -33,12 +34,6 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
-
-use zune_jpeg::zune_core::colorspace::ColorSpace;
-use zune_jpeg::zune_core::options::DecoderOptions;
-use zune_jpeg::JpegDecoder;
-
-const DAEMON_ADDR: &str = "127.0.0.1:9008";
 
 // Default window: native aspect (1440x3120) at 1/4 scale.
 const INITIAL_W: u32 = 360;
@@ -142,6 +137,7 @@ enum UserEvent {
 /// tilejpeg) or a decoded H.264 frame that stays on the GPU (see
 /// [platform::GpuFrame]).
 enum DecodedFrame {
+    #[cfg(not(target_os = "macos"))]
     Bgra {
         rgb: Vec<u8>,
         width: u32,
@@ -150,8 +146,10 @@ enum DecodedFrame {
     Gpu(platform::GpuFrame),
 }
 
-/// Window→device mapping snapshot, refreshed every render.
+/// Window→device mapping snapshot, refreshed every render. The Metal layer
+/// letterboxes on its own, so macOS never builds one.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 struct Mapping {
     pad_x: u32,
     pad_y: u32,
@@ -161,6 +159,7 @@ struct Mapping {
     src_h: u32,
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 impl Mapping {
     /// Convert window-space coordinates to device pixels.
     /// Returns None if the point falls outside the letterboxed device area.
@@ -555,8 +554,8 @@ fn jpeg_decode_thread(
     proxy: &EventLoopProxy<UserEvent>,
 ) {
     let (lock, cv) = slot;
-    let mut hw = platform::JpegDecoder::new();
-    let mut dec_logger = DecLogger::new(if hw.is_some() { "jpeg-hw" } else { "jpeg" });
+    let mut decoder = platform::JpegDecoder::new();
+    let mut dec_logger = DecLogger::new(platform::JpegDecoder::LABEL);
     loop {
         let jpeg = {
             let mut s = lock.lock().unwrap();
@@ -571,17 +570,7 @@ fn jpeg_decode_thread(
             }
         };
         let t0 = Instant::now();
-        let frame = match hw.as_mut().map(|d| d.decode(&jpeg)) {
-            Some(Ok(pb)) => Some(DecodedFrame::Gpu(pb)),
-            hw_result => {
-                if let Some(Err(e)) = hw_result {
-                    eprintln!("jpeg hw decode failed, using zune-jpeg from now on: {e}");
-                    hw = None;
-                }
-                decode_jpeg_bgra(&jpeg)
-                    .map(|(w, h, bgra)| DecodedFrame::Bgra { rgb: bgra, width: w as u32, height: h as u32 })
-            }
-        };
+        let frame = decoder.decode(&jpeg).map_err(|e| eprintln!("{e}")).ok();
         dec_logger.tick(t0.elapsed().as_secs_f64() * 1000.0);
         if let Some(frame) = frame {
             *latest.lock().unwrap() = Some(frame);
@@ -744,10 +733,14 @@ fn network_thread_tilejpeg(
         return;
     }
 
-    // Persistent RGBA framebuffer at device size. Patched in-place by deltas
-    // and replaced wholesale by keyframes.
-    let fb_len = (dev_w as usize) * (dev_h as usize) * 4;
-    let mut fb: Vec<u8> = vec![0u8; fb_len];
+    // Device-size canvas, replaced wholesale by keyframes and patched by deltas.
+    let mut canvas = match platform::TileCanvas::new(dev_w, dev_h) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = proxy.send_event(UserEvent::Disconnected(e));
+            return;
+        }
+    };
 
     let mut len_buf = [0u8; 4];
     let mut pkt: Vec<u8> = Vec::with_capacity(256 * 1024);
@@ -776,7 +769,7 @@ fn network_thread_tilejpeg(
 
         let t_dec = std::time::Instant::now();
         let kind = pkt[0];
-        match kind {
+        let frame = match kind {
             TILE_TYPE_KEYFRAME => {
                 if pkt.len() < 5 {
                     eprintln!("tilejpeg: short keyframe packet");
@@ -787,19 +780,7 @@ fn network_thread_tilejpeg(
                     eprintln!("tilejpeg: keyframe length mismatch");
                     continue;
                 }
-                let jpeg = &pkt[5..5 + jlen];
-                match decode_jpeg_rgba(jpeg) {
-                    Some((w, h, rgb)) => {
-                        if (w as u32, h as u32) == (dev_w, dev_h) && rgb.len() == fb.len() {
-                            fb.copy_from_slice(&rgb);
-                        } else {
-                            // Source dimensions don't match — letterbox into fb.
-                            blit_rgba_into(&mut fb, dev_w as usize, 0, 0,
-                                          w as usize, h as usize, &rgb);
-                        }
-                    }
-                    None => continue,
-                }
+                canvas.keyframe(&pkt[5..5 + jlen])
             }
             TILE_TYPE_DELTA => {
                 if pkt.len() < 3 {
@@ -808,6 +789,7 @@ fn network_thread_tilejpeg(
                 }
                 let num = u16::from_be_bytes([pkt[1], pkt[2]]) as usize;
                 let mut cursor = 3;
+                let mut tiles = Vec::with_capacity(num);
                 for _ in 0..num {
                     if cursor + 10 > pkt.len() { break; }
                     let idx = u16::from_be_bytes([pkt[cursor], pkt[cursor + 1]]) as u32;
@@ -818,82 +800,35 @@ fn network_thread_tilejpeg(
                     ]) as usize;
                     cursor += 10;
                     if cursor + jlen > pkt.len() { break; }
-                    let jpeg = &pkt[cursor..cursor + jlen];
+                    tiles.push(platform::Tile {
+                        x: (idx % tiles_x) * tile_edge,
+                        y: (idx / tiles_x) * tile_edge,
+                        w: tw,
+                        h: th,
+                        jpeg: &pkt[cursor..cursor + jlen],
+                    });
                     cursor += jlen;
-                    if let Some((w, h, rgb)) = decode_jpeg_rgba(jpeg) {
-                        if w as u32 != tw || h as u32 != th {
-                            eprintln!(
-                                "tilejpeg: tile size mismatch (jpeg {}x{}, hdr {}x{})",
-                                w, h, tw, th
-                            );
-                            continue;
-                        }
-                        let row = idx / tiles_x;
-                        let col = idx % tiles_x;
-                        let dx = (col * tile_edge) as usize;
-                        let dy = (row * tile_edge) as usize;
-                        blit_rgba_into(
-                            &mut fb, dev_w as usize, dx, dy,
-                            tw as usize, th as usize, &rgb,
-                        );
-                    }
                 }
+                canvas.patch(&tiles)
             }
             _ => {
                 eprintln!("tilejpeg: unknown packet type {kind:#x}");
                 continue;
             }
-        }
+        };
+        let frame = match frame {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("tilejpeg: {e}");
+                continue;
+            }
+        };
 
         dec_logger.tick(t_dec.elapsed().as_secs_f64() * 1000.0);
 
-        // Publish the patched framebuffer to the UI thread.
-        *latest.lock().unwrap() = Some(DecodedFrame::Bgra {
-            rgb: fb.clone(),
-            width: dev_w,
-            height: dev_h,
-        });
+        // Publish the new frame to the UI thread.
+        *latest.lock().unwrap() = Some(frame);
         let _ = proxy.send_event(UserEvent::NewFrame { bytes: n as u32 });
-    }
-}
-
-/// Decode a JPEG byte slice to BGRA8888 using zune-jpeg.
-fn decode_jpeg_bgra(jpeg: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
-    let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::BGRA);
-    let mut decoder = JpegDecoder::new_with_options(jpeg, opts);
-    match decoder.decode() {
-        Ok(bgra) => decoder.info().map(|i| (i.width as usize, i.height as usize, bgra)),
-        Err(e) => {
-            eprintln!("jpeg decode error: {e:?}");
-            None
-        }
-    }
-}
-
-/// Decode a JPEG byte slice to an RGBA8888 buffer using zune-jpeg.
-fn decode_jpeg_rgba(jpeg: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
-    let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::BGRA);
-    let mut dec = JpegDecoder::new_with_options(jpeg, opts);
-    let rgba = dec.decode().ok()?;
-    let info = dec.info()?;
-    Some((info.width as usize, info.height as usize, rgba))
-}
-
-/// Copy a tile from `src` (RGBA8888, tw*th*4 bytes) into `fb` at offset (dx, dy).
-/// `fb_w` is the row stride in pixels of the destination framebuffer.
-fn blit_rgba_into(
-    fb: &mut [u8], fb_w: usize, dx: usize, dy: usize,
-    tw: usize, th: usize, src: &[u8],
-) {
-    if tw == 0 || th == 0 { return; }
-    let row_bytes = tw * 4;
-    for y in 0..th {
-        let src_off = y * row_bytes;
-        let dst_off = ((dy + y) * fb_w + dx) * 4;
-        if dst_off + row_bytes > fb.len() { break; }
-        if src_off + row_bytes > src.len() { break; }
-        fb[dst_off..dst_off + row_bytes]
-            .copy_from_slice(&src[src_off..src_off + row_bytes]);
     }
 }
 

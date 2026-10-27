@@ -1,7 +1,9 @@
-// macOS: CAMetalLayer presentation, VideoToolbox H.264 and JPEG straight
-// into IOSurface-backed CVPixelBuffers that Metal samples without a copy.
+// macOS: CAMetalLayer presentation, VideoToolbox H.264 and JPEG (whole
+// frames and tilejpeg tiles) straight into IOSurface-backed CVPixelBuffers
+// that Metal blits without a copy. Nothing is decoded on the CPU.
 
 mod metal;
+mod tiles;
 mod videotoolbox;
 
 use std::sync::Arc;
@@ -10,6 +12,7 @@ use winit::window::Window;
 
 use crate::{DecodedFrame, Mapping};
 
+pub use tiles::TileCanvas;
 pub use videotoolbox::PixelBuffer as GpuFrame;
 
 pub struct Renderer(metal::MetalRenderer);
@@ -30,10 +33,8 @@ impl Renderer {
     pub fn present(
         &mut self, frame: &DecodedFrame, _window: (u32, u32), _device: Option<(u32, u32)>,
     ) -> Option<Mapping> {
-        match frame {
-            DecodedFrame::Bgra { rgb, width, height } => self.0.present(rgb, *width, *height),
-            DecodedFrame::Gpu(pb) => self.0.present_pixel_buffer(pb),
-        }
+        let DecodedFrame::Gpu(pb) = frame;
+        self.0.present_pixel_buffer(pb);
         None
     }
 
@@ -59,11 +60,13 @@ impl H264Decoder {
 pub struct JpegDecoder(videotoolbox::VtJpegDecoder);
 
 impl JpegDecoder {
-    pub fn new() -> Option<Self> {
-        Some(Self(videotoolbox::VtJpegDecoder::new()))
+    pub const LABEL: &'static str = "jpeg-vt";
+
+    pub fn new() -> Self {
+        Self(videotoolbox::VtJpegDecoder::new())
     }
 
-    pub fn decode(&mut self, jpeg: &[u8]) -> Result<GpuFrame, String> {
-        self.0.decode(jpeg)
+    pub fn decode(&mut self, jpeg: &[u8]) -> Result<DecodedFrame, String> {
+        self.0.decode(jpeg).map(DecodedFrame::Gpu)
     }
 }

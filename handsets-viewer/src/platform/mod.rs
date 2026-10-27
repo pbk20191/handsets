@@ -6,8 +6,13 @@
 //   H264Decoder — turns stream_h264 access units into GpuFrames
 //   GpuFrame    — a decoded H.264 frame that stays on the GPU
 //
-// JpegDecoder decodes `stream` frames into GpuFrames in hardware; only macOS
-// has one; elsewhere `new()` is None and JPEG goes through zune-jpeg.
+// and two JPEG front ends:
+//
+//   JpegDecoder — one `stream` frame → DecodedFrame
+//   TileCanvas  — `stream_tilejpeg` keyframes and tile patches → DecodedFrame
+//
+// macOS runs both on VideoToolbox + Metal; everywhere else they decode with
+// zune-jpeg into a CPU frame (cpu_jpeg.rs).
 //
 //   macos/ — CAMetalLayer + VideoToolbox (IOSurface, zero-copy)
 //   win/   — DXGI swap chain + D3D11 video processor + Media Foundation (DXVA)
@@ -17,7 +22,7 @@
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{GpuFrame, H264Decoder, JpegDecoder, Renderer};
+pub use macos::{GpuFrame, H264Decoder, JpegDecoder, Renderer, TileCanvas};
 
 #[cfg(windows)]
 mod win;
@@ -35,15 +40,15 @@ mod soft;
 pub use soft::{GpuFrame, H264Decoder, Renderer};
 
 #[cfg(not(target_os = "macos"))]
-pub enum JpegDecoder {}
-
+mod cpu_jpeg;
 #[cfg(not(target_os = "macos"))]
-impl JpegDecoder {
-    pub fn new() -> Option<Self> {
-        None
-    }
+pub use cpu_jpeg::{JpegDecoder, TileCanvas};
 
-    pub fn decode(&mut self, _jpeg: &[u8]) -> Result<GpuFrame, String> {
-        match *self {}
-    }
+/// One changed tile of a tilejpeg delta, placed at (x, y) in the frame.
+pub struct Tile<'a> {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub jpeg: &'a [u8],
 }
