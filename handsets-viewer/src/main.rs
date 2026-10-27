@@ -20,7 +20,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 mod platform;
@@ -491,51 +491,91 @@ fn network_thread_jpeg(
         return;
     }
 
-    let mut len_buf = [0u8; 4];
-    let mut jpeg_buf: Vec<u8> = Vec::with_capacity(256 * 1024);
+    // Reading and decoding run on separate threads so the socket keeps
+    // draining (and the daemon keeps encoding) while a frame decodes. The
+    // slot holds only the newest JPEG; a frame that arrives mid-decode
+    // replaces any older one still waiting.
+    let slot: Arc<(Mutex<JpegSlot>, Condvar)> = Arc::default();
+    {
+        let slot = slot.clone();
+        let proxy = proxy.clone();
+        std::thread::Builder::new()
+            .name("jpeg-decode".into())
+            .spawn(move || jpeg_decode_thread(&slot, &latest, &proxy))
+            .expect("spawn jpeg decoder");
+    }
+    let err = read_jpeg_frames(&mut sock, &slot);
+    let (lock, cv) = &*slot;
+    lock.lock().unwrap().closed = true;
+    cv.notify_one();
+    let _ = proxy.send_event(UserEvent::Disconnected(err));
+}
 
+#[derive(Default)]
+struct JpegSlot {
+    frame: Option<Vec<u8>>,
+    /// A buffer the decoder is done with, reused for the next read.
+    spare: Option<Vec<u8>>,
+    closed: bool,
+}
+
+/// Reads length-prefixed JPEGs into the slot until the stream ends; returns why.
+fn read_jpeg_frames(sock: &mut TcpStream, slot: &(Mutex<JpegSlot>, Condvar)) -> String {
+    let (lock, cv) = slot;
+    let mut len_buf = [0u8; 4];
     loop {
         if sock.read_exact(&mut len_buf).is_err() {
-            let _ = proxy.send_event(UserEvent::Disconnected("read header eof".into()));
-            return;
+            return "read header eof".into();
         }
         let n = u32::from_be_bytes(len_buf) as usize;
         if n == 0 || n > 256 * 1024 * 1024 {
-            let _ = proxy.send_event(UserEvent::Disconnected(format!("bad length {n}")));
-            return;
+            return format!("bad length {n}");
         }
-        jpeg_buf.resize(n, 0);
-        if sock.read_exact(&mut jpeg_buf).is_err() {
-            let _ = proxy.send_event(UserEvent::Disconnected("read payload eof".into()));
-            return;
+        let mut buf = lock.lock().unwrap().spare.take().unwrap_or_default();
+        buf.resize(n, 0);
+        if sock.read_exact(&mut buf).is_err() {
+            return "read payload eof".into();
         }
+        if buf.starts_with(b"ERR:") {
+            return String::from_utf8_lossy(&buf).into_owned();
+        }
+        let mut s = lock.lock().unwrap();
+        if let Some(old) = s.frame.replace(buf) {
+            s.spare = Some(old);
+        }
+        cv.notify_one();
+    }
+}
 
-        if jpeg_buf.len() >= 4 && &jpeg_buf[..4] == b"ERR:" {
-            let msg = String::from_utf8_lossy(&jpeg_buf).into_owned();
-            let _ = proxy.send_event(UserEvent::Disconnected(msg));
-            return;
-        }
-
-        let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::BGRA);
-        let mut decoder = JpegDecoder::new_with_options(jpeg_buf.as_slice(), opts);
-        match decoder.decode() {
-            Ok(rgba) => {
-                let info = match decoder.info() {
-                    Some(i) => i,
-                    None => continue,
-                };
-                let frame = DecodedFrame::Bgra {
-                    rgb: rgba,
-                    width: info.width as u32,
-                    height: info.height as u32,
-                };
-                *latest.lock().unwrap() = Some(frame);
-                let _ = proxy.send_event(UserEvent::NewFrame { bytes: n as u32 });
+fn jpeg_decode_thread(
+    slot: &(Mutex<JpegSlot>, Condvar),
+    latest: &Mutex<Option<DecodedFrame>>,
+    proxy: &EventLoopProxy<UserEvent>,
+) {
+    let (lock, cv) = slot;
+    let mut dec_logger = DecLogger::new("jpeg");
+    loop {
+        let jpeg = {
+            let mut s = lock.lock().unwrap();
+            loop {
+                if let Some(f) = s.frame.take() {
+                    break f;
+                }
+                if s.closed {
+                    return;
+                }
+                s = cv.wait(s).unwrap();
             }
-            Err(e) => {
-                eprintln!("jpeg decode error: {e:?}");
-            }
+        };
+        let t0 = Instant::now();
+        let frame = decode_jpeg_bgra(&jpeg)
+            .map(|(w, h, bgra)| DecodedFrame::Bgra { rgb: bgra, width: w as u32, height: h as u32 });
+        dec_logger.tick(t0.elapsed().as_secs_f64() * 1000.0);
+        if let Some(frame) = frame {
+            *latest.lock().unwrap() = Some(frame);
+            let _ = proxy.send_event(UserEvent::NewFrame { bytes: jpeg.len() as u32 });
         }
+        lock.lock().unwrap().spare = Some(jpeg);
     }
 }
 
@@ -802,6 +842,19 @@ fn network_thread_tilejpeg(
             height: dev_h,
         });
         let _ = proxy.send_event(UserEvent::NewFrame { bytes: n as u32 });
+    }
+}
+
+/// Decode a JPEG byte slice to BGRA8888 using zune-jpeg.
+fn decode_jpeg_bgra(jpeg: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::BGRA);
+    let mut decoder = JpegDecoder::new_with_options(jpeg, opts);
+    match decoder.decode() {
+        Ok(bgra) => decoder.info().map(|i| (i.width as usize, i.height as usize, bgra)),
+        Err(e) => {
+            eprintln!("jpeg decode error: {e:?}");
+            None
+        }
     }
 }
 

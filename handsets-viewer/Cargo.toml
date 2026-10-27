@@ -45,7 +45,9 @@ windows = { version = "0.62", features = [
 ] }
 
 [profile.release]
-opt-level = "z"          # optimise for size (still inlines hot loops)
+# Speed first: the JPEG decoders are the hot path, and opt-level "z" roughly
+# doubles their decode time for ~26 KB less binary.
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"          # drop unwind tables (~10–20% binary size)
