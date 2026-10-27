@@ -22,13 +22,14 @@ import kotlin.coroutines.EmptyCoroutineContext
  *  - [Main]: the process main thread running `Looper.loop()`. Every socket,
  *    pipe, listener callback, timer and coroutine lives here unless it is
  *    explicitly moved off. Code running on Main must never block.
- *  - [Work], [Blocking], [FrameCopy]: views of the kotlinx-coroutines
+ *  - [Work], [Blocking]: views of the kotlinx-coroutines
  *    scheduler, so every off-main task shares one worker pool
  *    (`DefaultDispatcher-worker-N`). Work is CPU work and binder calls that
  *    may take long, capped so it can't hog the pool; Blocking is calls that
  *    wait on a peer (pipe-fed binder dumps, codec and VirtualDisplay setup
- *    and teardown); FrameCopy serializes mirror pixel copies, which block on
- *    the GPU fence. Results come back to Main.
+ *    and teardown). Each mirror serializes its own pixel copies, which
+ *    block on the GPU fence, on a one-at-a-time view of Blocking. Results
+ *    come back to Main.
  */
 object Loop {
 
@@ -41,8 +42,6 @@ object Loop {
     )
 
     val Blocking: CoroutineDispatcher = Dispatchers.IO
-
-    val FrameCopy: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1, "frame")
 
     val blockingExecutor: Executor = Blocking.asExecutor()
 

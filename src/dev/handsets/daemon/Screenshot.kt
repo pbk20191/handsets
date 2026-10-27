@@ -229,8 +229,10 @@ internal class Screenshot(private val ua: UiAutomation) {
         }
 
         /** Runs [block] with the latest frame (null before the first) and its stride width in pixels. */
-        suspend fun <T> withFrame(block: (Bitmap?, Int) -> T): T =
-            frameMutex.withLock { block(cached, cachedRowPix) }
+        suspend fun <T> withFrame(block: (Bitmap?, Int) -> T): T {
+            refresh()
+            return frameMutex.withLock { block(cached, cachedRowPix) }
+        }
 
         // The listener thread does the expensive GPU-fence-blocking
         // copyPixelsFromBuffer into `scratch` *without* holding the lock, then
@@ -245,7 +247,12 @@ internal class Screenshot(private val ua: UiAutomation) {
         private var scratch: Bitmap? = null // owned by listener thread; swapped in & out
         private var scratchRowPix = 0
 
-        suspend fun encodeLatest(format: String?, quality: Int): ByteArray = frameMutex.withLock {
+        suspend fun encodeLatest(format: String?, quality: Int): ByteArray {
+            refresh()
+            return frameMutex.withLock { encodeCached(format, quality) }
+        }
+
+        private suspend fun encodeCached(format: String?, quality: Int): ByteArray =
             withContext(Loop.Work) {
                 val c = checkNotNull(cached) { "no frame yet" }
                 val crop = cachedRowPix != outW
@@ -259,23 +266,38 @@ internal class Screenshot(private val ua: UiAutomation) {
                     if (crop) toEncode.recycle()
                 }
             }
-        }
 
         /** ImageReader callbacks; conflated, so frames that land during a copy collapse into one. */
         private val frameSignals = Channel<Unit>(Channel.CONFLATED)
 
         /**
-         * Copies the latest image after each signal. Runs on FrameCopy: the
-         * ~16 ms GPU-fence copy per frame must not queue ahead of taps and
-         * dumps on the Work pool.
+         * The newest image of a mirror nobody streams from, kept uncopied
+         * until a read needs it: an idle cached mirror (a native-size one
+         * copies ~24 ms per frame) must not burn CPU and GPU on every frame.
+         * Guarded by absorbMutex.
          */
-        private val copier = Loop.scope.launch(Loop.FrameCopy) {
+        private var pending: Image? = null
+
+        /**
+         * Copies the latest image after each signal, one at a time per
+         * mirror: the GPU-fence copy (~8–24 ms per frame) must not queue
+         * ahead of taps and dumps on the Work pool, nor behind another
+         * mirror's copies.
+         */
+        private val copier = Loop.scope.launch(Loop.Blocking.limitedParallelism(1)) {
             while (frameSignals.receiveCatching().isSuccess) {
                 val img = try {
                     reader.acquireLatestImage()
                 } catch (_: Throwable) {
                     null
                 } ?: continue
+                if (subscribers.isEmpty()) {
+                    absorbMutex.withLock {
+                        pending?.close()
+                        pending = img
+                    }
+                    continue
+                }
                 try {
                     absorb(img)
                 } catch (_: Throwable) {
@@ -285,11 +307,31 @@ internal class Screenshot(private val ua: UiAutomation) {
             }
         }
 
+        /** Copies in the frame an idle mirror is holding, if any. */
+        private suspend fun refresh() = absorbMutex.withLock {
+            val img = pending ?: return@withLock
+            pending = null
+            try {
+                absorbHeld(img)
+            } catch (_: Throwable) {
+            } finally {
+                img.close()
+            }
+        }
+
         fun onImageAvailable() {
             frameSignals.trySend(Unit)
         }
 
         private suspend fun absorb(img: Image) = absorbMutex.withLock {
+            // A streamed frame supersedes any held one.
+            pending?.close()
+            pending = null
+            absorbHeld(img)
+        }
+
+        /** Copies [img] into `cached` and notifies subscribers; caller holds absorbMutex. */
+        private suspend fun absorbHeld(img: Image) {
             if (USE_HARDWARE_BUFFER) absorbHardware(img) else absorbLocked(img)
 
             // Listeners must be non-blocking.
@@ -361,6 +403,10 @@ internal class Screenshot(private val ua: UiAutomation) {
         suspend fun close() {
             frameSignals.close()
             copier.cancel()
+            absorbMutex.withLock {
+                pending?.close()
+                pending = null
+            }
             try {
                 reader.setOnImageAvailableListener(null, null)
             } catch (_: Throwable) {
