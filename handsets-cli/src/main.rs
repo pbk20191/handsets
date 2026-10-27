@@ -20,6 +20,7 @@ mod flags;
 mod init;
 mod json;
 mod json_out;
+mod mcp;
 mod mirror;
 mod output;
 mod provider;
@@ -42,6 +43,17 @@ const DEFAULT_PORT: u16 = 9008;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `hs mcp [GLOBAL OPTIONS]`: stdio MCP server; the options ride along on
+    // every tool call.
+    if args.first().map(String::as_str) == Some("mcp") {
+        return match mcp::serve(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("hs mcp: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let opts = match parse_args(&args) {
         Ok(o) => o,
         Err(e) => {
@@ -129,6 +141,104 @@ enum Cmd {
     Notif { pkg: Option<String>, history: bool, limit: u32, json: bool },
     Clip { text: Option<String>, watch: bool, interval_ms: u64 },
     Tui { active: bool },
+}
+
+/// `hs logs`: logcat with filters. Default `logcat -d -t 100` (last 100
+/// lines, exit); `--follow` streams instead.
+///   --tail N            lines to print (default 100)
+///   --pkg PKG           only PKG's running process (logcat --pid)
+///   --level V|D|I|W|E|F minimum priority
+///   --tag TAG[:L]       only these tags (repeatable); others are silenced
+///   --grep REGEX        lines matching REGEX (logcat -e; no spaces)
+///   --buffer B / --crash   main, system, crash, events, radio, all
+///   --clear             clear the buffers and exit
+fn parse_logs(rest: &[&str]) -> Result<Cmd, String> {
+    let mut follow = false;
+    let mut tail: u32 = 100;
+    let (mut pkg, mut level, mut grep): (Option<String>, Option<char>, Option<String>) = (None, None, None);
+    let mut tags: Vec<String> = Vec::new();
+    let mut buffers: Vec<String> = Vec::new();
+    let mut clear = false;
+    let mut i = 0;
+    // The daemon splits logcat's argv on whitespace.
+    let no_space = |flag: &str, v: &str| -> Result<String, String> {
+        if v.is_empty() || v.chars().any(char::is_whitespace) {
+            Err(format!("{flag} takes one word (no spaces): {v:?}"))
+        } else {
+            Ok(v.to_string())
+        }
+    };
+    while i < rest.len() {
+        let flag = rest[i];
+        let mut value = || -> Result<&str, String> {
+            i += 1;
+            rest.get(i).copied().ok_or_else(|| format!("{flag} needs a value"))
+        };
+        match flag {
+            "-f" | "--follow" => follow = true,
+            "-t" | "--tail" => {
+                let v = value()?;
+                tail = v.parse().map_err(|_| format!("bad --tail {v}"))?;
+            }
+            "-p" | "--pkg" | "--package" => pkg = Some(no_space(flag, value()?)?),
+            "-l" | "--level" => {
+                let v = value()?;
+                level = match v.to_ascii_uppercase().as_str() {
+                    l @ ("V" | "D" | "I" | "W" | "E" | "F") => l.chars().next(),
+                    "VERBOSE" => Some('V'),
+                    "DEBUG" => Some('D'),
+                    "INFO" => Some('I'),
+                    "WARN" | "WARNING" => Some('W'),
+                    "ERROR" => Some('E'),
+                    "FATAL" => Some('F'),
+                    _ => return Err(format!("bad --level {v} (V D I W E F)")),
+                };
+            }
+            "--tag" => tags.push(no_space(flag, value()?)?),
+            "-e" | "--grep" => grep = Some(no_space(flag, value()?)?),
+            "-b" | "--buffer" => buffers.push(no_space(flag, value()?)?),
+            "--crash" => buffers.push("crash".into()),
+            "-c" | "--clear" => clear = true,
+            other => return Err(format!("unknown logs arg: {other}")),
+        }
+        i += 1;
+    }
+    let mut args: Vec<String> = Vec::new();
+    for b in &buffers {
+        args.extend(["-b".to_string(), b.clone()]);
+    }
+    if clear {
+        args.push("-c".into());
+        return Ok(Cmd::Adb(adb::Cmd::Logcat(args)));
+    }
+    // logcat's -t counts before its priority / tag / regex filters, so with
+    // any of those the host keeps the last N lines instead.
+    let filtered = level.is_some() || !tags.is_empty() || grep.is_some();
+    let host_tail = (!follow && filtered).then_some(tail as usize);
+    if !follow {
+        args.push("-d".into());
+        if !filtered {
+            args.extend(["-t".to_string(), tail.to_string()]);
+        }
+    }
+    if let Some(re) = grep {
+        args.extend(["-e".to_string(), re]);
+    }
+    // Filter specs go last: TAG:LEVEL … *:S, or *:LEVEL alone.
+    let lvl = level.unwrap_or('V');
+    if !tags.is_empty() {
+        for t in tags {
+            args.push(if t.contains(':') { t } else { format!("{t}:{lvl}") });
+        }
+        args.push("*:S".into());
+    } else if let Some(l) = level {
+        args.push(format!("*:{l}"));
+    }
+    Ok(Cmd::Adb(if pkg.is_none() && host_tail.is_none() {
+        adb::Cmd::Logcat(args)
+    } else {
+        adb::Cmd::LogcatFiltered { pkg, args, tail: host_tail }
+    }))
 }
 
 // SMS type codes — Android Telephony.TextBasedSmsColumns.
@@ -626,32 +736,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         }
 
         // ─── Logs / events (first-class) ─────────────────────────────
-        Some((&"logs", rest)) => {
-            // Default: `logcat -d -t 100` (last 100 lines, exit). `--follow`/`-f`
-            // switches to live tail. `--tail N` overrides the count.
-            let mut follow = false;
-            let mut tail: u32 = 100;
-            let mut i = 0;
-            while i < rest.len() {
-                match rest[i] {
-                    "-f" | "--follow" => follow = true,
-                    "-t" | "--tail" => {
-                        i += 1;
-                        let v = rest.get(i).ok_or("--tail needs N")?;
-                        tail = v.parse().map_err(|_| format!("bad --tail {v}"))?;
-                    }
-                    other => return Err(format!("unknown logs arg: {other}")),
-                }
-                i += 1;
-            }
-            let mut args: Vec<String> = Vec::new();
-            if !follow {
-                args.push("-d".into());
-                args.push("-t".into());
-                args.push(tail.to_string());
-            }
-            Cmd::Adb(adb::Cmd::Logcat(args))
-        }
+        Some((&"logs", rest)) => parse_logs(rest)?,
         Some((&"events", _)) => Cmd::Adb(adb::Cmd::Monitor),
         Some((&"info", _))   => Cmd::Info,
 
@@ -2449,6 +2534,49 @@ fn try_auto_use(port: u16) -> Result<(), String> {
         n => Err(format!(
             "{n} devices attached; pass `hs use SERIAL` to pick one"
         )),
+    }
+}
+
+#[cfg(test)]
+mod parse_logs_tests {
+    use super::{adb, parse_logs, Cmd};
+
+    fn args(v: &[&str]) -> (Option<String>, Vec<String>) {
+        full(v).0
+    }
+
+    fn full(v: &[&str]) -> ((Option<String>, Vec<String>), Option<usize>) {
+        match parse_logs(v).unwrap() {
+            Cmd::Adb(adb::Cmd::Logcat(a)) => ((None, a), None),
+            Cmd::Adb(adb::Cmd::LogcatFiltered { pkg, args, tail }) => ((pkg, args), tail),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn defaults_and_filters() {
+        assert_eq!(args(&[]).1, ["-d", "-t", "100"]);
+        // Filters: no logcat -t (it counts before filtering); the host tails.
+        assert_eq!(full(&["--level", "warn"]), ((None, vec!["-d".into(), "*:W".into()]), Some(100)));
+        assert_eq!(
+            args(&["--tag", "ActivityManager", "--tag", "hsd:D", "--level", "I"]).1,
+            ["-d", "ActivityManager:I", "hsd:D", "*:S"]
+        );
+        assert_eq!(full(&["--crash", "-t", "20", "--grep", "FATAL"]).0 .1, ["-b", "crash", "-d", "-e", "FATAL"]);
+        assert_eq!(full(&["--crash", "-t", "20", "--grep", "FATAL"]).1, Some(20));
+        assert_eq!(args(&["--crash", "-t", "20"]).1, ["-b", "crash", "-d", "-t", "20"]);
+        assert_eq!(args(&["--clear", "--crash"]).1, ["-b", "crash", "-c"]);
+        assert!(args(&["--follow"]).1.is_empty());
+        let (pkg, a) = args(&["--pkg", "com.android.settings"]);
+        assert_eq!((pkg.as_deref(), a.as_slice()), (Some("com.android.settings"), &["-d", "-t", "100"].map(String::from)[..]));
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        assert!(parse_logs(&["--level", "loud"]).is_err());
+        assert!(parse_logs(&["--grep", "two words"]).is_err());
+        assert!(parse_logs(&["--tag"]).is_err());
+        assert!(parse_logs(&["--bogus"]).is_err());
     }
 }
 

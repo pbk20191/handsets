@@ -119,6 +119,9 @@ struct AdbOut {
 ///   3. `android info` → `sdk: <dir>` → <dir>/platform-tools/adb  (Google's Android CLI)
 ///   4. $ANDROID_HOME, then $ANDROID_SDK_ROOT → platform-tools/adb
 ///   5. `adb` on PATH
+///   6. Android Studio's default SDK (~/Library/Android/sdk, ~/Android/Sdk,
+///      %LOCALAPPDATA%\Android\Sdk) — GUI hosts such as an MCP client often
+///      start hs without the shell's PATH
 fn adb_program() -> &'static Path {
     static ADB: OnceLock<PathBuf> = OnceLock::new();
     ADB.get_or_init(resolve_adb)
@@ -152,7 +155,20 @@ fn resolve_adb() -> PathBuf {
             }
         }
     }
-    PathBuf::from("adb")
+    if which(&format!("adb{}", std::env::consts::EXE_SUFFIX)).is_ok() {
+        return PathBuf::from("adb");
+    }
+    let studio = [
+        home_dir().map(|h| h.join("Library/Android/sdk")),
+        home_dir().map(|h| h.join("Android/Sdk")),
+        std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Android").join("Sdk")),
+    ];
+    studio
+        .into_iter()
+        .flatten()
+        .map(|sdk| sdk_adb(&sdk))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("adb"))
 }
 
 /// The SDK directory Google's Android CLI reports, if it is installed.

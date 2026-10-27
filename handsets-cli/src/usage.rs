@@ -64,12 +64,14 @@ More verbs:
   Data        hs sms | hs calls | hs contacts | hs calendar | hs notif | hs clip
               hs location          last-known GPS fix per provider [--json]
   System      hs prop [KEY [VAL]] | hs settings [NS [KEY [VAL]]]
-  Diagnostics hs logs [--tail N | --follow] | hs events
+  Diagnostics hs logs [--tail N | --follow] [--pkg PKG] [--level E] [--tag T[:L]]…
+                      [--grep RE] [--crash | --buffer B] [--clear]  | hs events
   Scripting   hs shell                 interactive REPL (also batch via stdin)
               hs run [SCRIPT|-]        batch CLI verbs over one warm socket
               hs init [PATH]           scaffold a starter script
               hs act --tap … --until … one-shot tap-then-verify composite
               hs fan SERIAL,SERIAL -- VERB    parallel per-device
+              hs mcp [--device SERIAL]  MCP server on stdio (tools for each verb)
 
 Exit codes:
   0  ok
