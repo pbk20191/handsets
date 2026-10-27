@@ -73,6 +73,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Link the C runtime statically on Windows so the binaries start on a
+      # PC without the Visual C++ Redistributable (~+97 KB per exe). Set
+      # before the cache step, whose key includes RUSTFLAGS.
+      - name: Static CRT (Windows only)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
+
       - name: Cache cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
         with:
