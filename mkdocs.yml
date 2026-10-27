@@ -62,6 +62,7 @@ nav:
   - Architecture: architecture.md
   - Benchmark: benchmark.md
   - Cookbook: cookbook.md
+  - Emulators: emulator.md
   - Sharp edges: sharp-edges.md
   - Wire reference: wire.md
   - Blog:

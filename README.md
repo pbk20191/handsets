@@ -122,7 +122,7 @@ Full protocol: [docs/wire.md](docs/wire.md). Reflection details and sharp edges:
 curl -fsSL https://raw.githubusercontent.com/pbk20191/handsets/main/install.sh | bash
 ```
 
-Needs `adb`: `hs` finds it through Google's Android CLI (`android info`), then `$ANDROID_HOME`, `$PATH` and Android Studio's default SDK; `HANDSETS_ADB` overrides. macOS and Linux (Windows: the release zip). Pin a version with `HANDSETS_VERSION=v0.3.0`.
+Needs `adb`: `hs` finds it through Google's Android CLI (`android info`), then `$ANDROID_HOME`, `$PATH` and Android Studio's default SDK; `HANDSETS_ADB` overrides. macOS and Linux (Windows: the release zip). Pin a version with `HANDSETS_VERSION=v0.3.0`. Emulator setup (Android CLI, host GPU): [docs/emulator.md](docs/emulator.md).
 
 MCP: each release ships `handsets-<platform>.mcpb`, a one-click bundle for MCP hosts such as Claude Desktop (it carries `hs` and the daemon). Or point any MCP client at `hs mcp` (stdio), which serves the agent loop as tools: `use`, `ui`, `screenshot`, `tap`, `type`, `fill`, `swipe`, `go`, `wait`, `find`, `open`, `close`, `logcat` (filter by app, level, tag or regex), `info`, `drop`, plus `hs` for any other verb.
 

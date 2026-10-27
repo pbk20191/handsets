@@ -35,7 +35,9 @@ const INSTRUCTIONS: &str = "Drive an Android device or emulator. Call `use` firs
 to connect and start the on-device daemon. Then loop: `ui` (or `screenshot`) to \
 see the screen, `tap` / `type` / `fill` / `swipe` / `go` to act, `wait` to confirm. \
 Selectors: plain text (\"Sign in\"), #resource_id, or CSS-like \
-'Button[text=\"OK\"]', 'EditText:below(TextView[text=Email])'.";
+'Button[text=\"OK\"]', 'EditText:below(TextView[text=Email])'. If `use` finds no \
+device, an emulator can be started on the host with `android emulator start NAME` \
+(give the AVD hw.gpu.mode=host).";
 
 /// `hs mcp [GLOBAL OPTIONS]`: serves until stdin closes. The options
 /// (e.g. `--device SERIAL`, `--port N`) are passed to every tool call.
