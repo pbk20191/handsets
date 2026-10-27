@@ -70,6 +70,8 @@ pub(crate) fn locate_tui() -> Option<PathBuf> {
 }
 
 fn locate_sibling_binary(name: &str) -> Option<PathBuf> {
+    // `handsets-viewer.exe` on Windows.
+    let name = &format!("{name}{}", std::env::consts::EXE_SUFFIX);
     if let Ok(p) = which(name) { return Some(p); }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
