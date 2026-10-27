@@ -38,6 +38,7 @@ pub struct VaapiDecoder {
     ctx: *mut ff::AVCodecContext,
     packet: *mut ff::AVPacket,
     frame: *mut ff::AVFrame,
+    decoded_any: bool,
 }
 
 unsafe impl Send for VaapiDecoder {}
@@ -73,6 +74,9 @@ impl VaapiDecoder {
             if r < 0 {
                 return Err(format!("no VA-API device (error {r})"));
             }
+            // libavcodec logs to stderr on its own (e.g. "no frame!" for the
+            // leading SPS/PPS-only units); errors are reported by decode().
+            ff::av_log_set_level(ff::AV_LOG_FATAL as i32);
             let ctx = ff::avcodec_alloc_context3(codec);
             (*ctx).hw_device_ctx = ff::av_buffer_ref(device);
             ff::av_buffer_unref(&mut device);
@@ -84,7 +88,7 @@ impl VaapiDecoder {
                 ff::avcodec_free_context(&mut ctx);
                 return Err(format!("avcodec_open2 failed (error {r})"));
             }
-            Ok(Self { ctx, packet: ff::av_packet_alloc(), frame: ff::av_frame_alloc() })
+            Ok(Self { ctx, packet: ff::av_packet_alloc(), frame: ff::av_frame_alloc(), decoded_any: false })
         }
     }
 
@@ -96,6 +100,11 @@ impl VaapiDecoder {
             let r = ff::avcodec_send_packet(self.ctx, self.packet);
             (*self.packet).data = ptr::null_mut();
             (*self.packet).size = 0;
+            // Until the first keyframe the parser rejects units that carry
+            // no picture; that is the stream starting, not an error.
+            if r == ff::AVERROR_INVALIDDATA && !self.decoded_any {
+                return Ok(None);
+            }
             if r < 0 && r != AVERROR_EAGAIN {
                 return Err(format!("avcodec_send_packet failed (error {r})"));
             }
@@ -121,6 +130,7 @@ impl VaapiDecoder {
                     ff::av_frame_free(&mut drm);
                     return Err(format!("VA-API → DRM PRIME mapping failed (error {r})"));
                 }
+                self.decoded_any = true;
                 newest = Some(GpuFrame { frame: drm, width, height });
             }
         }
