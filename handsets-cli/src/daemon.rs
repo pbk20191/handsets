@@ -129,7 +129,7 @@ fn adb_program() -> &'static Path {
 
 fn resolve_adb() -> PathBuf {
     for var in ["HANDSETS_ADB", "ADB"] {
-        if let Some(v) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+        if let Some(v) = std::env::var_os(var).filter(|v| is_set(v)) {
             return PathBuf::from(v);
         }
     }
@@ -169,6 +169,14 @@ fn resolve_adb() -> PathBuf {
         .map(|sdk| sdk_adb(&sdk))
         .find(|p| p.is_file())
         .unwrap_or_else(|| PathBuf::from("adb"))
+}
+
+/// An env override that is actually set. Claude Desktop passes an MCPB
+/// `${user_config.adb_path}` through verbatim when the option is left blank.
+fn is_set(v: &std::ffi::OsStr) -> bool {
+    let s = v.to_string_lossy();
+    let s = s.trim();
+    !s.is_empty() && !(s.starts_with("${") && s.ends_with('}'))
 }
 
 /// The SDK directory Google's Android CLI reports, if it is installed.
@@ -737,6 +745,14 @@ fn adb_server_list_forwards() -> io::Result<Vec<ForwardEntry>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unsubstituted_placeholder_is_unset() {
+        use std::ffi::OsStr;
+        assert!(super::is_set(OsStr::new(r"C:\sdk\platform-tools\adb.exe")));
+        assert!(!super::is_set(OsStr::new("")));
+        assert!(!super::is_set(OsStr::new("${user_config.adb_path}")));
+    }
+
     #[test]
     fn android_info_sdk_line() {
         let info = "sdk: E:\\packages\\Android\\Sdk\nversion: 1.0.16625370\n";
