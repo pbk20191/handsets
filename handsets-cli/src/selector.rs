@@ -9,6 +9,8 @@
 //   [attr^=value]        prefix
 //   [attr$=value]        suffix
 //   [attr]               attribute present (non-empty)
+//   #name                resource-id, short (`#email`) or full (`#com.app:id/email`);
+//                        `[id=email]` also matches the short form
 //   :flag                node has the given a11y flag (clickable, enabled, …)
 //   :has-text("foo")     substring text match (Playwright sugar for [text~=foo])
 //   :text-is("foo")      exact text match    (Playwright sugar for [text=foo])
@@ -91,6 +93,7 @@ impl Selector {
         for p in &self.attrs {
             let v = get_str(node, &p.key).unwrap_or("");
             let ok = match p.op {
+                AttrOp::Eq if p.key == "rid" => rid_eq(v, &p.val),
                 AttrOp::Eq     => v == p.val,
                 AttrOp::Substr => v.contains(&p.val),
                 AttrOp::Prefix => v.starts_with(&p.val),
@@ -126,6 +129,13 @@ fn parse_one(s: &str) -> Result<Selector, String> {
             let (pred, adv) = parse_attr(&s[i..])?;
             attrs.push(pred);
             i += adv;
+        } else if c == '#' {
+            let len = s[i + 1..].find(|c: char| !is_id_char(c)).unwrap_or(s.len() - i - 1);
+            if len == 0 {
+                return Err(format!("expected a resource-id after '#' at position {i}"));
+            }
+            attrs.push(AttrPred { key: "rid".into(), op: AttrOp::Eq, val: s[i + 1..i + 1 + len].into() });
+            i += 1 + len;
         } else if c == ':' {
             let (psd, adv) = parse_pseudo(&s[i..])?;
             match psd {
@@ -147,7 +157,7 @@ fn parse_class(s: &str, start: usize) -> Result<(ClassMatch, usize), String> {
     let bytes = s.as_bytes();
     let mut i = start;
     if i >= bytes.len() { return Ok((ClassMatch::Any, 0)); }
-    if bytes[i] == b'[' || bytes[i] == b':' { return Ok((ClassMatch::Any, 0)); }
+    if matches!(bytes[i], b'[' | b':' | b'#') { return Ok((ClassMatch::Any, 0)); }
     if bytes[i] == b'*' { return Ok((ClassMatch::Any, 1)); }
     // ident chars: [A-Za-z0-9_.$]
     let begin = i;
@@ -166,6 +176,15 @@ fn parse_class(s: &str, start: usize) -> Result<(ClassMatch, usize), String> {
         ClassMatch::Simple(name.to_string())
     };
     Ok((cls, i - start))
+}
+
+fn is_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '$')
+}
+
+/// A resource-id given in full (`com.app:id/email`) or by its local part (`email`).
+fn rid_eq(rid: &str, want: &str) -> bool {
+    rid == want || (!want.contains('/') && rid.rsplit_once('/').is_some_and(|(_, local)| local == want))
 }
 
 fn parse_attr(s: &str) -> Result<(AttrPred, usize), String> {
@@ -550,6 +569,18 @@ pub(crate) fn apply_filters(matches: &mut Vec<&Value>, f: &crate::flags::ActionF
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_id_matches_short_and_full_resource_ids() {
+        let node = crate::json::parse(r#"{"cls":"android.widget.EditText","rid":"com.app:id/email"}"#).unwrap();
+        for sel in ["#email", "EditText#email", "#com.app:id/email", "[id=email]", "[resource-id=com.app:id/email]"] {
+            assert!(Selector::parse(sel).unwrap()[0].matches(&node), "{sel}");
+        }
+        for sel in ["#mail", "Button#email", "[id=other:id/email]"] {
+            assert!(!Selector::parse(sel).unwrap()[0].matches(&node), "{sel}");
+        }
+        assert!(Selector::parse("#").is_err());
+    }
 
     #[test]
     fn parses_has_text_to_substring_attr() {

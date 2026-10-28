@@ -155,9 +155,13 @@ enum Cmd {
 fn parse_logs(rest: &[&str]) -> Result<Cmd, String> {
     let mut follow = false;
     let mut tail: u32 = 100;
-    let (mut pkg, mut level, mut grep): (Option<String>, Option<char>, Option<String>) = (None, None, None);
+    let (mut pkg, mut pid, mut level) = (None::<String>, None::<u32>, None::<char>);
     let mut tags: Vec<String> = Vec::new();
+    let mut greps: Vec<String> = Vec::new();
     let mut buffers: Vec<String> = Vec::new();
+    let mut formats: Vec<String> = Vec::new();
+    let mut raw: Vec<String> = Vec::new();
+    let mut q = adb::LogcatQuery::default();
     let mut clear = false;
     let mut i = 0;
     // The daemon splits logcat's argv on whitespace.
@@ -181,6 +185,10 @@ fn parse_logs(rest: &[&str]) -> Result<Cmd, String> {
                 tail = v.parse().map_err(|_| format!("bad --tail {v}"))?;
             }
             "-p" | "--pkg" | "--package" => pkg = Some(no_space(flag, value()?)?),
+            "--pid" => {
+                let v = value()?;
+                pid = Some(v.parse().map_err(|_| format!("bad --pid {v}"))?);
+            }
             "-l" | "--level" => {
                 let v = value()?;
                 level = match v.to_ascii_uppercase().as_str() {
@@ -195,13 +203,48 @@ fn parse_logs(rest: &[&str]) -> Result<Cmd, String> {
                 };
             }
             "--tag" => tags.push(no_space(flag, value()?)?),
-            "-e" | "--grep" => grep = Some(no_space(flag, value()?)?),
+            "-e" | "--grep" => {
+                let v = value()?;
+                if v.is_empty() {
+                    return Err(format!("{flag} needs a pattern"));
+                }
+                greps.push(v.to_string());
+            }
+            "-x" | "--exclude" => {
+                let v = value()?;
+                if v.is_empty() {
+                    return Err(format!("{flag} needs text"));
+                }
+                q.exclude.push(v.to_string());
+            }
+            "-i" | "--ignore-case" => q.ignore_case = true,
+            "--since" => {
+                let v = value()?;
+                q.since_secs = Some(parse_since(v)
+                    .ok_or_else(|| format!("bad --since {v} (e.g. 90, 30s, 5m, 2h)"))?);
+            }
+            "-v" | "--format" => {
+                let v = value()?;
+                if !LOGCAT_FORMATS.contains(&v) {
+                    return Err(format!("bad --format {v} ({})", LOGCAT_FORMATS.join(" ")));
+                }
+                formats.push(v.to_string());
+            }
             "-b" | "--buffer" => buffers.push(no_space(flag, value()?)?),
             "--crash" => buffers.push("crash".into()),
             "-c" | "--clear" => clear = true,
+            "--" => {
+                for a in &rest[i + 1..] {
+                    raw.push(no_space("logcat argument", a)?);
+                }
+                break;
+            }
             other => return Err(format!("unknown logs arg: {other}")),
         }
         i += 1;
+    }
+    if pkg.is_some() && pid.is_some() {
+        return Err("--pkg and --pid are exclusive".into());
     }
     let mut args: Vec<String> = Vec::new();
     for b in &buffers {
@@ -209,21 +252,30 @@ fn parse_logs(rest: &[&str]) -> Result<Cmd, String> {
     }
     if clear {
         args.push("-c".into());
-        return Ok(Cmd::Adb(adb::Cmd::Logcat(args)));
+        q.args = args;
+        return Ok(Cmd::Adb(adb::Cmd::Logcat(q)));
     }
-    // logcat's -t counts before its priority / tag / regex filters, so with
-    // any of those the host keeps the last N lines instead.
-    let filtered = level.is_some() || !tags.is_empty() || grep.is_some();
-    let host_tail = (!follow && filtered).then_some(tail as usize);
+    if let Some(p) = pid {
+        args.push(format!("--pid={p}"));
+    }
+    for f in &formats {
+        args.extend(["-v".to_string(), f.clone()]);
+    }
+    // logcat's -t counts before its priority / tag / regex filters (and
+    // before --exclude), so with any of those only the host's tail applies.
+    let filtered = level.is_some() || !tags.is_empty() || !greps.is_empty()
+        || !q.exclude.is_empty() || !raw.is_empty();
     if !follow {
         args.push("-d".into());
-        if !filtered {
+        if !filtered && q.since_secs.is_none() {
             args.extend(["-t".to_string(), tail.to_string()]);
         }
+        q.tail = Some(tail as usize);
     }
-    if let Some(re) = grep {
-        args.extend(["-e".to_string(), re]);
+    if !greps.is_empty() {
+        args.extend(["-e".to_string(), logcat_regex(&greps, q.ignore_case)]);
     }
+    args.extend(raw);
     // Filter specs go last: TAG:LEVEL … *:S, or *:LEVEL alone.
     let lvl = level.unwrap_or('V');
     if !tags.is_empty() {
@@ -234,11 +286,78 @@ fn parse_logs(rest: &[&str]) -> Result<Cmd, String> {
     } else if let Some(l) = level {
         args.push(format!("*:{l}"));
     }
-    Ok(Cmd::Adb(if pkg.is_none() && host_tail.is_none() {
-        adb::Cmd::Logcat(args)
-    } else {
-        adb::Cmd::LogcatFiltered { pkg, args, tail: host_tail }
-    }))
+    q.args = args;
+    q.pkg = pkg;
+    Ok(Cmd::Adb(adb::Cmd::Logcat(q)))
+}
+
+/// logcat's `-v` formats and format modifiers.
+const LOGCAT_FORMATS: &[&str] = &[
+    "brief", "long", "process", "raw", "tag", "thread", "threadtime", "time",
+    "color", "descriptive", "epoch", "monotonic", "printable", "uid", "usec", "UTC", "year", "zone",
+];
+
+/// `90`, `30s`, `5m`, `2h` → seconds.
+fn parse_since(v: &str) -> Option<u64> {
+    let v = v.trim();
+    let (num, mult) = match v.chars().last()? {
+        's' => (&v[..v.len() - 1], 1),
+        'm' => (&v[..v.len() - 1], 60),
+        'h' => (&v[..v.len() - 1], 3600),
+        _ => (v, 1),
+    };
+    num.parse::<u64>().ok().filter(|&n| n > 0).map(|n| n * mult)
+}
+
+/// One `-e` regex for logcat (ECMAScript, matched on the device) from
+/// several patterns, OR'd. Whitespace becomes `\xHH` because the daemon
+/// splits logcat's argv on it; `ignore_case` spells each letter both ways,
+/// since logcat's regex has no case-insensitive flag. Letters at either end
+/// of a class range (`[a-z]`) stay as written.
+fn logcat_regex(patterns: &[String], ignore_case: bool) -> String {
+    let one = |p: &str| -> String {
+        let chars: Vec<char> = p.chars().collect();
+        let mut out = String::with_capacity(p.len() * 2);
+        let mut in_class = false;
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '\\' {
+                // Copy the escape whole: \xhh and \uhhhh carry hex letters.
+                let n = match chars.get(i + 1) { Some('x') => 4, Some('u') => 6, Some(_) => 2, None => 1 };
+                out.extend(&chars[i..(i + n).min(chars.len())]);
+                i += n;
+                continue;
+            }
+            if c.is_whitespace() {
+                out.push_str(&format!("\\x{:02x}", c as u32 & 0xff));
+            } else if c == '[' && !in_class {
+                in_class = true;
+                out.push(c);
+            } else if c == ']' && in_class {
+                in_class = false;
+                out.push(c);
+            } else if ignore_case && c.is_ascii_alphabetic() {
+                let other = if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() };
+                if !in_class {
+                    out.push_str(&format!("[{c}{other}]"));
+                } else if chars.get(i + 1) == Some(&'-') || (i > 0 && chars[i - 1] == '-') {
+                    out.push(c);
+                } else {
+                    out.push(c);
+                    out.push(other);
+                }
+            } else {
+                out.push(c);
+            }
+            i += 1;
+        }
+        out
+    };
+    match patterns {
+        [p] => one(p),
+        _ => patterns.iter().map(|p| format!("(?:{})", one(p))).collect::<Vec<_>>().join("|"),
+    }
 }
 
 // SMS type codes — Android Telephony.TextBasedSmsColumns.
@@ -499,6 +618,11 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
+            }
+            // Everything after `--` belongs to the verb (`hs logs -- -s TAG`).
+            "--" => {
+                positional.extend(args[i..].iter().map(String::as_str));
+                break;
             }
             _ => positional.push(a),
         }
@@ -1203,26 +1327,46 @@ fn run_type_focused(opts: &Opts, text: &str, flags: &flags::ActionFlags) -> io::
 /// (preferring `id=<full-rid>`, falling back to class + exact text) so the
 /// daemon's narrower parser can still resolve it.
 fn resolve_fill_selector(conn: &mut Conn, sel_in: &str, flags: &flags::ActionFlags) -> io::Result<String> {
-    if sel_in.contains('=') {
+    let css = css_selector(sel_in);
+    if css.is_none() && sel_in.contains('=') {
         return Ok(sel_in.to_string());
     }
-    let body = conn.call(flags.dump_wire())?;
-    if errors::parse_err(&body).is_some() {
-        // Couldn't read the tree — fall through and let the daemon error.
-        return Ok(sel_in.to_string());
-    }
-    let text = std::str::from_utf8(&body)
-        .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
-    let dump = json::parse(text)
-        .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
-    let roots: Vec<&json::Value> = json::app_roots(&dump).into_iter().rev().collect();
-
-    match find_fill_target(&roots, sel_in) {
-        Some(node) => Ok(node_to_daemon_selector(node)),
-        None => Err(io::Error::other(format!(
-            "fill: no input widget matched {sel_in:?} — pass an explicit \
-             selector (`id=...` or `class=EditText text~=...`)"
-        ))),
+    // The field may still be on its way in (a search view opening), so
+    // look until the wait budget runs out, as `tap` and `wait` do.
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(flags.timeout_ms.unwrap_or(10_000));
+    loop {
+        let body = conn.call(flags.dump_wire())?;
+        if errors::parse_err(&body).is_some() {
+            // Couldn't read the tree — fall through and let the daemon error.
+            return Ok(sel_in.to_string());
+        }
+        let text = std::str::from_utf8(&body)
+            .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
+        let dump = json::parse(text)
+            .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
+        let roots: Vec<&json::Value> = json::app_roots(&dump).into_iter().rev().collect();
+        let found = match &css {
+            Some(sels) => {
+                let ctx = selector::MatchCtx::from_roots(roots.clone());
+                let mut matches = selector::find_all_with(&ctx, sels);
+                selector::apply_filters(&mut matches, flags);
+                // An input widget among the matches wins; else the first match.
+                matches.iter().find(|n| is_input_widget(n)).or(matches.first()).map(|n| node_to_daemon_selector(n))
+            }
+            None => find_fill_target(&roots, sel_in).map(node_to_daemon_selector),
+        };
+        if let Some(sel) = found {
+            return Ok(sel);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::other(if css.is_some() {
+                format!("fill: no node matched {sel_in:?}")
+            } else {
+                format!("fill: no input widget matched {sel_in:?} — pass a selector                          (`#id`, `EditText[hint~=...]`) or daemon grammar (`id=...`)")
+            }));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
     }
 }
 
@@ -1362,27 +1506,78 @@ fn run_type_into(
 ) -> io::Result<()> {
     let reporter = output::Reporter::new(flags.out(opts.out_fmt));
     let mut conn = Conn::connect(&opts.host, opts.port)?;
-    // Selectors with no `=` are free-text queries: look up the best
-    // matching EditText in the live dump and rebuild a daemon-grammar
-    // selector for it. Mirrors `hs tap "TEXT"`.
-    let resolved = resolve_fill_selector(&mut conn, selector, flags)?;
+    fill_into(&mut conn, &reporter, selector, text, flags)
+}
+
+/// `hs fill SELECTOR TEXT`: ACTION_SET_TEXT on the matched field. Some
+/// fields refuse it (a SearchView's EditText, say); then the field is
+/// clicked to focus it and the text goes in as keystrokes instead.
+fn fill_into(
+    conn: &mut Conn, reporter: &output::Reporter, selector: &str, text: &str, flags: &flags::ActionFlags,
+) -> io::Result<()> {
+    // Free-text and CSS-like selectors are resolved against the live dump
+    // into a daemon-grammar selector. Mirrors `hs tap "TEXT"`.
+    let resolved = resolve_fill_selector(conn, selector, flags)?;
     let mut attempts = flags.total_attempts();
     loop {
         // Daemon wire command: node_set_text <selector> value="..."
         let body = conn.call(&format!("node_set_text {resolved} value={text:?}"))?;
+        let mut method = "set_text";
+        let body = match errors::parse_err(&body) {
+            None => body,
+            Some(e) if e.detail.contains("set_text-rejected") => {
+                // Usually the field isn't focused or ready yet (a search view
+                // still opening): focus it, let it settle, and set it again.
+                let _ = conn.call(&format!("node_click {resolved}"))?;
+                conn.call("wait_for_idle idle_ms=300 timeout_ms=2000")?;
+                let mut again = None;
+                for _ in 0..10 {
+                    let r = conn.call(&format!("node_set_text {resolved} value={text:?}"))?;
+                    if errors::parse_err(&r).is_none() {
+                        again = Some(r);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                if let Some(r) = again {
+                    method = "set_text after click";
+                    r
+                } else if text.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+                    method = "keys";
+                    conn.call(&format!("text {text}"))?
+                } else {
+                    // The virtual key map has no keys for Hangul, CJK, emoji, …
+                    method = "paste";
+                    let set = conn.call(&format!("clip_set {text}"))?;
+                    if errors::parse_err(&set).is_some() {
+                        return Err(reporter.fail("fill", e));
+                    }
+                    conn.call("paste")?
+                }
+            }
+            Some(_) => body,
+        };
         if let Some(e) = errors::parse_err(&body) {
             attempts = attempts.saturating_sub(1);
             if attempts > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(flags.retry_delay_ms));
                 continue;
             }
-            return Err(reporter.fail("type", e));
+            return Err(reporter.fail("fill", e));
         }
-        return reporter.ok("type", String::from_utf8_lossy(&body).trim_end(),
+        let human = String::from_utf8_lossy(&body);
+        let human = match method {
+            "set_text after click" => format!("{} (after focusing the field)", human.trim_end()),
+            "keys" => format!("{} (set_text refused; typed after a click)", human.trim_end()),
+            "paste" => format!("{} (set_text refused; pasted after a click)", human.trim_end()),
+            _ => human.trim_end().to_string(),
+        };
+        return reporter.ok("fill", &human,
             json_out::Obj::new()
                 .s("selector", &resolved)
                 .s("query", selector)
-                .s("text", text));
+                .s("text", text)
+                .s("method", method));
     }
 }
 
@@ -1523,6 +1718,9 @@ fn run_wait(
     }
     let mut conn = Conn::connect(host, port)?;
     let timeout_ms = f.timeout_ms.unwrap_or(10_000);
+    if let Some(sels) = css_selector(spec) {
+        return run_wait_selector(&mut conn, &reporter, spec, &sels, f, timeout_ms);
+    }
     let wire: String = if let Some(rest) = spec.strip_prefix("idle") {
         let rest = rest.trim();
         let idle_ms = if rest.is_empty() {
@@ -1556,6 +1754,52 @@ fn run_wait(
         }
         return reporter.ok("wait", String::from_utf8_lossy(&body).trim_end(),
             json_out::Obj::new().s("spec", spec).n("timeout_ms", timeout_ms as i64));
+    }
+}
+
+/// A `wait` / `fill` argument that reads as a CSS-like selector rather than text: `#id`, an
+/// `[attr]` predicate, or a relational / text pseudo-class.
+fn css_selector(spec: &str) -> Option<Vec<selector::Selector>> {
+    const PSEUDOS: [&str; 6] = [":has-text(", ":text-is(", ":in(", ":below(", ":right-of(", ":near("];
+    let shaped = spec.starts_with('#') || spec.contains('[') || PSEUDOS.iter().any(|p| spec.contains(p));
+    shaped.then(|| selector::Selector::parse(spec).ok()).flatten()
+}
+
+/// `hs wait SELECTOR` — poll the app's windows until a node matches.
+fn run_wait_selector(
+    conn: &mut Conn,
+    reporter: &output::Reporter,
+    spec: &str,
+    sels: &[selector::Selector],
+    f: &flags::ActionFlags,
+    timeout_ms: u64,
+) -> io::Result<()> {
+    let start = std::time::Instant::now();
+    let budget = std::time::Duration::from_millis(timeout_ms * f.total_attempts() as u64);
+    loop {
+        let body = conn.call(f.dump_wire())?;
+        if let Some(e) = errors::parse_err(&body) {
+            return Err(reporter.fail("wait", e));
+        }
+        let text = std::str::from_utf8(&body)
+            .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
+        let dump = json::parse(text)
+            .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
+        let ctx = selector::MatchCtx::from_roots(json::app_roots(&dump).into_iter().rev().collect());
+        let mut matches = selector::find_all_with(&ctx, sels);
+        selector::apply_filters(&mut matches, f);
+        if let Some(n) = matches.first() {
+            let elapsed = start.elapsed().as_millis() as i64;
+            let (l, t, r, b) = selector::bounds(n).unwrap_or((0, 0, 0, 0));
+            let (x, y) = ((l + r) / 2, (t + b) / 2);
+            return reporter.ok("wait", &format!("ok x={x} y={y} elapsed={elapsed}"),
+                json_out::Obj::new().s("spec", spec).n("x", x).n("y", y).n("elapsed_ms", elapsed));
+        }
+        if start.elapsed() >= budget {
+            return Err(reporter.fail("wait", errors::ErrInfo::new(
+                errors::ErrCode::Timeout, format!("wait_for_selector:{spec}"))));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
     }
 }
 
@@ -1748,16 +1992,7 @@ pub(crate) fn dispatch_session_verb(
         Cmd::TypeInto { selector, text, mut flags } => {
             merge_session_defaults(&mut flags, sess);
             let reporter = output::Reporter::new(flags.out(sess.default_out));
-            let resolved = resolve_fill_selector(&mut sess.conn, &selector, &flags)?;
-            let body = sess.conn.call(&format!("node_set_text {resolved} value={text:?}"))?;
-            if let Some(e) = errors::parse_err(&body) {
-                return Err(reporter.fail("type", e));
-            }
-            reporter.ok("type", String::from_utf8_lossy(&body).trim_end(),
-                json_out::Obj::new()
-                    .s("selector", &resolved)
-                    .s("query", &selector)
-                    .s("text", &text))
+            fill_into(&mut sess.conn, &reporter, &selector, &text, &flags)
         }
         Cmd::Input(wire) => {
             let body = sess.conn.call(&wire)?;
@@ -2539,44 +2774,68 @@ fn try_auto_use(port: u16) -> Result<(), String> {
 
 #[cfg(test)]
 mod parse_logs_tests {
-    use super::{adb, parse_logs, Cmd};
+    use super::{adb, logcat_regex, parse_logs, Cmd};
 
-    fn args(v: &[&str]) -> (Option<String>, Vec<String>) {
-        full(v).0
-    }
-
-    fn full(v: &[&str]) -> ((Option<String>, Vec<String>), Option<usize>) {
+    fn q(v: &[&str]) -> adb::LogcatQuery {
         match parse_logs(v).unwrap() {
-            Cmd::Adb(adb::Cmd::Logcat(a)) => ((None, a), None),
-            Cmd::Adb(adb::Cmd::LogcatFiltered { pkg, args, tail }) => ((pkg, args), tail),
+            Cmd::Adb(adb::Cmd::Logcat(q)) => q,
             other => panic!("unexpected {other:?}"),
         }
     }
 
     #[test]
     fn defaults_and_filters() {
-        assert_eq!(args(&[]).1, ["-d", "-t", "100"]);
+        // Unfiltered: logcat's -t, and the host tail drops the buffer banners.
+        let d = q(&[]);
+        assert_eq!((d.args.as_slice(), d.tail), (&["-d", "-t", "100"].map(String::from)[..], Some(100)));
         // Filters: no logcat -t (it counts before filtering); the host tails.
-        assert_eq!(full(&["--level", "warn"]), ((None, vec!["-d".into(), "*:W".into()]), Some(100)));
+        assert_eq!(q(&["--level", "warn"]).args, ["-d", "*:W"]);
         assert_eq!(
-            args(&["--tag", "ActivityManager", "--tag", "hsd:D", "--level", "I"]).1,
+            q(&["--tag", "ActivityManager", "--tag", "hsd:D", "--level", "I"]).args,
             ["-d", "ActivityManager:I", "hsd:D", "*:S"]
         );
-        assert_eq!(full(&["--crash", "-t", "20", "--grep", "FATAL"]).0 .1, ["-b", "crash", "-d", "-e", "FATAL"]);
-        assert_eq!(full(&["--crash", "-t", "20", "--grep", "FATAL"]).1, Some(20));
-        assert_eq!(args(&["--crash", "-t", "20"]).1, ["-b", "crash", "-d", "-t", "20"]);
-        assert_eq!(args(&["--clear", "--crash"]).1, ["-b", "crash", "-c"]);
-        assert!(args(&["--follow"]).1.is_empty());
-        let (pkg, a) = args(&["--pkg", "com.android.settings"]);
-        assert_eq!((pkg.as_deref(), a.as_slice()), (Some("com.android.settings"), &["-d", "-t", "100"].map(String::from)[..]));
+        let c = q(&["--crash", "-t", "20", "--grep", "FATAL"]);
+        assert_eq!((c.args.as_slice(), c.tail), (&["-b", "crash", "-d", "-e", "FATAL"].map(String::from)[..], Some(20)));
+        assert_eq!(q(&["--crash", "-t", "20"]).args, ["-b", "crash", "-d", "-t", "20"]);
+        assert_eq!(q(&["--clear", "--crash"]).args, ["-b", "crash", "-c"]);
+        let f = q(&["--follow", "--exclude", "chatty"]);
+        assert_eq!((f.args.len(), f.tail, f.exclude.as_slice()), (0, None, &["chatty".to_string()][..]));
+        let p = q(&["--pkg", "com.android.settings"]);
+        assert_eq!((p.pkg.as_deref(), p.args.as_slice()), (Some("com.android.settings"), &["-d", "-t", "100"].map(String::from)[..]));
+    }
+
+    #[test]
+    fn host_side_options() {
+        // --exclude and --since turn logcat's -t off; the host keeps the tail.
+        assert_eq!(q(&["--exclude", "frozen", "-t", "5"]).args, ["-d"]);
+        let s = q(&["--since", "5m"]);
+        assert_eq!((s.args.as_slice(), s.since_secs), (&["-d".to_string()][..], Some(300)));
+        assert_eq!(q(&["--pid", "744", "-v", "brief", "-v", "uid"]).args,
+            ["--pid=744", "-v", "brief", "-v", "uid", "-d", "-t", "100"]);
+        assert_eq!(q(&["--", "-s", "PackageManager"]).args, ["-d", "-s", "PackageManager"]);
+    }
+
+    #[test]
+    fn regex_for_logcat() {
+        let r = |v: &[&str], ic| logcat_regex(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>(), ic);
+        assert_eq!(r(&["Not removing"], false), r"Not\x20removing");
+        assert_eq!(r(&["a b", "c"], false), r"(?:a\x20b)|(?:c)");
+        assert_eq!(r(&["Ab1"], true), "[Aa][bB]1");
+        // Escapes and class ranges stay as written; lone class letters gain a case.
+        assert_eq!(r(&[r"\x41\d[a-z_q]"], true), r"\x41\d[a-z_qQ]");
     }
 
     #[test]
     fn rejects_bad_input() {
         assert!(parse_logs(&["--level", "loud"]).is_err());
-        assert!(parse_logs(&["--grep", "two words"]).is_err());
+        assert!(parse_logs(&["--tag", "two words"]).is_err());
         assert!(parse_logs(&["--tag"]).is_err());
         assert!(parse_logs(&["--bogus"]).is_err());
+        assert!(parse_logs(&["--since", "soon"]).is_err());
+        assert!(parse_logs(&["--format", "fancy"]).is_err());
+        assert!(parse_logs(&["--pkg", "a.b", "--pid", "1"]).is_err());
+        assert!(parse_logs(&["--", "two words"]).is_err());
+        assert!(parse_logs(&["--grep", "two words"]).is_ok());
     }
 }
 

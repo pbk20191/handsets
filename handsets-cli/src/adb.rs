@@ -24,16 +24,43 @@ pub(crate) enum Cmd {
     AmForceStop(String),
     GetProp(String),
     SetProp(String, String),
-    Logcat(Vec<String>),
-    /// logcat with `hs logs` filters: `pkg` becomes `--pid=` (resolved on the
-    /// device); `tail` keeps the last N lines on the host, since logcat's own
-    /// `-t` counts lines before its priority / tag / regex filters.
-    LogcatFiltered { pkg: Option<String>, args: Vec<String>, tail: Option<usize> },
+    Logcat(LogcatQuery),
     SettingsGet { namespace: String, key: String },
     SettingsPut { namespace: String, key: String, value: String },
     Shell(Vec<String>),
     Monitor,
     State(String),
+}
+
+/// `hs logs`: logcat's own argv plus the parts `hs` does on either side of it.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct LogcatQuery {
+    /// logcat argv (buffers, -d / -t, -v, -e, filter specs, raw extras).
+    pub args: Vec<String>,
+    /// Becomes `--pid=` for the package's main process, resolved on the device.
+    pub pkg: Option<String>,
+    /// Becomes `-T <epoch>`: this many seconds back on the device's clock.
+    pub since_secs: Option<u64>,
+    /// Keep the last N lines on the host. logcat's own `-t` counts lines
+    /// before its priority / tag / regex filters, and before `exclude`.
+    pub tail: Option<usize>,
+    /// Drop lines containing any of these (host side).
+    pub exclude: Vec<String>,
+    pub ignore_case: bool,
+}
+
+impl LogcatQuery {
+    fn keeps(&self, line: &str) -> bool {
+        if line.starts_with("--------- beginning of") {
+            return false;
+        }
+        if self.ignore_case {
+            let low = line.to_lowercase();
+            !self.exclude.iter().any(|x| low.contains(&x.to_lowercase()))
+        } else {
+            !self.exclude.iter().any(|x| line.contains(x.as_str()))
+        }
+    }
 }
 
 // ---------- parsers ----------
@@ -84,34 +111,7 @@ pub(crate) fn run(host: &str, port: u16, cmd: &Cmd) -> io::Result<()> {
             do_install_multi(&mut conn, apks, *reinstall, *grant),
         Cmd::GetProp(k) => text_call(&mut conn, &format!("getprop {k}")),
         Cmd::SetProp(k, v) => text_call(&mut conn, &format!("setprop {k} {v}")),
-        Cmd::Logcat(args) => {
-            let mut wire = String::from("logcat");
-            for a in args { wire.push(' '); wire.push_str(a); }
-            stream_call(&mut conn, &wire)
-        }
-        Cmd::LogcatFiltered { pkg, args, tail } => {
-            let mut wire = String::from("logcat");
-            if let Some(pkg) = pkg {
-                let pids = shell_capture(&mut conn, &format!("shell pidof {pkg}"))
-                    .map_err(|_| io::Error::other(format!("{pkg} is not running")))?;
-                // pidof lists every process of the package; the main one is first.
-                let pid = pids.split_whitespace().next()
-                    .ok_or_else(|| io::Error::other(format!("{pkg} is not running")))?;
-                wire.push_str(&format!(" --pid={pid}"));
-            }
-            for a in args { wire.push(' '); wire.push_str(a); }
-            let Some(n) = *tail else { return stream_call(&mut conn, &wire) };
-            conn.send_cmd(&wire)?;
-            let mut all = Vec::new();
-            conn.recv_chunks_to(&mut all)?;
-            let text = String::from_utf8_lossy(&all);
-            let lines: Vec<&str> = text.lines().filter(|l| !l.starts_with("--------- beginning of")).collect();
-            let mut out = io::stdout().lock();
-            for l in &lines[lines.len().saturating_sub(n)..] {
-                writeln!(out, "{l}")?;
-            }
-            out.flush()
-        }
+        Cmd::Logcat(q) => run_logcat(&mut conn, q),
         Cmd::SettingsGet { namespace, key } =>
             text_call(&mut conn, &format!("settings_get {namespace} {key}")),
         Cmd::SettingsPut { namespace, key, value } =>
@@ -216,6 +216,80 @@ fn parse_exit_trailer(b: &[u8]) -> Option<i32> {
 /// stdout until the 0-length terminator.
 /// Runs a `shell` wire command and returns its stdout; a non-zero exit is
 /// an error.
+fn run_logcat(conn: &mut Conn, q: &LogcatQuery) -> io::Result<()> {
+    let mut wire = String::from("logcat");
+    if let Some(pkg) = &q.pkg {
+        let pids = shell_capture(conn, &format!("shell pidof {pkg}"))
+            .map_err(|_| io::Error::other(format!("{pkg} is not running")))?;
+        // pidof lists every process of the package; the main one is first.
+        let pid = pids.split_whitespace().next()
+            .ok_or_else(|| io::Error::other(format!("{pkg} is not running")))?;
+        wire.push_str(&format!(" --pid={pid}"));
+    }
+    if let Some(secs) = q.since_secs {
+        // The device's clock, not the host's: emulators and phones drift.
+        let now: u64 = shell_capture(conn, "shell date +%s")?.trim().parse()
+            .map_err(|_| io::Error::other("since: could not read the device clock"))?;
+        wire.push_str(&format!(" -T {}.000", now.saturating_sub(secs)));
+    }
+    for a in &q.args { wire.push(' '); wire.push_str(a); }
+    conn.send_cmd(&wire)?;
+    let Some(n) = q.tail else {
+        let mut out = LineFilter { q, out: io::stdout().lock(), partial: Vec::new() };
+        conn.recv_chunks_to(&mut out)?;
+        return out.finish();
+    };
+    let mut all = Vec::new();
+    conn.recv_chunks_to(&mut all)?;
+    let text = String::from_utf8_lossy(&all);
+    let lines: Vec<&str> = text.lines().filter(|l| q.keeps(l)).collect();
+    let mut out = io::stdout().lock();
+    for l in &lines[lines.len().saturating_sub(n)..] {
+        writeln!(out, "{l}")?;
+    }
+    out.flush()
+}
+
+/// Passes whole lines that `LogcatQuery::keeps` through while streaming.
+struct LineFilter<'a, W: Write> {
+    q: &'a LogcatQuery,
+    out: W,
+    partial: Vec<u8>,
+}
+
+impl<W: Write> LineFilter<'_, W> {
+    fn emit(&mut self, line: &[u8]) -> io::Result<()> {
+        if self.q.keeps(String::from_utf8_lossy(line).trim_end()) {
+            self.out.write_all(line)?;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        let rest = std::mem::take(&mut self.partial);
+        if !rest.is_empty() {
+            self.emit(&rest)?;
+        }
+        self.out.flush()
+    }
+}
+
+impl<W: Write> Write for LineFilter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.partial.extend_from_slice(buf);
+        while let Some(i) = self.partial.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.partial.drain(..=i).collect();
+            self.emit(&line)?;
+        }
+        self.out.flush()?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+}
+
 fn shell_capture(conn: &mut Conn, wire: &str) -> io::Result<String> {
     conn.send_cmd(wire)?;
     let mut out = Vec::new();

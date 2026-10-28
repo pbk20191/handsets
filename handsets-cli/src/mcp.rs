@@ -191,12 +191,17 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "logcat",
-            description: "Recent device log lines (logcat), newest last. Filter by app, priority, tags or a pattern; use crash=true for crash stacks.",
+            description: "Recent device log lines (logcat), newest last. Filter by app or pid, priority, tags, a pattern or time; drop noise with exclude; use crash=true for crash stacks.",
             schema: obj(&[
                 r#""package":{"type":"string","description":"Only this app's running process"}"#,
+                r#""pid":{"type":"integer","description":"Only this process id"}"#,
                 r#""level":{"type":"string","enum":["V","D","I","W","E","F"],"description":"Minimum priority"}"#,
                 r#""tags":{"type":"array","items":{"type":"string"},"description":"Only these tags (TAG or TAG:LEVEL)"}"#,
-                r#""grep":{"type":"string","description":"Regex the line must match (one word, no spaces)"}"#,
+                r#""grep":{"type":"array","items":{"type":"string"},"description":"Regexes (ECMAScript); a line must match one of them"}"#,
+                r#""exclude":{"type":"array","items":{"type":"string"},"description":"Drop lines containing any of these texts"}"#,
+                r#""ignore_case":{"type":"boolean","description":"Case-insensitive grep and exclude"}"#,
+                r#""since":{"type":"string","description":"Only lines from the last N seconds/minutes/hours: 90, 30s, 5m, 2h"}"#,
+                r#""format":{"type":"string","description":"logcat -v output format: brief, threadtime (default), time, tag, raw, long, …"}"#,
                 r#""lines":{"type":"integer","description":"How many lines (default 100)"}"#,
                 r#""crash":{"type":"boolean","description":"Read the crash buffer"}"#,
                 r#""clear":{"type":"boolean","description":"Clear the log buffers instead of reading"}"#,
@@ -300,11 +305,27 @@ fn tools_call(params: Option<&Value>, global: &[String]) -> Result<String, (i32,
             if let Some(l) = s("level") {
                 argv.extend(["--level".into(), l]);
             }
-            for t in json::obj_get(args, "tags").and_then(json::as_arr).unwrap_or(&[]).iter().filter_map(json::as_str) {
-                argv.extend(["--tag".into(), t.to_string()]);
+            if let Some(p) = n("pid") {
+                argv.extend(["--pid".into(), p.to_string()]);
             }
-            if let Some(g) = s("grep") {
-                argv.extend(["--grep".into(), g]);
+            for (key, flag) in [("tags", "--tag"), ("grep", "--grep"), ("exclude", "--exclude")] {
+                // A lone string is accepted too.
+                let v = json::obj_get(args, key);
+                let items = v.and_then(json::as_arr).map(|a| a.iter().filter_map(json::as_str).collect())
+                    .or_else(|| v.and_then(json::as_str).map(|s| vec![s]))
+                    .unwrap_or_default();
+                for item in items {
+                    argv.extend([flag.into(), item.to_string()]);
+                }
+            }
+            if b("ignore_case") {
+                argv.push("--ignore-case".into());
+            }
+            if let Some(v) = s("since") {
+                argv.extend(["--since".into(), v]);
+            }
+            if let Some(v) = s("format") {
+                argv.extend(["--format".into(), v]);
             }
             if let Some(n) = n("lines") {
                 argv.extend(["--tail".into(), n.to_string()]);
