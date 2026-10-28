@@ -52,7 +52,7 @@
     { "name": "wait", "description": "Wait until text or a selector appears." },
     { "name": "open", "description": "Launch an app by package, activity or label." },
     { "name": "close", "description": "Force-stop an app." },
-    { "name": "logcat", "description": "Recent device log lines, filtered by app, priority, tag or pattern." },
+    { "name": "logcat", "description": "Recent device log lines, filtered by app, priority, tag, pattern or time, with noise excluded." },
     { "name": "info", "description": "Device and daemon info." },
     { "name": "drop", "description": "Stop the on-device daemon." },
     { "name": "hs", "description": "Run any other hs CLI verb." }

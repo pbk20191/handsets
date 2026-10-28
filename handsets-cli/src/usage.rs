@@ -16,7 +16,7 @@ The agent loop:
   hs tap \"Continue\"             find by text, tap centre
   hs tap #back_btn             find by resource-id, tap centre
   hs type TEXT                 type into the focused field
-  hs wait \"Welcome\"             wait for that text to appear
+  hs wait \"Welcome\"             wait for that text (or a selector: #id)
   hs drop                      tear the daemon down
 
 Selectors (CSS-like, Playwright-inspired):
@@ -52,10 +52,10 @@ More verbs:
   Input       hs tap X Y | hs swipe DIR | hs go back|home|recents|…
               hs type TEXT                  keystrokes to focused field
               hs fill SELECTOR TEXT         atomic ACTION_SET_TEXT
-                                            SELECTOR is daemon-grammar
-                                            (`id=…`, `class=EditText text~=…`)
-                                            or a free-text query that picks
-                                            the best-matching EditText
+                                            SELECTOR is CSS-like (`#email`,
+                                            `EditText[hint~=Mail]`), daemon
+                                            grammar (`id=…`), or a free-text
+                                            query that picks the best EditText
               hs submit | hs paste
   Lifecycle   hs open PKG[/.Class] | hs open \"App Name\" | hs close PKG
               hs install APK… | hs uninstall PKG
@@ -64,8 +64,10 @@ More verbs:
   Data        hs sms | hs calls | hs contacts | hs calendar | hs notif | hs clip
               hs location          last-known GPS fix per provider [--json]
   System      hs prop [KEY [VAL]] | hs settings [NS [KEY [VAL]]]
-  Diagnostics hs logs [--tail N | --follow] [--pkg PKG] [--level E] [--tag T[:L]]…
-                      [--grep RE] [--crash | --buffer B] [--clear]  | hs events
+  Diagnostics hs logs [--tail N | --follow] [--pkg PKG | --pid N] [--level E]
+                      [--tag T[:L]]… [--grep RE]… [--exclude TEXT]… [-i]
+                      [--since 5m] [--format brief] [--crash | --buffer B]
+                      [--clear] [-- LOGCAT ARGS…]  | hs events
   Scripting   hs shell                 interactive REPL (also batch via stdin)
               hs run [SCRIPT|-]        batch CLI verbs over one warm socket
               hs init [PATH]           scaffold a starter script

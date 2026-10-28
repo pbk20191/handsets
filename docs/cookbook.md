@@ -46,7 +46,7 @@ hs use
 hs wait idle 200ms
 
 hs tap   "Sign in"              --visible --unique --timeout 5s
-hs fill  'EditText[resource-id=com.example:id/email]'    "you@example.com"
+hs fill  '#email'                'you@example.com'   # same as [id=email]
 hs fill  'EditText[resource-id=com.example:id/password]' "hunter2"
 hs submit
 hs wait  "Dashboard"            --timeout 15s
@@ -61,6 +61,11 @@ the relational pseudo-classes:
 hs fill 'EditText:below(TextView[text=Email])'    "you@example.com"
 hs fill 'EditText:below(TextView[text=Password])' "hunter2"
 ```
+
+`fill` waits for its field like `tap` does. Some fields refuse set-text
+while they are still opening (a search view, for one); `fill` then clicks
+the field, lets it settle and sets it again, and as a last resort types
+the text (ASCII) or pastes it (anything else).
 
 If the field already has focus and you want the real keyboard path rather
 than atomic set-text, use `type`:
@@ -80,7 +85,12 @@ hs wait "Welcome"         # block until that text appears anywhere
 hs wait com.foo           # block until that package is in the foreground
 hs wait com.foo/.MainAct  # block on a specific activity
 hs wait 500ms             # client-side sleep (no daemon hop)
+hs wait '#results'        # block until a node matches a selector
+hs wait 'Button[text="OK"]'
 ```
+
+Text waits match case-sensitively ("Battery Saver" isn't "Battery saver");
+copy the label from `hs ui`.
 
 All forms honour `--timeout`. The default is 10 s — bump it for slow
 launches. Prefer these waits over shell `sleep`; a fixed sleep is both
@@ -131,7 +141,11 @@ use that when you need to dispatch on the long tail.
 
 ## Scrolling until something is visible
 
-A 12-attempt scroll-then-tap loop in five lines:
+When the match is in the tree but below (or above) the screen, `hs tap`
+swipes toward it and looks again, up to six times. Long lists only keep
+the rows near the screen in the tree, though (a RecyclerView recycles the
+rest), so for a row far down, scroll first. A 12-attempt scroll-then-tap
+loop in five lines:
 
 ```bash
 for _ in $(seq 1 12); do

@@ -57,13 +57,16 @@ pub fn run_session(
     let flags = sess.defaults.clone();
     let total = flags.total_attempts();
     let mut last_err: Option<ErrInfo> = None;
-    for attempt in 0..total {
-        if attempt > 0 {
+    let mut scrolls = 0;
+    let mut attempt = 0;
+    while attempt < total {
+        if attempt > 0 && scrolls == 0 {
             std::thread::sleep(Duration::from_millis(flags.retry_delay_ms));
         }
-        if flags.fresh || attempt > 0 {
+        if flags.fresh || attempt > 0 || scrolls > 0 {
             sess.invalidate_dump();
         }
+        attempt += 1;
         let hits = match sess.with_dump(|tree| {
             // The app's windows, so a dialog or popup over the activity
             // is searched too (and wins ties — see find_in).
@@ -123,6 +126,14 @@ pub fn run_session(
                 if !acked {
                     let ack = sess.conn.call(&format!("tap x={cx} y={cy}"))?;
                     if let Some(e) = parse_err(&ack) {
+                        // Below or above the fold: scroll toward it and look again.
+                        if let Some(dir) = scroll_toward(&e.detail).filter(|_| scrolls < MAX_SCROLLS) {
+                            scrolls += 1;
+                            attempt -= 1;
+                            sess.conn.call(&format!("swipe_dir {dir}"))?;
+                            sess.conn.call("wait_for_idle idle_ms=200 timeout_ms=2000")?;
+                            continue;
+                        }
                         last_err = Some(e);
                         continue;
                     }
@@ -146,6 +157,21 @@ pub fn run_session(
     }
     Err(reporter.fail(verb, last_err.unwrap_or_else(|| ErrInfo::new(
         ErrCode::NotFound, format!("no a11y node matched \"{query}\"")))))
+}
+
+/// Swipes `tap` makes to bring an off-screen match into view.
+const MAX_SCROLLS: u32 = 6;
+
+/// The swipe that scrolls an `OFF_SCREEN:x=… y=… display=WxH` point into
+/// view: the finger moves away from it, as a person would scroll.
+fn scroll_toward(detail: &str) -> Option<&'static str> {
+    let rest = detail.strip_prefix("OFF_SCREEN:")?;
+    let field = |k: &str| rest.split_whitespace().find_map(|f| f.strip_prefix(k));
+    let x: i64 = field("x=")?.parse().ok()?;
+    let y: i64 = field("y=")?.parse().ok()?;
+    let (w, h) = field("display=")?.split_once('x')?;
+    let (w, h): (i64, i64) = (w.parse().ok()?, h.parse().ok()?);
+    Some(if y >= h { "up" } else if y < 0 { "down" } else if x >= w { "left" } else if x < 0 { "right" } else { return None })
 }
 
 /// Build the daemon selector for `node_click` against a matched hit. Adds
@@ -464,6 +490,16 @@ mod tests {
 
     /// `hs tap "OK"` with a dialog over the activity must hit the dialog,
     /// not the activity's own "OK" underneath it.
+    #[test]
+    fn scrolls_toward_an_off_screen_point() {
+        use super::scroll_toward;
+        assert_eq!(scroll_toward("OFF_SCREEN:x=499 y=2625 display=1080x2400"), Some("up"));
+        assert_eq!(scroll_toward("OFF_SCREEN:x=499 y=-40 display=1080x2400"), Some("down"));
+        assert_eq!(scroll_toward("OFF_SCREEN:x=1200 y=10 display=1080x2400"), Some("left"));
+        assert_eq!(scroll_toward("OFF_SCREEN:x=5 y=5 display=1080x2400"), None);
+        assert_eq!(scroll_toward("click-rejected"), None);
+    }
+
     #[test]
     fn popup_window_wins_over_the_activity_below() {
         let dump = json::parse(r#"{"windows":[
