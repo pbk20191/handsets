@@ -133,9 +133,12 @@ internal class Gestures(private val h: Server.Handlers) {
     private suspend fun waitForIdle(cmd: String): ByteArray {
         val idle = Server.longArg(cmd, "idle_ms", Server.DEFAULT_IDLE_MS)
         val timeout = Server.longArg(cmd, "timeout_ms", Server.DEFAULT_TIMEOUT_MS)
-        val elapsed = waits.awaitIdle(idle, timeout)
-        if (elapsed < 0) return Server.errBytes("TIMEOUT:wait_for_idle:idle_ms=$idle timeout_ms=$timeout")
-        return utf8("ok elapsed=$elapsed")
+        val start = System.currentTimeMillis()
+        val quiet = waits.awaitIdle(idle, timeout)
+        if (quiet < 0) return Server.errBytes("TIMEOUT:wait_for_idle:idle_ms=$idle timeout_ms=$timeout")
+        // elapsed is the time spent waiting, as for the other waits; idle is
+        // how long the screen had been quiet (often far longer than idle_ms).
+        return utf8("ok elapsed=${System.currentTimeMillis() - start} idle=$quiet")
     }
 
     private suspend fun waitForText(cmd: String): ByteArray {
@@ -180,12 +183,14 @@ internal class Gestures(private val h: Server.Handlers) {
         val idle = Server.longArg(cmd, "idle_ms", Server.DEFAULT_IDLE_MS)
         val timeout = Server.longArg(cmd, "timeout_ms", Server.DEFAULT_TAP_TIMEOUT_MS)
         waits.touch()   // measure idle from after the tap
+        val start = System.currentTimeMillis()
         tap(x, y)
-        val el = waits.awaitIdle(idle, timeout)
+        val quiet = waits.awaitIdle(idle, timeout)
         if (!dump) {
-            return if (el < 0) Server.errBytes("tap-then-timeout") else utf8("ok elapsed=$el")
+            return if (quiet < 0) Server.errBytes("tap-then-timeout")
+            else utf8("ok elapsed=${System.currentTimeMillis() - start} idle=$quiet")
         }
-        if (el < 0) return Server.errBytes("TIMEOUT:tap_and_dump")
+        if (quiet < 0) return Server.errBytes("TIMEOUT:tap_and_dump")
         return try {
             utf8(h.dumper.dumpActive())
         } catch (t: Throwable) {

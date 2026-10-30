@@ -64,7 +64,9 @@ text        STRING                                       KeyEvents to the focuse
 ## Waits — event-driven, no polling
 
 ```
-wait_for_idle      [idle_ms=200] [timeout_ms=5000]     → ok elapsed=N | ERR:timeout
+wait_for_idle      [idle_ms=200] [timeout_ms=5000]     → ok elapsed=N idle=M | ERR:timeout
+                                                         elapsed: ms waited; idle: ms the
+                                                         screen had been quiet by then
 wait_for_text      text="…" [match=sub|exact] [scope=all|app|active] [timeout_ms=5000]
                                                        → ok x=… y=… w=… h=… elapsed=…
 wait_for_activity  n=COMPONENT [timeout_ms=5000]       prefix-matches the package
@@ -77,7 +79,7 @@ Tap then await the UI to settle — saves a wire round-trip versus
 
 ```
 tap_and_dump   x=NUM y=NUM [idle_ms=200] [timeout_ms=2000]   → dump_active JSON
-tap_and_settle x=NUM y=NUM [idle_ms=200] [timeout_ms=2000]   → ok elapsed=N
+tap_and_settle x=NUM y=NUM [idle_ms=200] [timeout_ms=2000]   → ok elapsed=N idle=M
 ```
 
 ## State — push-mirrored snapshot
