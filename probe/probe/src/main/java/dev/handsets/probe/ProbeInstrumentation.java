@@ -6,14 +6,22 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Looper;
+import android.os.MessageQueue;
+import android.os.StrictMode;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.FileDescriptor;
+import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -21,8 +29,14 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+
+import static android.os.MessageQueue.OnFileDescriptorEventListener.EVENT_ERROR;
+import static android.os.MessageQueue.OnFileDescriptorEventListener.EVENT_INPUT;
+import static android.os.MessageQueue.OnFileDescriptorEventListener.EVENT_OUTPUT;
 
 /**
  * Started with {@code am instrument -w dev.handsets.probe/.ProbeInstrumentation}.
@@ -39,18 +53,32 @@ import java.util.Map;
  *   quit               end the instrumentation (the target app goes with it)
  * </pre>
  *
+ * All socket IO is event-driven on the main looper, where every command has
+ * to run anyway (Compose state is main-thread only): no thread per client,
+ * no hop per command, and any number of clients at once.
+ *
  * For an R8-minified target, pass the obfuscated names from its mapping.txt
  * ({@code tools/probe_names.py}) as {@code -e names "key=kind:name;…"}.
  */
 public final class ProbeInstrumentation extends Instrumentation {
     private static final String TAG = "hs-probe";
     private static final String SOCKET = "hs-probe";
+    /**
+     * Bytes written per EVENT_OUTPUT where a client fd stays blocking (API
+     * 28–29: fcntlInt is public from 30). A unix socket only reports
+     * writable with about half its buffer free, so a write this size never
+     * waits.
+     */
+    private static final int WRITE_CHUNK = 4096;
 
     /** Logical member → "m:name" | "m3:name" | "f:name" | "c:class", from the target's mapping. */
     private static final Map<String, String> NAMES = new HashMap<>();
 
     private volatile Activity resumed;
-    private volatile boolean running = true;
+    // Main-thread state below.
+    private LocalServerSocket server;
+    private final Set<Client> clients = new HashSet<>();
+    private boolean quitting;
 
     @Override
     public void onCreate(Bundle arguments) {
@@ -71,6 +99,10 @@ public final class ProbeInstrumentation extends Instrumentation {
         resumed = activity;
     }
 
+    /**
+     * On the instrumentation thread: launch the target, open the socket and
+     * hand it to the main looper. The instrumentation lives on until finish().
+     */
     @Override
     public void onStart() {
         Context target = getTargetContext();
@@ -81,22 +113,23 @@ public final class ProbeInstrumentation extends Instrumentation {
         }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
         resumed = startActivitySync(launch);
-        try (LocalServerSocket server = new LocalServerSocket(SOCKET)) {
-            Bundle ready = new Bundle();
-            ready.putString("probe", "ready on localabstract:" + SOCKET + " (" + NAMES.size() + " mapped names)");
-            sendStatus(1, ready);
-            Log.i(TAG, "ready on localabstract:" + SOCKET);
-            while (running) {
-                try (LocalSocket s = server.accept()) {
-                    serve(s);
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "server failed", e);
-            end("server failed: " + e);
+        try {
+            server = new LocalServerSocket(SOCKET);
+        } catch (IOException e) {
+            Log.e(TAG, "cannot listen", e);
+            end("cannot listen on localabstract:" + SOCKET + ": " + e);
             return;
         }
-        end("quit");
+        queue().addOnFileDescriptorEventListener(server.getFileDescriptor(), EVENT_INPUT | EVENT_ERROR,
+            (fd, events) -> onAccept(events));
+        Bundle ready = new Bundle();
+        ready.putString("probe", "ready on localabstract:" + SOCKET + " (" + NAMES.size() + " mapped names)");
+        sendStatus(1, ready);
+        Log.i(TAG, "ready on localabstract:" + SOCKET);
+    }
+
+    private static MessageQueue queue() {
+        return Looper.getMainLooper().getQueue();
     }
 
     private void end(String why) {
@@ -105,21 +138,169 @@ public final class ProbeInstrumentation extends Instrumentation {
         finish(Activity.RESULT_OK, b);
     }
 
-    private void serve(LocalSocket s) throws Exception {
-        BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
-        OutputStream out = s.getOutputStream();
-        String line;
-        while ((line = in.readLine()) != null) {
-            String reply;
-            try {
-                reply = handle(line.trim());
-            } catch (Throwable t) {
-                Throwable cause = t.getCause() != null ? t.getCause() : t;
-                reply = "ERR:" + cause;
+    /** The listening socket is readable: one connection waits, so accept() returns at once. */
+    private int onAccept(int events) {
+        if ((events & EVENT_ERROR) != 0) {
+            shutdown("listening socket failed");
+            return 0;
+        }
+        StrictMode.ThreadPolicy policy = permitSocketIo();
+        try {
+            Client c = new Client(server.accept());
+            clients.add(c);
+            queue().addOnFileDescriptorEventListener(c.fd, EVENT_INPUT | EVENT_ERROR, c);
+        } catch (IOException e) {
+            Log.w(TAG, "accept failed", e);
+        } finally {
+            StrictMode.setThreadPolicy(policy);
+        }
+        return EVENT_INPUT | EVENT_ERROR;
+    }
+
+    /**
+     * The target app's thread policy kills it for socket calls on the main
+     * thread. These calls only run once the looper reports the fd ready, so
+     * they don't wait; lift the network check for the call and hand back the
+     * app's own policy to restore.
+     */
+    private static StrictMode.ThreadPolicy permitSocketIo() {
+        StrictMode.ThreadPolicy app = StrictMode.getThreadPolicy();
+        StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder(app).permitNetwork().build());
+        return app;
+    }
+
+    /** After `quit`: once every reply is out, close everything and end. */
+    private void shutdown(String why) {
+        for (Client c : new ArrayList<>(clients)) c.close();
+        if (server != null) {
+            queue().removeOnFileDescriptorEventListener(server.getFileDescriptor());
+            try { server.close(); } catch (IOException ignored) { }
+            server = null;
+        }
+        end(why);
+    }
+
+    /** One connection: lines in, replies queued and written as the socket drains. */
+    private final class Client implements MessageQueue.OnFileDescriptorEventListener {
+        final LocalSocket socket;
+        final FileDescriptor fd;
+        private final ByteArrayOutputStream line = new ByteArrayOutputStream();
+        private final byte[] readBuf = new byte[8192];
+        private byte[] out = new byte[0];
+        private int outPos;
+        /** The peer closed its end; finish sending, then close. */
+        private boolean draining;
+
+        /** O_NONBLOCK set (API 30+, where fcntlInt is public); else the chunked fallback. */
+        private final boolean nonBlocking;
+
+        Client(LocalSocket socket) {
+            this.socket = socket;
+            this.fd = socket.getFileDescriptor();
+            boolean nb = false;
+            if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    int fl = Os.fcntlInt(fd, OsConstants.F_GETFL, 0);
+                    Os.fcntlInt(fd, OsConstants.F_SETFL, fl | OsConstants.O_NONBLOCK);
+                    nb = true;
+                } catch (ErrnoException e) {
+                    Log.w(TAG, "O_NONBLOCK failed; chunked writes", e);
+                }
             }
-            out.write((reply + "\n").getBytes(StandardCharsets.UTF_8));
-            out.flush();
-            if (!running) return;
+            nonBlocking = nb;
+        }
+
+        @Override
+        public int onFileDescriptorEvents(FileDescriptor fd, int events) {
+            StrictMode.ThreadPolicy policy = permitSocketIo();
+            try {
+                if ((events & EVENT_ERROR) != 0) {
+                    close();
+                    return 0;
+                }
+                if ((events & EVENT_INPUT) != 0) readAll();
+                if ((events & EVENT_OUTPUT) != 0) writeSome();
+            } catch (ErrnoException | IOException e) {
+                close();
+                return 0;
+            } finally {
+                StrictMode.setThreadPolicy(policy);
+            }
+            boolean pending = outPos < out.length;
+            if (!pending && quitting) {
+                shutdown("quit");
+                return 0;
+            }
+            if (!pending && draining) {
+                close();
+                return 0;
+            }
+            return (draining ? 0 : EVENT_INPUT) | EVENT_ERROR | (pending ? EVENT_OUTPUT : 0);
+        }
+
+        /** Reads what has arrived (non-blocking: until EAGAIN; else one read) and runs each full line. */
+        private void readAll() throws ErrnoException, InterruptedIOException {
+            while (true) {
+                int n;
+                try {
+                    n = Os.read(fd, readBuf, 0, readBuf.length);
+                } catch (ErrnoException e) {
+                    if (e.errno == OsConstants.EAGAIN) return;
+                    throw e;
+                }
+                if (n <= 0) {
+                    draining = true;
+                    return;
+                }
+                for (int i = 0; i < n; i++) {
+                    if (readBuf[i] != '\n') {
+                        line.write(readBuf[i]);
+                        continue;
+                    }
+                    String cmd = new String(line.toByteArray(), StandardCharsets.UTF_8).trim();
+                    line.reset();
+                    if (!cmd.isEmpty()) enqueue((reply(cmd) + "\n").getBytes(StandardCharsets.UTF_8));
+                }
+                if (!nonBlocking) return;  // a second read could wait
+            }
+        }
+
+        /** Writes as much as the socket takes (non-blocking), or one chunk that cannot wait. */
+        private void writeSome() throws ErrnoException, InterruptedIOException {
+            while (outPos < out.length) {
+                int len = nonBlocking ? out.length - outPos : Math.min(WRITE_CHUNK, out.length - outPos);
+                try {
+                    outPos += Os.write(fd, out, outPos, len);
+                } catch (ErrnoException e) {
+                    if (e.errno == OsConstants.EAGAIN) return;
+                    throw e;
+                }
+                if (!nonBlocking) return;
+            }
+        }
+
+        private void enqueue(byte[] bytes) {
+            byte[] rest = new byte[out.length - outPos + bytes.length];
+            System.arraycopy(out, outPos, rest, 0, out.length - outPos);
+            System.arraycopy(bytes, 0, rest, out.length - outPos, bytes.length);
+            out = rest;
+            outPos = 0;
+        }
+
+        void close() {
+            if (!clients.remove(this)) return;
+            queue().removeOnFileDescriptorEventListener(fd);
+            try { socket.close(); } catch (IOException ignored) { }
+        }
+    }
+
+    /** Runs one command, on the main thread. */
+    private String reply(String line) {
+        try {
+            return handle(line);
+        } catch (Throwable t) {
+            Throwable cause = t.getCause() != null ? t.getCause() : t;
+            return "ERR:" + cause;
         }
     }
 
@@ -127,32 +308,19 @@ public final class ProbeInstrumentation extends Instrumentation {
         String[] parts = line.split(" ", 3);
         switch (parts[0]) {
             case "tree":
-                return onMain(this::dumpTree);
+                return dumpTree();
             case "click":
                 if (parts.length < 2) return "ERR:click needs TAG";
-                return onMain(() -> perform(parts[1], "OnClick", null));
+                return perform(parts[1], "OnClick", null);
             case "settext":
                 if (parts.length < 3) return "ERR:settext needs TAG TEXT";
-                return onMain(() -> perform(parts[1], "SetText", parts[2]));
+                return perform(parts[1], "SetText", parts[2]);
             case "quit":
-                running = false;
+                quitting = true;
                 return "ok";
             default:
                 return "ERR:unknown command " + parts[0];
         }
-    }
-
-    private interface Job { String run() throws Exception; }
-
-    /** Compose state is only safe to touch on the main thread. */
-    private String onMain(Job job) throws Exception {
-        String[] result = new String[1];
-        Exception[] error = new Exception[1];
-        runOnMainSync(() -> {
-            try { result[0] = job.run(); } catch (Exception e) { error[0] = e; }
-        });
-        if (error[0] != null) throw error[0];
-        return result[0];
     }
 
     // ---- reading the tree ----
