@@ -1,0 +1,1817 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A millisecond-latency CLI for driving Android devices. Built for LLM agents and shell scripts.">
+      
+      
+      
+        <link rel="canonical" href="https://handsets.dev/superpowers/specs/2026-10-25-daemon-looper-gradle-design/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+    
+    
+      
+        <title>데몬 단일 루퍼 리팩토링 + Gradle 빌드 전환 — 설계 - Handsets</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  
+  
+  
+  
+  
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="데몬 단일 루퍼 리팩토링 + Gradle 빌드 전환 — 설계 - Handsets">
+  <meta property="og:description" content="A millisecond-latency CLI for driving Android devices. Built for LLM agents and shell scripts.">
+  <meta property="og:url" content="https://handsets.dev/superpowers/specs/2026-10-25-daemon-looper-gradle-design/">
+  <meta property="og:site_name" content="Handsets">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="데몬 단일 루퍼 리팩토링 + Gradle 빌드 전환 — 설계 - Handsets">
+  <meta name="twitter:description" content="A millisecond-latency CLI for driving Android devices. Built for LLM agents and shell scripts.">
+  
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "headline": "\ub370\ubaac \ub2e8\uc77c \ub8e8\ud37c \ub9ac\ud329\ud1a0\ub9c1 + Gradle \ube4c\ub4dc \uc804\ud658 \u2014 \uc124\uacc4",
+    "description": "A millisecond-latency CLI for driving Android devices. Built for LLM agents and shell scripts.",
+    "url": "https://handsets.dev/superpowers/specs/2026-10-25-daemon-looper-gradle-design/",
+    
+    "publisher": {
+      "@type": "Organization",
+      "name": "Handsets",
+      "url": "https://handsets.dev/"
+    }
+  }
+  </script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#gradle" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../../.." title="Handsets" class="md-header__button md-logo" aria-label="Handsets" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Handsets
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              데몬 단일 루퍼 리팩토링 + Gradle 빌드 전환 — 설계
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/pbk20191/handsets" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    pbk20191/handsets
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../../architecture/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Architecture
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../../benchmark/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Benchmark
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../../cookbook/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cookbook
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../../emulator/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Emulators
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../../sharp-edges/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Sharp edges
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../../wire/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Wire reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../../blog/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Blog
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../../.." title="Handsets" class="md-nav__button md-logo" aria-label="Handsets" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Handsets
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/pbk20191/handsets" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    pbk20191/handsets
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../benchmark/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmark
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../cookbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../emulator/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Emulators
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../sharp-edges/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sharp edges
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../wire/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wire reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../../blog/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Blog
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_8" id="__nav_8_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Blog
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_8_2" id="__nav_8_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Categories
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_8_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Categories
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/adb/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ADB
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/android-automation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Android automation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/appium/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Appium
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/comparisons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Comparisons
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/debugging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Debugging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/device-cloud/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Device cloud
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/device-farms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Device farms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/llm-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM agents
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/no-root/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    No root
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/python/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/qa/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    QA
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/rpa/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RPA
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/rust/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rust
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/screenshots/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Screenshots
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/terminal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Terminal
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+    
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../blog/category/uiautomator2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    uiautomator2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. 의도와 이유
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. 목표 / 비목표 / 안티목표
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. 제약
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. 결정된 설계
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. 결정된 설계">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 스레드 모델
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42-io-kotlin" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 이벤트 루프 I/O 계층 (신규, Kotlin)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#43" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.3 블로킹 지점의 재작성
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#44" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.4 언어와 코드 배치
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#45-gradle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.5 Gradle 빌드
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. 검증
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. 구현자 재량으로 남긴 것
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="gradle">데몬 단일 루퍼 리팩토링 + Gradle 빌드 전환 — 설계<a class="headerlink" href="#gradle" title="Permanent link">&para;</a></h1>
+<p>날짜: 2026-10-25 · 대상: <code>src/dev/handsets/daemon/</code> (on-device daemon, <code>hs.jar</code>)</p>
+<h2 id="1">1. 의도와 이유<a class="headerlink" href="#1" title="Permanent link">&para;</a></h2>
+<p>on-device 데몬은 지금 잘 동작하지만, 구조가 "필요할 때마다 스레드 하나"로 자라 왔다.</p>
+<ul>
+<li><code>Server</code>: 블로킹 <code>accept()</code> + 연결당 <code>hs-conn</code> 스레드, 블로킹 <code>DataInputStream/DataOutputStream</code>, 곳곳의 <code>synchronized (out)</code>.</li>
+<li><code>HandlerThread</code> 다수: <code>hs-ua</code>(UiAutomation), <code>State</code>의 <code>hs-state-pkg</code> / <code>hs-state-display</code> / <code>hs-state-cfg</code>, <code>Screenshot</code> 미러마다 <code>hs-mirror-listener-*</code>.</li>
+<li><code>State</code> refresher 스레드(<code>wait/notify</code> + <code>Thread.sleep</code> 디바운스), <code>Main</code>의 warmup 스레드.</li>
+<li><code>Dumpsys</code> / <code>Logcat</code> / <code>ShellExec</code> / <code>Lifecycle</code>의 서브프로세스 리더 스레드.</li>
+<li><code>Streamer</code> / <code>TileStreamer</code> / <code>state_watch</code> 의 연결별 <code>BlockingQueue</code> 루프, <code>WaitRegistry</code>의 <code>lock.wait</code>, <code>LocalIntentSender.await</code> 블로킹.</li>
+</ul>
+<p>사용자가 체감하는 문제는 없다. 동기는 <strong>아키텍처적 불필요함의 제거</strong>다: Android가 원래 제공하는 MainLooper + MessageQueue(epoll) 모델 하나로 이벤트를 모으고, 진짜 CPU 작업(버퍼/이미지 복사, 인코딩, 덤프 직렬화)만 작은 풀로 보낸다.</p>
+<p>동시에, 지금은 IDE 전용인 Gradle 프로젝트를 <strong>실제 <code>hs.jar</code>를 만드는 정식 빌드</strong>로 만든다.</p>
+<h2 id="2">2. 목표 / 비목표 / 안티목표<a class="headerlink" href="#2" title="Permanent link">&para;</a></h2>
+<p><strong>목표</strong>
+- 메인 스레드 하나가 <code>Looper.loop()</code>를 돌고, 모든 I/O·이벤트·타이머가 이 루퍼 위에서 처리된다.
+- <strong>루퍼는 절대 블로킹되지 않는다</strong> (사용자 결정). 오래 기다리는 요청은 모두 suspend/콜백으로 바뀐다.
+- CPU 작업만 작은 고정 크기 풀에서 수행한다.
+- Kotlin + kotlinx-coroutines, <code>Dispatchers.Main</code> 기반 (사용자 결정).
+- Gradle(<code>./gradlew</code>)이 javac/kotlinc → R8 → dex → <code>build/hs.jar</code>까지 만든다.</p>
+<p><strong>비목표</strong>
+- 와이어 프로토콜 변경. <code>docs/wire.md</code>의 모든 verb, 인자, 응답, 프레이밍, 에러 문자열은 <strong>바이트 단위로 유지</strong> (사용자 결정). 호스트 쪽(<code>handsets-cli</code>, <code>handsets-tui</code>, <code>handsets-viewer</code>, <code>bindings/python</code>)은 수정하지 않는다.
+- 새 기능 추가, 성능 튜닝(회귀가 없는 선에서).
+- 모든 Java 파일의 Kotlin 변환.
+- 외부 privileged-process 프레임워크 도입 (예: priv-kit). priv-kit은 설치된 앱(AAR, Compose UI)이 자기 권한 프로세스를 띄우는 Shizuku 계열 구조라, 앱 없이 호스트가 <code>app_process</code> jar를 직접 띄우는 이 데몬과 모델이 다르다. 의존성으로 쓰지 않고 필요하면 아이디어만 참고한다.</p>
+<p><strong>안티목표 (동작해도 실패로 보는 것)</strong>
+- 메인 루퍼에서 binder 장시간 호출, 덤프, 인코딩, <code>Thread.sleep</code>, 블로킹 소켓 I/O가 일어나는 것.
+- 한 클라이언트가 느리거나 멈췄을 때 다른 연결이 지연되는 것.
+- 클라이언트 쪽에서 응답 차이가 관찰되는 것 (<code>hs</code> 명령 결과가 달라짐).
+- <code>tap</code> 등 hot path 지연이 기존보다 눈에 띄게 나빠지는 것.
+- <code>hs.jar</code>가 과도하게 커지는 것 (기준: 기존 대비 +300KB 이내를 목표, 초과 시 보고).</p>
+<h2 id="3">3. 제약<a class="headerlink" href="#3" title="Permanent link">&para;</a></h2>
+<ul>
+<li>실행 환경: <code>CLASSPATH=/data/local/tmp/hs.jar app_process /system/bin dev.handsets.daemon.Main --port=N</code> (shell UID). 엔트리 <code>dev.handsets.daemon.Main.main(String[])</code> 시그니처·클래스명 유지.</li>
+<li>산출물 위치 <code>build/hs.jar</code> 유지 (<code>handsets-cli/src/daemon.rs</code>가 이 경로를 찾고, <code>.github/workflows/release.yml</code>이 업로드).</li>
+<li><code>--min-api 28</code> 유지. Kotlin JVM target은 R8/D8이 desugar 가능한 범위(11 또는 17)로.</li>
+<li>binder 스레드풀은 <code>app_process</code>가 만들므로 제거 대상이 아니다.</li>
+<li>SDK: <code>local.properties</code>의 <code>sdk.dir</code> (현재 <code>E:\packages\Android\Sdk</code>, platforms 36 / 37.0 / 37.2, build-tools 35 / 36).</li>
+<li>작업 시작 시 워킹트리에 커밋되지 않은 Gradle 초안(<code>build.gradle.kts</code>, <code>settings.gradle.kts</code>, <code>gradle/</code>, <code>gradlew*</code>, <code>proguard-rules.pro</code>, <code>local.properties</code>)과 <code>build.sh</code> / <code>README.md</code> / <code>Screenshot.java</code> 수정이 있다. 이것을 출발점으로 삼는다.</li>
+</ul>
+<h2 id="4">4. 결정된 설계<a class="headerlink" href="#4" title="Permanent link">&para;</a></h2>
+<h3 id="41">4.1 스레드 모델<a class="headerlink" href="#41" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>스레드</th>
+<th>역할</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>main (Looper)</td>
+<td>소켓 accept/read/write, 서브프로세스 stdout, a11y 이벤트, display/broadcast 리스너, <code>ImageReader</code> 콜백, 타이머, 모든 코루틴의 기본 실행지</td>
+</tr>
+<tr>
+<td>work pool (작은 고정 크기, 예: <code>min(4, cpu)</code>)</td>
+<td>JPEG/WebP/PNG 인코딩, 비트맵/버퍼 복사, <code>dump</code>/<code>dump_active</code> 트리 순회+JSON, 길어질 수 있는 동기 binder 호출</td>
+</tr>
+<tr>
+<td><code>MediaCodec</code> 내부 / binder 스레드</td>
+<td>프레임워크 소유, 관여하지 않음</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><code>Main</code>: <code>prepareMainLooper()</code> → 초기화 → <code>Looper.loop()</code>. <code>hs-ua</code> HandlerThread 제거, <code>UiAutomation</code>은 main looper로 생성 — <strong>먼저 시도</strong> (사용자 결정).</li>
+<li>주의: <code>UiAutomation.connect()</code>는 서비스 연결 콜백(UA의 looper로 post됨)을 블로킹 대기한다. 따라서 main looper를 쓰려면 <code>Looper.loop()</code>가 돈 뒤에 connect를 <strong>Work 스레드에서</strong> 호출하고, connect 완료 후 UA 의존 핸들러들을 main에서 초기화한다. 서버 accept는 그 전에 열어도 되지만 UA가 필요한 verb는 준비될 때까지 suspend.</li>
+<li>기기(API 36)에서 이 방식이 안정적으로 동작하지 않으면 <code>hs-ua</code> HandlerThread 하나를 예외로 남기고, UA 이벤트 콜백은 즉시 main으로 post한다. 어느 쪽인지 결과를 보고한다.</li>
+<li>코루틴: 루트 <code>CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)</code>. CPU 작업은 <code>withContext(Work)</code> (<code>Work</code> = 위 고정 풀을 <code>asCoroutineDispatcher()</code>로 감싼 것, 또는 <code>Dispatchers.Default.limitedParallelism(n)</code>).</li>
+<li><code>Dispatchers.Main</code> 해석: kotlinx-coroutines-android의 <code>ServiceLoader</code> 경로가 <code>app_process</code>/dex-only jar에서 동작해야 한다. R8이 <code>META-INF/services/kotlinx.coroutines.internal.MainDispatcherFactory</code>를 입력으로 받아 치환하게 한다. <strong>기기에서 확인 실패 시</strong> <code>Handler(Looper.getMainLooper()).asCoroutineDispatcher()</code>로 대체하고 <code>Main</code>이라는 이름의 val로 노출한다 (내 판단).</li>
+</ul>
+<h3 id="42-io-kotlin">4.2 이벤트 루프 I/O 계층 (신규, Kotlin)<a class="headerlink" href="#42-io-kotlin" title="Permanent link">&para;</a></h3>
+<ul>
+<li>서버 소켓: <code>ServerSocketChannel</code> non-blocking, 127.0.0.1, backlog 8, <code>SO_REUSEADDR</code>. fd를 <code>Looper.getMainLooper().queue.addOnFileDescriptorEventListener(fd, EVENT_INPUT, …)</code>로 등록해 accept.</li>
+<li>fd 얻기: <code>ParcelFileDescriptor.fromSocket</code> / 리플렉션 등 구현자가 동작하는 방법을 고른다. 대안으로 <code>android.system.Os.socket/bind/listen/accept</code> + <code>FileDescriptor</code> 직접 사용도 허용 (구현자 재량).</li>
+<li>연결(<code>Conn</code>): non-blocking 소켓 + 입력 버퍼 + 출력 큐.</li>
+<li><code>suspend fun readInt()</code>, <code>readFully(n)</code>, <code>readFrame()</code> — 버퍼가 부족하면 <code>EVENT_INPUT</code>을 기다리며 suspend.</li>
+<li><code>fun send(frame)</code> / <code>suspend fun sendAndDrain()</code> — 출력 큐에 넣고 <code>EVENT_OUTPUT</code>으로 흘림. 큐 상한을 넘으면 suspend (backpressure).</li>
+<li>이미지·상태 스트림(<code>stream</code>, <code>stream_tilejpeg</code>, <code>state_watch</code>, <code>clip_watch</code>)은 "최신 것만 유지" 정책: 이전 프레임이 아직 안 나갔으면 새 프레임으로 교체 (현재 <code>BlockingQueue(1)</code>/drop-oldest 동작과 동일한 의미).</li>
+<li><code>stream_h264</code> (1단계, 현재와 동일): 연결마다 인코더 하나, <strong>프레임을 버리지 않는다</strong> (P-frame 손실은 디코딩을 깨뜨림). 연결별 bounded 출력 큐 + backpressure로 그 연결의 인코더 드레인만 멈춘다.</li>
+<li>스트림 공유 (사용자 요청, <strong>여유가 되면 마지막 단계</strong>로): 같은 파라미터의 스트림 클라이언트들이 하나의 소스/인코더 출력을 공유한다.<ul>
+<li><code>stream_h264</code>: 정규화한 파라미터(출력 크기, fps, bitrate, gop)가 같은 연결들은 인코더 + VirtualDisplay 하나를 공유. 인코더가 낸 access unit 버퍼를 한 번 복사해 불변 <code>ByteArray</code>로 만들고 모든 구독 연결에 같은 참조를 넣는다. 파라미터가 다르면 별도 인코더. 마지막 구독자가 나가면 해제.</li>
+<li>새 구독자 합류: 캐시해 둔 codec config(SPS/PPS)와 현재 연결이 기대하는 시작 프레임(현재 와이어가 첫 프레임 전에 보내는 것이 있다면 그것)을 먼저 보내고, 인코더에 IDR을 요청한 뒤 <strong>다음 IDR부터</strong> 전달.</li>
+<li>느린 구독자: 공유 인코더는 한 클라이언트 때문에 멈출 수 없으므로, 연결별 큐가 상한을 넘으면 그 연결의 대기 프레임을 버리고 다음 IDR까지 skip + IDR 요청 (해당 클라이언트만 잠깐 멈춘 듯 보이고 깨진 화면은 없음 — 내 판단).</li>
+<li><code>stream</code>/<code>stream_tilejpeg</code>도 같은 원칙: (size, q, tile)이 같으면 프레임당 인코딩 한 번, 결과 바이트를 공유.</li>
+<li><code>keyframe</code> verb는 활성 인코더 전부에 IDR 요청, 응답 <code>ok n=</code>의 n은 <strong>연결 수</strong>를 유지 (와이어 호환 — 내 판단).</li>
+</ul>
+</li>
+<li><code>TCP_NODELAY</code> 유지.</li>
+<li>EOF/에러/<code>EVENT_ERROR</code> → 연결 <code>Job</code> 취소 → 그 연결의 대기, 스트림, 서브프로세스, 구독이 전부 정리된다 (<code>try/finally</code>/<code>invokeOnCompletion</code>).</li>
+<li>연결 하나 = 코루틴 하나. 그 안에서 기존 <code>Server.handle</code>과 같은 순서로 <code>readFrame → dispatch → respond</code>를 반복. 같은 연결에서 명령은 순차, 연결 간에는 독립.</li>
+<li>서브프로세스(<code>dumpsys</code>, <code>logcat</code>, <code>shell</code>, <code>monitor</code>, <code>location</code>/<code>settings</code> 내부 호출 등): <code>Process</code> stdout fd를 같은 방식으로 등록해 읽고 청크 프레임으로 전달. 프로세스 종료 대기도 블로킹 <code>waitFor()</code> 대신 EOF 후 <code>exitValue()</code> 또는 풀에서 <code>waitFor</code>.</li>
+<li>stdout fd 얻는 방법은 구현자 재량 (<code>ProcessBuilder</code> 대신 <code>Os.pipe</code> + <code>android.system.Os</code>/리플렉션 <code>ProcessImpl</code> 등). 깔끔한 방법이 없으면 <strong>서브프로세스 읽기에 한해 풀 스레드에서 블로킹 read 후 main으로 post</strong> 하는 것을 허용 (루퍼는 여전히 안 막힘).</li>
+</ul>
+<h3 id="43">4.3 블로킹 지점의 재작성<a class="headerlink" href="#43" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>현재</th>
+<th>변경</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>WaitRegistry.awaitIdle/awaitPredicate</code> (<code>lock.wait</code>)</td>
+<td>main에서 a11y 이벤트 수신 → 대기자 목록 재평가. idle은 <code>postDelayed</code>/<code>delay</code> 타이머로, predicate 재평가는 이벤트마다. predicate가 노드 조회(binder)라면 <code>withContext(Work)</code>로. <code>suspend</code> API로 노출.</td>
+</tr>
+<tr>
+<td><code>LocalIntentSender.await(ms)</code> (<code>BlockingQueue</code>) — <code>Installer</code>, <code>Pm</code></td>
+<td><code>CompletableDeferred&lt;Intent&gt;</code> + <code>withTimeoutOrNull</code>.</td>
+</tr>
+<tr>
+<td><code>install</code>/<code>install_multi</code>/<code>push</code>의 APK·파일 청크 수신</td>
+<td><code>Conn.readFully</code> suspend로 읽고, 세션/파일 쓰기는 <code>Work</code>에서.</td>
+</tr>
+<tr>
+<td><code>State</code> refresher 스레드</td>
+<td><code>markDirty()</code>가 main에서 debounce Job 재시작(<code>DEBOUNCE_MS</code>) + heartbeat는 <code>HEARTBEAT_MS</code> 반복 코루틴. <code>computeDevice()</code>는 <code>Work</code>에서, 결과 저장·구독자 fan-out은 main에서.</td>
+</tr>
+<tr>
+<td><code>State</code> pkg/display/cfg HandlerThread 3개</td>
+<td>모두 main Handler에 등록.</td>
+</tr>
+<tr>
+<td><code>Screenshot</code> 미러별 HandlerThread</td>
+<td><code>ImageReader.setOnImageAvailableListener(…, mainHandler)</code>. 이미지 획득 직후 버퍼 복사·인코딩은 <code>Work</code>.</td>
+</tr>
+<tr>
+<td><code>Streamer</code> / <code>TileStreamer</code> / <code>H264Streamer</code> 연결 루프</td>
+<td>프레임 이벤트 → <code>Channel(CONFLATED)</code> → 연결 코루틴이 <code>fps</code>/<code>IDLE_INTERVAL_MS</code> 타이밍으로 <code>Work</code>에서 인코딩 후 <code>Conn</code>으로 전송. H.264는 MediaCodec 출력 드레인을 콜백(<code>setCallback(…, mainHandler)</code>) 또는 <code>Work</code>로.</td>
+</tr>
+<tr>
+<td><code>state_watch</code>, <code>clip_watch</code> 큐 루프</td>
+<td>구독 콜백 → conflated 채널 → 전송.</td>
+</tr>
+<tr>
+<td>warmup 스레드</td>
+<td><code>scope.launch(Work) { dumper.dumpActive() }</code>.</td>
+</tr>
+<tr>
+<td><code>Main.connectWithRetry</code>의 <code>Thread.sleep(250)</code></td>
+<td>루퍼 시작 전 초기화 단계이므로 그대로 둬도 됨 (내 판단).</td>
+</tr>
+<tr>
+<td><code>Input</code>의 <code>swipe dur=</code>, <code>tap</code> 등 UiAutomation <code>injectInputEvent</code></td>
+<td>이벤트 간 지연은 <code>delay()</code>. <code>injectInputEvent(sync=true)</code>가 길어질 수 있으면 <code>Work</code>에서 (구현자가 측정해 결정).</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>루퍼에서 직접 실행해도 되는 동기 binder 호출의 기준: <strong>짧고 상한이 있는 시스템 서비스 조회</strong> (getprop, settings get, pm path 등). 그 외(덤프, provider query, 패키지 목록 등 수십 ms 이상 걸릴 수 있는 것)는 <code>Work</code>. 애매하면 <code>Work</code> (내 판단).</li>
+<li>공유 상태는 main에서만 변경하는 것을 원칙으로 하고, 그 결과 불필요해진 <code>synchronized</code>/<code>volatile</code>/<code>CopyOnWriteArrayList</code>는 제거한다. 풀에서 만지는 객체(인코더 버퍼 등)는 해당 작업 안에서만 소유.</li>
+</ul>
+<h3 id="44">4.4 언어와 코드 배치<a class="headerlink" href="#44" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Kotlin으로 새로 쓰는 것: <code>Main</code>(엔트리는 <code>@JvmStatic</code> 또는 <code>object Main</code>으로 <code>dev.handsets.daemon.Main.main</code> 유지), 이벤트 루프/<code>Conn</code>/서버, 디스패치(기존 <code>Server</code>의 verb 파싱·응답 문자열은 그대로 이식), <code>State</code>, <code>UiEvents</code>/<code>WaitRegistry</code>, 스트리머들, <code>Installer</code>/<code>Pm</code>/<code>LocalIntentSender</code>, 서브프로세스 스트리밍(<code>Dumpsys</code>/<code>Logcat</code>/<code>ShellExec</code>/<code>Lifecycle</code>).</li>
+<li>Java로 유지: 동기 헬퍼(<code>Props</code>, <code>Wm</code>, <code>Binders</code>, <code>Am</code>, <code>SettingsDirect</code>, <code>SettingsApi</code>, <code>Providers</code>, <code>Manifest</code>, <code>JsonOut</code>, <code>Traverse</code>, <code>Dumper</code>, <code>NodeActions</code>, <code>Clipboard</code>, <code>Notifications</code>, <code>Location</code>, <code>Files</code> 등). 내부의 <code>synchronized</code>는 호출 경로가 단일화된 뒤 필요 없으면 제거해도 되고 남겨도 무방.</li>
+<li>소스 위치: <code>src/</code> 루트에 Java·Kotlin 공존 유지 (현재 Gradle 초안과 같음). 패키지 <code>dev.handsets.daemon</code>.</li>
+</ul>
+<h3 id="45-gradle">4.5 Gradle 빌드<a class="headerlink" href="#45-gradle" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>build.gradle.kts</code>를 IDE 전용에서 정식 빌드로:</li>
+<li><code>kotlin("jvm")</code> + <code>java-library</code>, android.jar <code>compileOnly</code>/bootclasspath. <code>compileSdk</code>는 <code>-PandroidCompileSdk</code> 또는 설치된 최신 numeric 플랫폼 (현재 초안의 하드코딩 <code>37.2</code> 정리).</li>
+<li>의존성: <code>kotlin-stdlib</code>, <code>kotlinx-coroutines-core</code> + <code>kotlinx-coroutines-android</code> 최신 안정판 (현재 1.3.9 → 업그레이드).</li>
+<li>태스크 <code>hsJar</code>: 컴파일 클래스 + 런타임 의존성 jar → R8(<code>--release --min-api 28 --lib android.jar --pg-conf proguard-rules.pro</code>) → <code>classes.dex</code> → <code>build/hs.jar</code> (dex 하나만, 필요 시 <code>META-INF/services</code>는 R8 처리 후 불필요).<ul>
+<li>R8 실행 수단: <strong>SDK의 R8</strong> (사용자 결정). <code>.bat</code> 래퍼 대신 SDK <code>build-tools/&lt;ver&gt;/lib/d8.jar</code>(R8 메인 클래스 <code>com.android.tools.r8.R8</code> 포함)를 <code>JavaExec</code>로 실행 — Windows/macOS/Linux CI 공통 (내 판단). build-tools 버전은 <code>-PbuildTools=</code> 또는 설치된 최신; 기본 36.0.0.</li>
+</ul>
+</li>
+<li><code>proguard-rules.pro</code>: 기존 <code>build.sh</code>의 r8.pro 내용(Main keep, <code>-repackageclasses ''</code>, <code>-allowaccessmodification</code>, <code>-dontwarn **</code>) + 코루틴 규칙.</li>
+<li><code>assemble</code>/<code>build</code>가 <code>hsJar</code>에 의존. Gradle 자체 출력은 지금 초안처럼 <code>build-gradle/</code>에 두되 최종 jar는 <code>build/hs.jar</code>로 복사.</li>
+<li><code>build.sh</code>: <code>./gradlew hsJar</code> 호출하는 얇은 래퍼로 축소 (기존 사용자·문서 호환).</li>
+<li>CI <code>.github/workflows/release.yml</code>: JDK 셋업 + <code>./gradlew hsJar</code> (또는 래퍼 <code>build.sh</code> 그대로 호출). 산출물 경로 동일.</li>
+<li><code>README.md</code>의 "Daemon IDE setup" 섹션과 <code>docs/architecture.md</code>의 <code>build.sh</code> 설명을 갱신.</li>
+<li><code>local.properties</code>는 머신 로컬 파일이므로 git 추적에서 제외하는 것이 맞다 (현재 staged 상태 — 내 판단, 구현 시 unstage + <code>.gitignore</code>).</li>
+</ul>
+<h2 id="5">5. 검증<a class="headerlink" href="#5" title="Permanent link">&para;</a></h2>
+<p>검증 방법은 사용자가 구현자에게 맡겼다. 결정:</p>
+<ol>
+<li><strong>빌드</strong>: <code>./gradlew hsJar</code> 성공, <code>build/hs.jar</code>에 <code>classes.dex</code>만, 크기 기록 (기존 <code>build.sh</code> 산출물과 비교).</li>
+<li><strong>환경</strong>: 기존 AVD <code>Medium_Phone</code>(API 36, x86_64, <code>E:\packages\Android\Sdk\emulator</code>) 하나만 기동. <code>min-api 28</code>은 유지하되 버전 매트릭스 검증은 하지 않는다 (사용자 결정: 상위 버전에서 현재 잘 동작하므로 충분). 호스트 CLI는 <code>handsets-cli</code>를 <code>cargo build --release</code>로 빌드해 사용 (<code>HANDSETS_JAR</code>로 jar 지정).</li>
+<li><strong>와이어 스모크 테스트 스크립트</strong> <code>scripts/wire-smoke.py</code> (신규): adb forward 후 소켓으로 <code>docs/wire.md</code>의 verb들을 직접 호출, 응답을 정규화(타임스탬프·elapsed·배터리 등 변동값 마스킹)해 저장. <strong>기존 jar(현재 HEAD를 <code>build.sh</code>로 빌드)와 새 jar 결과를 diff</strong>. 최소 커버리지:</li>
+<li>단발: <code>ping info dump dump_active screenshot(jpeg/png) tap swipe key text getprop settings_get wm_info pm_list pm_path state * clip_get/clip_set deeplinks sms/calls/contacts</code></li>
+<li>대기: <code>wait_for_idle wait_for_text(성공/timeout) wait_for_activity tap_and_dump tap_and_settle</code></li>
+<li>스트림: <code>stream</code>/<code>stream_h264</code>/<code>stream_tilejpeg</code> N프레임 수신 후 끊기, <code>state_watch</code>, <code>clip_watch</code>, <code>logcat</code>/<code>dumpsys</code>/<code>shell</code> 청크+종결자, <code>pull</code>/<code>push</code> 라운드트립, <code>install</code>(작은 테스트 APK)</li>
+<li>동시성: 스트림 하나를 일부러 읽지 않는 느린 클라이언트로 열어 둔 상태에서 다른 연결의 <code>ping</code>/<code>tap</code> 지연이 정상인지, 장시간 <code>wait_for_text timeout_ms=5000</code> 중 다른 연결 <code>ping</code>이 즉시 응답하는지.</li>
+<li>연결 정리: 스트림 중 클라이언트 강제 종료 후 데몬 스레드 수/구독자 수가 원복되는지.</li>
+<li><strong>스레드 수 확인</strong>: <code>adb shell ls /proc/&lt;pid&gt;/task</code> + <code>cat comm</code>로 기존/신규 비교, <code>hs-*</code> 스레드가 main + work pool만 남았는지.</li>
+<li><strong>지연</strong>: <code>scripts/bench-adb.sh</code>(또는 smoke 스크립트 내 <code>tap</code>/<code>dump_active</code>/<code>screenshot</code> 100회 p50/p95) 기존 대비 회귀 없음.</li>
+<li>수동 확인: <code>hs</code> TUI/뷰어 미러링이 정상 동작.</li>
+</ol>
+<h2 id="6">6. 구현자 재량으로 남긴 것<a class="headerlink" href="#6" title="Permanent link">&para;</a></h2>
+<ul>
+<li>fd 이벤트 등록에 쓸 소켓/파이프 fd 획득 방식 (4.2).</li>
+<li>Work 풀 크기와 구현 (<code>Executors</code> 기반 vs <code>limitedParallelism</code>).</li>
+<li>어떤 동기 호출을 main에 둘지의 세부 판단 (4.3 기준 안에서).</li>
+<li>파일/클래스 분할과 이름, Java 헬퍼 중 추가로 Kotlin화할 것.</li>
+<li>작업 순서. 단, 매 단계에서 <code>hs.jar</code>가 빌드·동작 가능한 상태를 유지하는 점진적 순서를 권장 (예: Gradle 빌드 → 이벤트 루프/서버 → State/리스너 → 대기 → 스트림 → 서브프로세스 → 정리).</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["navigation.top", "navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest", "search.highlight"], "search": "../../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../../assets/javascripts/bundle.c21346df.min.js"></script>
+      
+    
+  </body>
+</html>
