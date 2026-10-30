@@ -90,7 +90,7 @@ hs tap   'Button:has-text("Sign in")'        --visible --unique --timeout 5s
 hs wait  "Dashboard"                         --timeout 15s
 ```
 
-Vocabulary: `[a=v]` `[a~=sub]` `[a^=pre]` `[a$=suf]` · `:visible :clickable :enabled :focused :checked` · `:has-text("x") :text-is("x")` · `:in(SEL) :below(SEL) :right-of(SEL) :near(SEL, PX)`. Comma is OR. More patterns in [docs/cookbook.md](docs/cookbook.md).
+Vocabulary: `#id` `[a=v]` `[a~=sub]` `[a^=pre]` `[a$=suf]` · `:visible :clickable :enabled :focused :checked :editable :heading` · `:has-text("x") :text-is("x")` · `:in(SEL) :below(SEL) :right-of(SEL) :near(SEL, PX)`. Comma is OR. Compose (and androidx) nodes also carry `role` and `state`, in the device's language: `hs tap '[role=Switch][state=Off]'`. More patterns in [docs/cookbook.md](docs/cookbook.md).
 
 ## How it works
 

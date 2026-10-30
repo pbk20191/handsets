@@ -15,8 +15,8 @@ struct Row {
     label:  String,   // always double-quoted; pulls from text, falls back to content-desc
     id:     String,   // "#name" if the node has a resource-id, else empty
     coords: String,   // bare "cx,cy" — no @, no parens
-    flags:  String,   // space-joined metadata: long / scroll / check / checked / password
-                      // (the action flag `click` is implicit in `verb`)
+    flags:  String,   // space-joined metadata: long / scroll / check / checked / password,
+                      // then role= / state= / … (the action flag `click` is implicit in `verb`)
 }
 
 /// Flat list of "interactive or content-bearing" nodes — skips pure
@@ -174,6 +174,7 @@ fn collect_interactive(node: &Value, slot: Option<(&str, usize)>, rows: &mut Vec
                 tags.push_str(tag);
             }
         }
+        push_semantics(node, ' ', &mut tags);
 
         // The id column is suppressed when the label already carries
         // `#id` (anonymous clickable widgets) — printing it twice in
@@ -198,6 +199,24 @@ fn collect_interactive(node: &Value, slot: Option<(&str, usize)>, rows: &mut Vec
         for (i, c) in kids.iter().enumerate() {
             let slot = if id_short.is_empty() { slot } else { Some((id_short, i)) };
             collect_interactive(c, slot, rows);
+        }
+    }
+}
+
+/// What a toolkit says beyond the class (Compose sets most of these): the
+/// role and state in the device's language, headings, errors, ranges and
+/// list shape. Values with spaces are quoted so a row stays one token each.
+fn push_semantics(node: &Value, sep: char, tags: &mut String) {
+    let flags = selector::get_str(node, "flags").unwrap_or("");
+    let mut push = |t: String| {
+        if !tags.is_empty() { tags.push(sep); }
+        tags.push_str(&t);
+    };
+    if flags.contains('H') { push("heading".into()); }
+    for key in ["role", "state", "error", "range", "collection", "item"] {
+        if let Some(v) = selector::get_str(node, key) {
+            let v = if v.contains(' ') || v.contains(sep) { truncate_quoted(v, 40) } else { v.to_string() };
+            push(format!("{key}={v}"));
         }
     }
 }
@@ -256,7 +275,8 @@ fn walk(node: &Value, depth: usize, out: &mut String) {
 
     // Single-letter flag tags: c=clickable, s=scrollable, f=focusable,
     // F=focused, e=enabled (omitted, it's the default), L=long-clickable,
-    // k=checkable, K=checked, p=password, S=selected, v=visible.
+    // k=checkable, K=checked, p=password, S=selected, v=visible,
+    // E=editable, H=heading.
     let mut tags = String::new();
     for (c, tag) in [
         ('c', "click"),
@@ -268,11 +288,18 @@ fn walk(node: &Value, depth: usize, out: &mut String) {
         ('K', "checked"),
         ('p', "password"),
         ('S', "selected"),
+        ('E', "editable"),
     ] {
         if flags.contains(c) {
             if !tags.is_empty() { tags.push(','); }
             tags.push_str(tag);
         }
+    }
+    push_semantics(node, ',', &mut tags);
+    if let Some(a) = selector::get_str(node, "actions") {
+        if !tags.is_empty() { tags.push(','); }
+        tags.push_str("actions=");
+        tags.push_str(&a.replace(',', "+"));
     }
     if !tags.is_empty() {
         line.push_str("  [");
@@ -480,6 +507,26 @@ mod tests {
             && lines[0].contains("#rv_cards[0]") && lines[0].contains("180,800"), "got: {}", lines[0]);
         assert!(lines[1].contains("#rv_cards[1]") && lines[1].contains("540,800"), "got: {}", lines[1]);
         assert!(lines[2].contains("\"Settings\""), "got: {}", lines[2]);
+    }
+
+    #[test]
+    fn compose_role_and_state_show_in_the_table_and_tree() {
+        let dump = json::parse(r#"{
+            "root": {
+                "cls": "android.view.View", "bounds": [0, 0, 1080, 2400],
+                "children": [
+                    {"cls":"android.view.View","flags":"ckKfev","role":"스위치","state":"사용","bounds":[184,323,321,449],"children":[]},
+                    {"cls":"android.widget.TextView","text":"설정","flags":"evH","bounds":[40,40,400,100],"children":[]},
+                    {"cls":"android.widget.EditText","flags":"cLfevE","actions":"set_text,ime_enter","bounds":[42,134,1038,302],"children":[]}
+                ]
+            }
+        }"#).unwrap();
+        let table = render_interactive(&json::all_roots(&dump));
+        assert!(table.contains("check checked role=스위치 state=사용"), "got:\n{table}");
+        assert!(table.contains("\"설정\"") && table.contains("heading"), "got:\n{table}");
+        let tree = render_human(&json::all_roots(&dump));
+        assert!(tree.contains("[click,long,focusable,editable,actions=set_text+ime_enter]"), "got:\n{tree}");
+        assert!(tree.contains("role=스위치,state=사용"), "got:\n{tree}");
     }
 
     /// Off-screen rows (negative bounds, zero-area, scrolled-out recycler
