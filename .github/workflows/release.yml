@@ -54,10 +54,11 @@ jobs:
       matrix:
         include:
           # Both macOS targets cross-build from the Apple Silicon runner —
-          # macos-13 (Intel) is notably slower and the x86_64 binary cross-
-          # builds cleanly via Rust's standard target install.
-          - { name: macos-arm64,     os: macos-14,       target: aarch64-apple-darwin,         viewer: true,  exe: '',     archive: tar.gz, mcpb: darwin }
-          - { name: macos-x86_64,    os: macos-14,       target: x86_64-apple-darwin,          viewer: true,  exe: '',     archive: tar.gz, mcpb: darwin }
+          # the Intel runners are notably slower and the x86_64 binary cross-
+          # builds cleanly via Rust's standard target install. (macos-14 is
+          # retired on 2026-11-02, with brownouts before that.)
+          - { name: macos-arm64,     os: macos-15,       target: aarch64-apple-darwin,         viewer: true,  exe: '',     archive: tar.gz, mcpb: darwin }
+          - { name: macos-x86_64,    os: macos-15,       target: x86_64-apple-darwin,          viewer: true,  exe: '',     archive: tar.gz, mcpb: darwin }
           # The Linux viewer links the system ffmpeg (libavcodec / libavutil,
           # for VA-API H.264), so it ships on x86_64 only: the aarch64 cross
           # build would need arm64 ffmpeg libraries.
