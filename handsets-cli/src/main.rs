@@ -614,6 +614,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 device_serial = Some(args.get(i)
                     .ok_or("--device needs a SERIAL")?.clone());
             }
+            // `hs ui --json` is the raw dump, not JSON result records.
+            "--json" if positional.first() == Some(&"ui") => positional.push(a),
             "--json" => out_fmt = flags::OutFmt::Json,
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -1421,6 +1423,13 @@ fn find_fill_target<'a>(roots: &[&'a json::Value], query: &str) -> Option<&'a js
     for root in roots { find_input_match(root, query, &q_low, &mut best); }
     if let Some((_, n)) = best { return Some(n); }
 
+    // Phase 1b: a label inside the field. Compose's TextField puts its
+    // `label` and `placeholder` under the EditText as their own nodes, and
+    // the field's hint stays empty.
+    for root in roots {
+        if let Some(n) = find_input_holding_label(root, &q_low, None) { return Some(n); }
+    }
+
     // Phase 2: label-anchored — find any node matching the query, then
     // take the nearest input widget below or right-of it. Mirrors how a
     // human reads a form: label on the left or above, field next to it.
@@ -1456,6 +1465,23 @@ fn find_input_match<'a>(
     if let Some(kids) = selector::children(node) {
         for c in kids { find_input_match(c, q, q_low, best); }
     }
+}
+
+/// The input widget enclosing the first node whose text or desc contains `q_low`.
+fn find_input_holding_label<'a>(
+    node: &'a json::Value,
+    q_low: &str,
+    input: Option<&'a json::Value>,
+) -> Option<&'a json::Value> {
+    let input = if is_input_widget(node) { Some(node) } else { input };
+    if let Some(field) = input.filter(|f| !std::ptr::eq(*f, node)) {
+        let text = selector::get_str(node, "text").unwrap_or("").to_lowercase();
+        let desc = selector::get_str(node, "desc").unwrap_or("").to_lowercase();
+        if !q_low.is_empty() && (text.contains(q_low) || desc.contains(q_low)) {
+            return Some(field);
+        }
+    }
+    selector::children(node)?.iter().find_map(|c| find_input_holding_label(c, q_low, input))
 }
 
 fn collect_labels<'a>(node: &'a json::Value, q_low: &str, out: &mut Vec<&'a json::Value>) {
@@ -1894,7 +1920,13 @@ fn write_find_row(out: &mut io::StdoutLock<'_>, n: &json::Value) -> io::Result<(
         }
         None => "[]".into(),
     };
-    writeln!(out, "{bs}\tclass={cls}\tid={id}\ttext={t:?}\tdesc={d:?}")
+    write!(out, "{bs}\tclass={cls}\tid={id}\ttext={t:?}\tdesc={d:?}")?;
+    for key in ["role", "state", "actions"] {
+        if let Some(v) = selector::get_str(n, key) {
+            write!(out, "\t{key}={v:?}")?;
+        }
+    }
+    writeln!(out)
 }
 
 fn find_row_obj(n: &json::Value) -> json_out::Obj {
@@ -1904,6 +1936,9 @@ fn find_row_obj(n: &json::Value) -> json_out::Obj {
         .s("text",  selector::get_str(n, "text").unwrap_or(""))
         .s("desc",  selector::get_str(n, "desc").unwrap_or(""))
         .s("flags", selector::get_str(n, "flags").unwrap_or(""));
+    for key in ["role", "state", "error", "range", "collection", "item", "actions"] {
+        o = o.opt_s(key, selector::get_str(n, key));
+    }
     if let Some((x1, y1, x2, y2)) = selector::bounds(n) {
         let cx = (x1 + x2) / 2;
         let cy = (y1 + y2) / 2;
@@ -2853,6 +2888,18 @@ mod parse_use_tests {
     }
 
     #[test]
+    fn ui_json_is_the_raw_dump_not_json_records() {
+        use super::{flags::OutFmt, UiFormat};
+        let parse = |v: &[&str]| parse_args(&v.iter().map(|a| a.to_string()).collect::<Vec<_>>()).unwrap();
+        let o = parse(&["ui", "--json"]);
+        assert!(matches!(o.cmd, Cmd::Ui { format: UiFormat::Json, .. }));
+        assert!(matches!(o.out_fmt, OutFmt::Human));
+        // Before the verb, --json is still the global output mode.
+        let o = parse(&["--json", "ui"]);
+        assert!(matches!((o.cmd, o.out_fmt), (Cmd::Ui { format: UiFormat::Interactive, .. }, OutFmt::Json)));
+    }
+
+    #[test]
     fn use_accepts_serial_as_a_positional_argument() {
         assert_eq!(selected_serial(&["use", "192.168.0.10:5555"]),
             Some("192.168.0.10:5555".into()));
@@ -2903,6 +2950,23 @@ mod parse_use_tests {
         let roots: Vec<_> = crate::json::app_roots(&dump).into_iter().rev().collect();
         let node = super::find_fill_target(&roots, "Comment").expect("an input matches");
         assert_eq!(super::node_to_daemon_selector(node), "id=com.foo:id/sheet_comment");
+    }
+
+    #[test]
+    fn fill_finds_a_compose_field_by_the_label_inside_it() {
+        // Compose TextField: the label is a child of the EditText, the hint is empty.
+        let dump = crate::json::parse(r#"{"windows":[
+            {"type":1,"layer":2,"root":{"cls":"android.view.View","bounds":[0,0,1080,2400],"children":[
+                {"cls":"android.widget.TextView","text":"과일 검색","bounds":[42,42,290,134]},
+                {"cls":"android.widget.EditText","bounds":[42,134,1038,302],"flags":"cLfevE","children":[
+                    {"cls":"android.widget.TextView","text":"검색어","bounds":[84,197,205,260]}]},
+                {"cls":"android.widget.EditText","bounds":[42,400,1038,560],"children":[
+                    {"cls":"android.widget.TextView","text":"메모","bounds":[84,460,160,520]}]}]}}
+        ]}"#).unwrap();
+        let roots: Vec<_> = crate::json::app_roots(&dump).into_iter().rev().collect();
+        let field = |q| super::find_fill_target(&roots, q).and_then(crate::selector::bounds);
+        assert_eq!(field("검색어"), Some((42, 134, 1038, 302)));
+        assert_eq!(field("메모"), Some((42, 400, 1038, 560)));
     }
 
     #[test]

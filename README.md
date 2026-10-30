@@ -90,7 +90,7 @@ hs tap   'Button:has-text("Sign in")'        --visible --unique --timeout 5s
 hs wait  "Dashboard"                         --timeout 15s
 ```
 
-Vocabulary: `[a=v]` `[a~=sub]` `[a^=pre]` `[a$=suf]` · `:visible :clickable :enabled :focused :checked` · `:has-text("x") :text-is("x")` · `:in(SEL) :below(SEL) :right-of(SEL) :near(SEL, PX)`. Comma is OR. More patterns in [docs/cookbook.md](docs/cookbook.md).
+Vocabulary: `#id` `[a=v]` `[a~=sub]` `[a^=pre]` `[a$=suf]` · `:visible :clickable :enabled :focused :checked :editable :heading` · `:has-text("x") :text-is("x")` · `:in(SEL) :below(SEL) :right-of(SEL) :near(SEL, PX)`. Comma is OR. Compose (and androidx) nodes also carry `role` and `state`, in the device's language: `hs tap '[role=Switch][state=Off]'`. More patterns in [docs/cookbook.md](docs/cookbook.md).
 
 ## How it works
 
@@ -122,7 +122,7 @@ Full protocol: [docs/wire.md](docs/wire.md). Reflection details and sharp edges:
 curl -fsSL https://raw.githubusercontent.com/pbk20191/handsets/main/install.sh | bash
 ```
 
-Needs `adb`: `hs` finds it through Google's Android CLI (`android info`), then `$ANDROID_HOME`, `$PATH` and Android Studio's default SDK; `HANDSETS_ADB` overrides. macOS and Linux (Windows: the release zip). Pin a version with `HANDSETS_VERSION=v0.3.1`. Emulator setup (Android CLI, host GPU): [docs/emulator.md](docs/emulator.md).
+Needs `adb`: `hs` finds it through Google's Android CLI (`android info`), then `$ANDROID_HOME`, `$PATH` and Android Studio's default SDK; `HANDSETS_ADB` overrides. macOS and Linux (Windows: the release zip). Pin a version with `HANDSETS_VERSION=v0.3.2`. Emulator setup (Android CLI, host GPU): [docs/emulator.md](docs/emulator.md).
 
 MCP: each release ships `handsets-<platform>.mcpb`, a one-click bundle for MCP hosts such as Claude Desktop (it carries `hs` and the daemon). Or point any MCP client at `hs mcp` (stdio), which serves the agent loop as tools: `use`, `ui`, `screenshot`, `tap`, `type`, `fill`, `swipe`, `go`, `wait`, `find`, `open`, `close`, `logcat` (filter by app, level, tag or regex), `info`, `drop`, plus `hs` for any other verb.
 

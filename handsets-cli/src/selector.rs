@@ -11,7 +11,8 @@
 //   [attr]               attribute present (non-empty)
 //   #name                resource-id, short (`#email`) or full (`#com.app:id/email`);
 //                        `[id=email]` also matches the short form
-//   :flag                node has the given a11y flag (clickable, enabled, …)
+//   :flag                node has the given a11y flag (clickable, enabled, editable, heading, …)
+//   [role=…] [state=…]   Compose / androidx role and state descriptions (device language)
 //   :has-text("foo")     substring text match (Playwright sugar for [text~=foo])
 //   :text-is("foo")      exact text match    (Playwright sugar for [text=foo])
 //   :in(SEL)             descendant of any node matching SEL
@@ -345,6 +346,8 @@ fn parse_pseudo(s: &str) -> Result<(Pseudo, usize), String> {
         "selected" => 'S',
         "password" => 'p',
         "visible" => 'v',
+        "editable" => 'E',
+        "heading" => 'H',
         other => return Err(format!("unknown pseudo-class :{other}")),
     };
     Ok((Pseudo::Flag(flag), i))

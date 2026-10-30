@@ -85,7 +85,10 @@ class Waits {
         for (w in ws) if (w.isActive) w.resume(Unit)
     }
 
-    /** @return ms the event stream has been idle, or -1 on timeout. */
+    /**
+     * @return ms the event stream has been quiet once it has been for
+     * [idleMs] (not the time spent waiting: that can be 0), or -1 on timeout.
+     */
     suspend fun awaitIdle(idleMs: Long, timeoutMs: Long): Long {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (true) {

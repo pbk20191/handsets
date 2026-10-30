@@ -24,8 +24,9 @@ Selectors (CSS-like, Playwright-inspired):
   hs find 'Button:has-text(\"Sign in\")'    Playwright sugar for [text~=]
   hs find '*EditText:below(TextView[text=Email])'
   hs find 'Button:near(ImageView[desc~=cart], 200)'
+  hs find '[role=Switch][state=On]'       Compose role / state (device language)
   Pseudos: :visible :clickable :enabled :focused :checkable :checked
-           :has-text(\"x\") :text-is(\"x\")
+           :editable :heading :has-text(\"x\") :text-is(\"x\")
            :in(SEL) :below(SEL) :right-of(SEL) :near(SEL, PX)
 
 Shared action flags (tap, type, find, wait, submit, paste, act):

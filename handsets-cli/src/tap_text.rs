@@ -74,8 +74,11 @@ pub fn run_session(
             // `#id` short-circuits the text/desc walk so anonymous
             // clickable widgets (the ImageView icons that `hs ui`
             // surfaces with a `#name` label) are reachable from `hs tap`.
-            if let Some(id_query) = query.strip_prefix('#') {
+            if let Some(id_query) = query.strip_prefix('#').filter(|q| is_plain_id(q)) {
                 find_by_id_in(&roots, id_query, &flags)
+            } else if let Some(sels) = crate::css_selector(query) {
+                // `[role=Switch]`, `EditText#email`, `Button:has-text("OK")`, …
+                find_by_selector(&roots, &sels, &flags)
             } else {
                 find_in(&roots, query, &flags)
             }
@@ -257,6 +260,23 @@ fn find_by_id_in(roots: &[&Value], id_query: &str, flags: &ActionFlags) -> Vec<H
         });
     }
     hits
+}
+
+/// `name` or `name[3]`: what the `#id` path takes. Anything else after `#`
+/// (`#email:visible`, `#a, #b`) is a CSS-like selector.
+fn is_plain_id(q: &str) -> bool {
+    let (name, rest) = q.split_once('[').map_or((q, ""), |(n, r)| (n, r));
+    let id_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '$');
+    // A colon belongs to a full id (`com.foo:id/back`), not a pseudo-class.
+    let colon_ok = !name.contains(':') || name.contains(":id/");
+    !name.is_empty() && name.chars().all(id_char) && colon_ok
+        && (rest.is_empty() || rest.strip_suffix(']').is_some_and(|i| i.parse::<usize>().is_ok()))
+}
+
+/// CSS-like selector matches, upper windows first (`hs find`'s order).
+fn find_by_selector(roots: &[&Value], sels: &[crate::selector::Selector], flags: &ActionFlags) -> Vec<Hit> {
+    let ctx = crate::selector::MatchCtx::from_roots(roots.iter().rev().copied().collect());
+    crate::selector::find_all_with(&ctx, sels).into_iter().filter_map(|n| id_hit(n, flags)).collect()
 }
 
 fn rid_matches(node: &Value, id_query: &str) -> bool {
@@ -488,8 +508,6 @@ mod tests {
     use super::*;
     use crate::json;
 
-    /// `hs tap "OK"` with a dialog over the activity must hit the dialog,
-    /// not the activity's own "OK" underneath it.
     #[test]
     fn scrolls_toward_an_off_screen_point() {
         use super::scroll_toward;
@@ -500,6 +518,23 @@ mod tests {
         assert_eq!(scroll_toward("click-rejected"), None);
     }
 
+    #[test]
+    fn taps_by_role_selector_and_keeps_the_plain_id_path() {
+        let dump = json::parse(r#"{"windows":[
+            {"type":1,"layer":2,"root":{"cls":"android.view.View","bounds":[0,0,1080,2400],"children":[
+                {"cls":"android.widget.TextView","text":"한글만","flags":"ev","bounds":[42,323,163,386]},
+                {"cls":"android.view.View","role":"스위치","state":"사용 안함","flags":"ckfev","bounds":[184,323,321,449]}]}}
+        ]}"#).unwrap();
+        let roots = json::app_roots(&dump);
+        let sels = crate::css_selector("[role=스위치]").expect("selector-shaped");
+        let hits = find_by_selector(&roots, &sels, &ActionFlags::default());
+        assert_eq!(hits.iter().map(|h| h.bounds).collect::<Vec<_>>(), [(184, 323, 321, 449)]);
+        assert!(is_plain_id("rv_cards[3]") && is_plain_id("com.foo:id/back"));
+        assert!(!is_plain_id("email:visible") && !is_plain_id("a, #b") && !is_plain_id("x[y=1]"));
+    }
+
+    /// `hs tap "OK"` with a dialog over the activity must hit the dialog,
+    /// not the activity's own "OK" underneath it.
     #[test]
     fn popup_window_wins_over_the_activity_below() {
         let dump = json::parse(r#"{"windows":[

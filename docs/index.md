@@ -55,9 +55,10 @@ hs tap 'Button[text="Sign in"]'                   # exact text
 hs tap 'Button:has-text("Sign in")'               # substring (Playwright sugar)
 hs tap 'EditText:below(TextView[text=Email])'     # relational
 hs tap 'Button:near(ImageView[desc~=cart], 200)'  # within 200 px
+hs tap '[role=Switch][state=Off]'                 # Compose role / state
 ```
 
-The full set of pseudo-classes (`:visible`, `:clickable`, `:in()`, `:below()`, `:right-of()`, `:near()`, `:has-text()`, `:text-is()`) is documented in the [cookbook](cookbook.md).
+Compose and androidx widgets expose a `role` and a `state` (in the device's language: `스위치` / `사용 안함` on a Korean device), and `hs ui` shows them next to each row. The full set of pseudo-classes (`:visible`, `:clickable`, `:editable`, `:heading`, `:in()`, `:below()`, `:right-of()`, `:near()`, `:has-text()`, `:text-is()`) is documented in the [cookbook](cookbook.md).
 
 ## Reliability
 
