@@ -75,7 +75,7 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
             while (true) {
                 val n = readInt()
                 if (n !in 1..MAX_CHUNK) return
-                readFully(n)
+                skip(n)
             }
         } catch (_: IOException) {
         }
@@ -92,12 +92,10 @@ internal class Transfers(private val ctx: Context, private val installer: Instal
         try {
             input = withContext(Loop.Work) { FileInputStream(f) }
             while (true) {
-                val chunk = withContext(Loop.Work) {
-                    val buf = ByteArray(CHUNK)
-                    val n = input.read(buf)
-                    if (n > 0) buf.copyOf(n) else null
-                } ?: break
-                c.send(chunk)
+                val buf = ByteArray(CHUNK)
+                val n = withContext(Loop.Work) { input.read(buf) }
+                if (n <= 0) break
+                c.send(buf, 0, n)
             }
             c.sendRaw(END)
         } catch (e: IOException) {

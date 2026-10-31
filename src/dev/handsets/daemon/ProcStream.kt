@@ -151,12 +151,10 @@ internal class ProcStream(private val clip: Clipboard) {
     /** Fallback when the process pipe's fd can't be reached: blocking reads on Work. */
     private suspend fun pumpBlocking(c: Conn, input: InputStream, bufSize: Int) {
         while (true) {
-            val chunk = withContext(Loop.Work) {
-                val buf = ByteArray(bufSize)
-                val n = input.read(buf)
-                if (n > 0) buf.copyOf(n) else null
-            } ?: return
-            c.send(chunk)
+            val buf = ByteArray(bufSize)
+            val n = withContext(Loop.Work) { input.read(buf) }
+            if (n <= 0) return
+            c.send(buf, 0, n)
         }
     }
 
