@@ -14,6 +14,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.EOFException
 import java.io.FileDescriptor
 import java.io.IOException
+import java.nio.ByteBuffer
 import kotlin.coroutines.resume
 
 /**
@@ -21,7 +22,8 @@ import kotlin.coroutines.resume
  * called on [Loop.Main].
  *
  * Wire framing is `uint32 BE length + payload` in both directions; [send]
- * adds the prefix, [sendRaw] doesn't.
+ * adds the prefix, [sendRaw] doesn't. Both queue the caller's array as is
+ * (no copy), so it must not be changed afterwards.
  *
  * Output is queued and drained on EVENT_OUTPUT. [send] suspends once more
  * than [OUT_LIMIT] bytes are queued (backpressure). [sendLatest] is for
@@ -46,8 +48,8 @@ class Conn(private val socket: LocalSocket) {
     private var inStart = 0
     private var inEnd = 0
 
-    private val outQueue = ArrayDeque<ByteArray>()
-    private var outHead = 0          // bytes of outQueue.first() already written
+    /** Unsent output, oldest first; each buffer's position is how far it got. */
+    private val outQueue = ArrayDeque<ByteBuffer>()
     private var outBytes = 0L
     private val latest = HashMap<Int, ByteArray>()
 
@@ -74,11 +76,43 @@ class Conn(private val socket: LocalSocket) {
     }
 
     suspend fun readFully(n: Int): ByteArray {
+        if (n > inBuf.size) return readLarge(n)
         ensure(n)
         val out = inBuf.copyOfRange(inStart, inStart + n)
         inStart += n
         shrinkIfIdle()
         return out
+    }
+
+    /**
+     * A frame bigger than the buffer: read the rest of it straight into its
+     * own array instead of growing inBuf for it and then copying it out.
+     */
+    private suspend fun readLarge(n: Int): ByteArray {
+        val out = ByteArray(n)
+        var got = minOf(n, inEnd - inStart)
+        System.arraycopy(inBuf, inStart, out, 0, got)
+        inStart += got
+        while (got < n) {
+            val r = readSome(out, got, n - got)
+            if (r == 0) throw EOFException()
+            got += r
+        }
+        return out
+    }
+
+    /** Consumes [n] bytes without keeping them. */
+    suspend fun skip(n: Int) {
+        var left = n
+        while (left > 0) {
+            if (inEnd == inStart) {
+                inStart = 0; inEnd = 0
+                if (!fill()) throw EOFException()
+            }
+            val k = minOf(left, inEnd - inStart)
+            inStart += k
+            left -= k
+        }
     }
 
     /** Drop a buffer grown for one large chunk once it has been consumed. */
@@ -145,21 +179,26 @@ class Conn(private val socket: LocalSocket) {
 
     /** Reads at least one byte into inBuf; false on EOF. */
     private suspend fun fill(): Boolean {
+        if (closed) throw EOFException()
+        if (inEnd == inBuf.size) {
+            if (inStart > 0) {
+                System.arraycopy(inBuf, inStart, inBuf, 0, inEnd - inStart)
+                inEnd -= inStart; inStart = 0
+            } else inBuf = inBuf.copyOf(inBuf.size * 2)
+        }
+        val r = readSome(inBuf, inEnd, inBuf.size - inEnd)
+        inEnd += r
+        return r > 0
+    }
+
+    /** Reads at least one byte into [dst], waiting for input; 0 on EOF or a socket error. */
+    private suspend fun readSome(dst: ByteArray, off: Int, len: Int): Int {
         while (true) {
             if (closed) throw EOFException()
-            if (inEnd == inBuf.size) {
-                if (inStart > 0) {
-                    System.arraycopy(inBuf, inStart, inBuf, 0, inEnd - inStart)
-                    inEnd -= inStart; inStart = 0
-                } else inBuf = inBuf.copyOf(inBuf.size * 2)
-            }
             try {
-                val r = Os.read(fd, inBuf, inEnd, inBuf.size - inEnd)
-                if (r == 0) return false
-                inEnd += r
-                return true
+                return Os.read(fd, dst, off, len)
             } catch (e: ErrnoException) {
-                if (e.errno != OsConstants.EAGAIN) return false
+                if (e.errno != OsConstants.EAGAIN) return 0
             }
             suspendCancellableCoroutine { c ->
                 readWaiter = c
@@ -171,9 +210,10 @@ class Conn(private val socket: LocalSocket) {
 
     // ── writing ─────────────────────────────────────────────────────────
 
-    suspend fun send(payload: ByteArray) {
-        enqueue(header(payload.size))
-        enqueue(payload)
+    /** Sends `payload[off until off + len]` as one frame. */
+    suspend fun send(payload: ByteArray, off: Int = 0, len: Int = payload.size - off) {
+        enqueue(header(len))
+        enqueue(payload, off, len)
         drain()
         awaitBelow(OUT_LIMIT)
     }
@@ -202,11 +242,12 @@ class Conn(private val socket: LocalSocket) {
 
     private fun header(n: Int) = byteArrayOf((n ushr 24).toByte(), (n ushr 16).toByte(), (n ushr 8).toByte(), n.toByte())
 
-    private fun enqueue(b: ByteArray) {
+    private fun enqueue(b: ByteArray, off: Int = 0, len: Int = b.size - off) {
         if (closed) throw EOFException()
-        if (b.isEmpty()) return
-        outQueue.addLast(b)
-        outBytes += b.size
+        if (len == 0) return
+        // A fresh wrapper per enqueue: shared arrays (END, PONG…) never share a position.
+        outQueue.addLast(ByteBuffer.wrap(b, off, len))
+        outBytes += len
     }
 
     private suspend fun awaitBelow(limit: Long) {
@@ -230,16 +271,15 @@ class Conn(private val socket: LocalSocket) {
             }
             val b = outQueue.first()
             val n = try {
-                Os.sendto(fd, b, outHead, b.size - outHead, MSG_NOSIGNAL, null, 0)
+                Os.sendto(fd, b, MSG_NOSIGNAL, null, 0)   // advances b's position
             } catch (e: ErrnoException) {
                 if (e.errno == OsConstants.EAGAIN) break
                 close(); return
             } catch (_: Exception) {
                 close(); return
             }
-            outHead += n
             outBytes -= n
-            if (outHead == b.size) { outQueue.removeFirst(); outHead = 0 }
+            if (!b.hasRemaining()) outQueue.removeFirst()
         }
         wakeWriters()
         updateInterest()
