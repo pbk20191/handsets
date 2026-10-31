@@ -11,12 +11,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,6 +41,7 @@ private fun Screen() {
     var query by remember { mutableStateOf("") }
     var onlyKorean by remember { mutableStateOf(false) }
     var searched by remember { mutableStateOf<String?>(null) }
+    var confirmReset by remember { mutableStateOf(false) }
     val shown = FRUITS.filter { it.contains(query, ignoreCase = true) && (!onlyKorean || it.first() >= '가') }
 
     Column(Modifier.fillMaxSize().padding(16.dp).testTag("screen")) {
@@ -55,8 +58,30 @@ private fun Screen() {
         }
         // The button's label merges into it in the accessibility tree; the
         // unmerged semantics tree keeps the Text as its own node.
-        Button(onClick = { searched = query }, modifier = Modifier.testTag("search")) {
-            Text("검색 (${shown.size})")
+        Row {
+            Button(onClick = { searched = query }, modifier = Modifier.testTag("search")) {
+                Text("검색 (${shown.size})")
+            }
+            TextButton(onClick = { confirmReset = true }, modifier = Modifier.testTag("reset")) {
+                Text("초기화")
+            }
+        }
+        // A dialog is its own window, outside the activity's view tree.
+        if (confirmReset) {
+            AlertDialog(
+                onDismissRequest = { confirmReset = false },
+                title = { Text("검색 초기화") },
+                text = { Text("검색어와 필터를 지울까요?") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        query = ""; onlyKorean = false; searched = null; confirmReset = false
+                    }, modifier = Modifier.testTag("reset_ok")) { Text("지우기") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmReset = false }, modifier = Modifier.testTag("reset_cancel")) { Text("취소") }
+                },
+                modifier = Modifier.testTag("reset_dialog"),
+            )
         }
         AnimatedVisibility(searched != null) {
             Text("'${searched}' 결과 ${shown.size}개", Modifier.testTag("result_banner"))

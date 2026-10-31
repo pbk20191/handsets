@@ -1,7 +1,6 @@
 package dev.handsets.probe;
 
 import android.app.Activity;
-import android.app.Instrumentation;
 import android.content.Context;
 import android.content.Intent;
 import android.net.LocalServerSocket;
@@ -17,6 +16,8 @@ import android.system.OsConstants;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
+import android.view.inspector.WindowInspector;
 
 import java.io.ByteArrayOutputStream;
 import java.io.FileDescriptor;
@@ -34,6 +35,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import androidx.test.runner.MonitoringInstrumentation;
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry;
+import androidx.test.runner.lifecycle.Stage;
+
 import static android.os.MessageQueue.OnFileDescriptorEventListener.EVENT_ERROR;
 import static android.os.MessageQueue.OnFileDescriptorEventListener.EVENT_INPUT;
 import static android.os.MessageQueue.OnFileDescriptorEventListener.EVENT_OUTPUT;
@@ -47,7 +52,7 @@ import static android.os.MessageQueue.OnFileDescriptorEventListener.EVENT_OUTPUT
  *
  * Commands, one per line on {@code localabstract:hs-probe}:
  * <pre>
- *   tree               the semantics tree of the resumed activity, as JSON
+ *   tree               the semantics tree of every Compose window, as JSON
  *   click TAG          run the node's OnClick action
  *   settext TAG TEXT   run the node's SetText action (any script, any state)
  *   quit               end the instrumentation (the target app goes with it)
@@ -57,10 +62,14 @@ import static android.os.MessageQueue.OnFileDescriptorEventListener.EVENT_OUTPUT
  * to run anyway (Compose state is main-thread only): no thread per client,
  * no hop per command, and any number of clients at once.
  *
+ * Built on androidx.test's MonitoringInstrumentation: it tracks every
+ * activity's lifecycle stage, and a crash in the target is reported through
+ * {@code am instrument} with its stack instead of a bare "Process crashed".
+ *
  * For an R8-minified target, pass the obfuscated names from its mapping.txt
  * ({@code tools/probe_names.py}) as {@code -e names "key=kind:name;…"}.
  */
-public final class ProbeInstrumentation extends Instrumentation {
+public final class ProbeInstrumentation extends MonitoringInstrumentation {
     private static final String TAG = "hs-probe";
     private static final String SOCKET = "hs-probe";
     /**
@@ -74,8 +83,7 @@ public final class ProbeInstrumentation extends Instrumentation {
     /** Logical member → "m:name" | "m3:name" | "f:name" | "c:class", from the target's mapping. */
     private static final Map<String, String> NAMES = new HashMap<>();
 
-    private volatile Activity resumed;
-    // Main-thread state below.
+    // Main-thread state.
     private LocalServerSocket server;
     private final Set<Client> clients = new HashSet<>();
     private boolean quitting;
@@ -93,18 +101,13 @@ public final class ProbeInstrumentation extends Instrumentation {
         start();
     }
 
-    @Override
-    public void callActivityOnResume(Activity activity) {
-        super.callActivityOnResume(activity);
-        resumed = activity;
-    }
-
     /**
      * On the instrumentation thread: launch the target, open the socket and
      * hand it to the main looper. The instrumentation lives on until finish().
      */
     @Override
     public void onStart() {
+        super.onStart();
         Context target = getTargetContext();
         Intent launch = target.getPackageManager().getLaunchIntentForPackage(target.getPackageName());
         if (launch == null) {
@@ -112,7 +115,7 @@ public final class ProbeInstrumentation extends Instrumentation {
             return;
         }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-        resumed = startActivitySync(launch);
+        startActivitySync(launch);
         try {
             server = new LocalServerSocket(SOCKET);
         } catch (IOException e) {
@@ -135,7 +138,13 @@ public final class ProbeInstrumentation extends Instrumentation {
     private void end(String why) {
         Bundle b = new Bundle();
         b.putString("probe", why);
-        finish(Activity.RESULT_OK, b);
+        // MonitoringInstrumentation.finish waits for the activities to close,
+        // which it refuses to do on the main thread, where `quit` arrives.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            new Thread(() -> finish(Activity.RESULT_OK, b), "hs-probe-finish").start();
+        } else {
+            finish(Activity.RESULT_OK, b);
+        }
     }
 
     /** The listening socket is readable: one connection waits, so accept() returns at once. */
@@ -325,12 +334,41 @@ public final class ProbeInstrumentation extends Instrumentation {
 
     // ---- reading the tree ----
 
-    /** Every Compose root view (AndroidComposeView) under the resumed activity. */
-    private List<View> composeRoots() {
+    /** The resumed activity (main thread only), or null. */
+    private static Activity resumed() {
+        for (Activity a : ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)) return a;
+        return null;
+    }
+
+    /** The app's visible windows, bottom first: dialogs and popups too on API 29+. */
+    private static List<View> windows() {
+        List<View> out = new ArrayList<>();
+        if (Build.VERSION.SDK_INT >= 29) {
+            for (View w : WindowInspector.getGlobalWindowViews()) {
+                if (w.isAttachedToWindow() && w.getWindowVisibility() == View.VISIBLE) out.add(w);
+            }
+        } else {
+            Activity a = resumed();
+            if (a != null) out.add(a.getWindow().getDecorView());
+        }
+        return out;
+    }
+
+    /** Every Compose root view (AndroidComposeView) in the app's windows, bottom first. */
+    private static List<View> composeRoots() {
         List<View> roots = new ArrayList<>();
-        Activity a = resumed;
-        if (a != null) collect(a.getWindow().getDecorView(), roots);
+        for (View w : windows()) collect(w, roots);
         return roots;
+    }
+
+    /** The window title, e.g. the activity's component or a dialog's. */
+    private static String windowTitle(View composeView) {
+        Object lp = composeView.getRootView().getLayoutParams();
+        if (lp instanceof WindowManager.LayoutParams) {
+            CharSequence t = ((WindowManager.LayoutParams) lp).getTitle();
+            if (t != null) return t.toString();
+        }
+        return "";
     }
 
     private static void collect(View v, List<View> out) {
@@ -351,7 +389,7 @@ public final class ProbeInstrumentation extends Instrumentation {
     }
 
     private String dumpTree() throws Exception {
-        Activity a = resumed;
+        Activity a = resumed();
         StringBuilder sb = new StringBuilder("{\"activity\":");
         str(sb, a == null ? "" : a.getComponentName().flattenToShortString());
         sb.append(",\"roots\":[");
@@ -360,7 +398,11 @@ public final class ProbeInstrumentation extends Instrumentation {
         for (int i = 0; i < roots.size(); i++) {
             if (i > 0) sb.append(',');
             roots.get(i).getLocationOnScreen(loc);
+            sb.append("{\"window\":");
+            str(sb, windowTitle(roots.get(i)));
+            sb.append(",\"tree\":");
             node(sb, rootNode(roots.get(i)), loc[0], loc[1]);
+            sb.append('}');
         }
         return sb.append("]}").toString();
     }
@@ -428,7 +470,9 @@ public final class ProbeInstrumentation extends Instrumentation {
     // ---- acting on a node ----
 
     private String perform(String tag, String actionName, String text) throws Exception {
-        for (View root : composeRoots()) {
+        List<View> roots = composeRoots();
+        Collections.reverse(roots);
+        for (View root : roots) {
             Object n = findByTag(rootNode(root), tag);
             if (n == null) continue;
             Object action = configValue(n, actionName);
