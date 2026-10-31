@@ -1,6 +1,7 @@
 package dev.handsets.probe;
 
 import android.app.Activity;
+import android.app.Instrumentation;
 import android.content.Context;
 import android.content.Intent;
 import android.net.LocalServerSocket;
@@ -35,9 +36,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import androidx.test.runner.MonitoringInstrumentation;
-import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry;
-import androidx.test.runner.lifecycle.Stage;
 
 import static android.os.MessageQueue.OnFileDescriptorEventListener.EVENT_ERROR;
 import static android.os.MessageQueue.OnFileDescriptorEventListener.EVENT_INPUT;
@@ -62,14 +60,15 @@ import static android.os.MessageQueue.OnFileDescriptorEventListener.EVENT_OUTPUT
  * to run anyway (Compose state is main-thread only): no thread per client,
  * no hop per command, and any number of clients at once.
  *
- * Built on androidx.test's MonitoringInstrumentation: it tracks every
- * activity's lifecycle stage, and a crash in the target is reported through
- * {@code am instrument} with its stack instead of a bare "Process crashed".
+ * A plain Instrumentation with no libraries: nothing of the probe's runs in
+ * the target but the probe itself, and nothing it bundles can clash with the
+ * target's own classes. A crash in the target is reported through
+ * {@code am instrument} with its stack, not just "Process crashed".
  *
  * For an R8-minified target, pass the obfuscated names from its mapping.txt
  * ({@code tools/probe_names.py}) as {@code -e names "key=kind:name;…"}.
  */
-public final class ProbeInstrumentation extends MonitoringInstrumentation {
+public final class ProbeInstrumentation extends Instrumentation {
     private static final String TAG = "hs-probe";
     private static final String SOCKET = "hs-probe";
     /**
@@ -79,9 +78,14 @@ public final class ProbeInstrumentation extends MonitoringInstrumentation {
      * waits.
      */
     private static final int WRITE_CHUNK = 4096;
+    /** `am instrument -r` status code for a crash report. */
+    private static final int STATUS_CRASHED = 3;
 
     /** Logical member → "m:name" | "m3:name" | "f:name" | "c:class", from the target's mapping. */
     private static final Map<String, String> NAMES = new HashMap<>();
+
+    /** The activity last resumed and not paused since; set on the main thread. */
+    private static volatile Activity resumed;
 
     // Main-thread state.
     private LocalServerSocket server;
@@ -91,6 +95,7 @@ public final class ProbeInstrumentation extends MonitoringInstrumentation {
     @Override
     public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
+        reportCrashes();
         String names = arguments == null ? null : arguments.getString("names");
         if (names != null) {
             for (String pair : names.split(";")) {
@@ -101,13 +106,42 @@ public final class ProbeInstrumentation extends MonitoringInstrumentation {
         start();
     }
 
+    @Override
+    public void callActivityOnResume(Activity activity) {
+        super.callActivityOnResume(activity);
+        resumed = activity;
+    }
+
+    @Override
+    public void callActivityOnPause(Activity activity) {
+        super.callActivityOnPause(activity);
+        if (resumed == activity) resumed = null;
+    }
+
+    /**
+     * Ahead of whatever handler the target sets up, report an uncaught
+     * exception through `am instrument` (stack included), then hand it on.
+     */
+    private void reportCrashes() {
+        Thread.UncaughtExceptionHandler next = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+            try {
+                Bundle b = new Bundle();
+                b.putString("probe", "target crashed on thread " + thread.getName());
+                b.putString("stack", Log.getStackTraceString(error));
+                sendStatus(STATUS_CRASHED, b);
+            } catch (Throwable ignored) {
+            }
+            if (next != null) next.uncaughtException(thread, error);
+        });
+    }
+
     /**
      * On the instrumentation thread: launch the target, open the socket and
      * hand it to the main looper. The instrumentation lives on until finish().
      */
     @Override
     public void onStart() {
-        super.onStart();
         Context target = getTargetContext();
         Intent launch = target.getPackageManager().getLaunchIntentForPackage(target.getPackageName());
         if (launch == null) {
@@ -138,13 +172,7 @@ public final class ProbeInstrumentation extends MonitoringInstrumentation {
     private void end(String why) {
         Bundle b = new Bundle();
         b.putString("probe", why);
-        // MonitoringInstrumentation.finish waits for the activities to close,
-        // which it refuses to do on the main thread, where `quit` arrives.
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            new Thread(() -> finish(Activity.RESULT_OK, b), "hs-probe-finish").start();
-        } else {
-            finish(Activity.RESULT_OK, b);
-        }
+        finish(Activity.RESULT_OK, b);
     }
 
     /** The listening socket is readable: one connection waits, so accept() returns at once. */
@@ -334,12 +362,6 @@ public final class ProbeInstrumentation extends MonitoringInstrumentation {
 
     // ---- reading the tree ----
 
-    /** The resumed activity (main thread only), or null. */
-    private static Activity resumed() {
-        for (Activity a : ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)) return a;
-        return null;
-    }
-
     /** The app's visible windows, bottom first: dialogs and popups too on API 29+. */
     private static List<View> windows() {
         List<View> out = new ArrayList<>();
@@ -348,7 +370,7 @@ public final class ProbeInstrumentation extends MonitoringInstrumentation {
                 if (w.isAttachedToWindow() && w.getWindowVisibility() == View.VISIBLE) out.add(w);
             }
         } else {
-            Activity a = resumed();
+            Activity a = resumed;
             if (a != null) out.add(a.getWindow().getDecorView());
         }
         return out;
@@ -389,7 +411,7 @@ public final class ProbeInstrumentation extends MonitoringInstrumentation {
     }
 
     private String dumpTree() throws Exception {
-        Activity a = resumed();
+        Activity a = resumed;
         StringBuilder sb = new StringBuilder("{\"activity\":");
         str(sb, a == null ? "" : a.getComponentName().flattenToShortString());
         sb.append(",\"roots\":[");
