@@ -308,13 +308,19 @@ public final class ProbeInstrumentation extends Instrumentation {
         private void writeSome() throws ErrnoException, InterruptedIOException {
             ByteBuffer b;
             while ((b = out.peek()) != null) {
-                int len = nonBlocking ? b.remaining() : Math.min(WRITE_CHUNK, b.remaining());
+                ByteBuffer part = b;
+                if (!nonBlocking && b.remaining() > WRITE_CHUNK) {
+                    // Blocking fd: hand over one chunk, which the socket takes without waiting.
+                    part = b.duplicate();
+                    part.limit(b.position() + WRITE_CHUNK);
+                }
                 try {
-                    b.position(b.position() + Os.write(fd, b.array(), b.position(), len));
+                    Os.write(fd, part);  // advances part's position
                 } catch (ErrnoException e) {
                     if (e.errno == OsConstants.EAGAIN) return;
                     throw e;
                 }
+                if (part != b) b.position(part.position());
                 if (!b.hasRemaining()) out.poll();
                 if (!nonBlocking) return;
             }
