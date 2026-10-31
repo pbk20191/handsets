@@ -27,7 +27,9 @@ import java.io.InterruptedIOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -223,8 +225,8 @@ public final class ProbeInstrumentation extends Instrumentation {
         final FileDescriptor fd;
         private final ByteArrayOutputStream line = new ByteArrayOutputStream();
         private final byte[] readBuf = new byte[8192];
-        private byte[] out = new byte[0];
-        private int outPos;
+        /** Replies not yet fully written, oldest first; each buffer's position is how far it got. */
+        private final ArrayDeque<ByteBuffer> out = new ArrayDeque<>();
         /** The peer closed its end; finish sending, then close. */
         private boolean draining;
 
@@ -263,7 +265,7 @@ public final class ProbeInstrumentation extends Instrumentation {
             } finally {
                 StrictMode.setThreadPolicy(policy);
             }
-            boolean pending = outPos < out.length;
+            boolean pending = !out.isEmpty();
             if (!pending && quitting) {
                 shutdown("quit");
                 return 0;
@@ -304,24 +306,23 @@ public final class ProbeInstrumentation extends Instrumentation {
 
         /** Writes as much as the socket takes (non-blocking), or one chunk that cannot wait. */
         private void writeSome() throws ErrnoException, InterruptedIOException {
-            while (outPos < out.length) {
-                int len = nonBlocking ? out.length - outPos : Math.min(WRITE_CHUNK, out.length - outPos);
+            ByteBuffer b;
+            while ((b = out.peek()) != null) {
+                int len = nonBlocking ? b.remaining() : Math.min(WRITE_CHUNK, b.remaining());
                 try {
-                    outPos += Os.write(fd, out, outPos, len);
+                    b.position(b.position() + Os.write(fd, b.array(), b.position(), len));
                 } catch (ErrnoException e) {
                     if (e.errno == OsConstants.EAGAIN) return;
                     throw e;
                 }
+                if (!b.hasRemaining()) out.poll();
                 if (!nonBlocking) return;
             }
         }
 
+        /** Queues a reply as is: nothing already queued is copied again. */
         private void enqueue(byte[] bytes) {
-            byte[] rest = new byte[out.length - outPos + bytes.length];
-            System.arraycopy(out, outPos, rest, 0, out.length - outPos);
-            System.arraycopy(bytes, 0, rest, out.length - outPos, bytes.length);
-            out = rest;
-            outPos = 0;
+            out.add(ByteBuffer.wrap(bytes));
         }
 
         void close() {
