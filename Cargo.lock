@@ -980,6 +980,7 @@ dependencies = [
  "ffmpeg-sys-next",
  "glow",
  "glutin",
+ "mobax-core",
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-core-media",

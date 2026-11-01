@@ -385,7 +385,6 @@ pub(crate) fn suggest(old: &str) -> String {
         "screenshot"   => Some("mobax see <PATH.jpg|.png>"),
         "dump" | "dump-active" => Some("mobax see <PATH.xml|.json>"),
         "query"        => Some("mobax find <SELECTOR>"),
-        "mirror"       => Some("mobax see   (bare opens the viewer)"),
         "pull" | "push" => Some("mobax cp  (device:/path host:/path or reverse)"),
         "pm"           => Some("mobax apps / mobax install / mobax uninstall / mobax show <pkg>"),
         "am"           => Some("mobax open / mobax close / mobax events"),
@@ -586,7 +585,8 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Opts, String> {
         }
 
         // ─── See — capture by extension, bare = viewer ───────────────
-        Some((&"see", rest)) => Cmd::See(parse_see(rest)?),
+        // `mirror`: what it was called before `see` took it over.
+        Some((&"see", rest)) | Some((&"mirror", rest)) => Cmd::See(parse_see(rest)?),
 
         // ─── TUI — keyboard-driven inspector ─────────────────────────
         Some((&"tui", rest)) => match rest {

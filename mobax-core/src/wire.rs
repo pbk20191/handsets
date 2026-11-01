@@ -125,6 +125,24 @@ impl Conn {
     }
 }
 
+/// A stream to the daemon, for tools that can't start it themselves (the
+/// TUI, the viewer): through the adb server to the target device when `host`
+/// is this machine, else TCP `host:port`. A device with no daemon says how to
+/// start one.
+pub fn daemon_stream(host: &str, port: u16) -> io::Result<TcpStream> {
+    if !crate::device::is_local(host) {
+        return TcpStream::connect((host, port));
+    }
+    let serial = crate::device::target_serial()?;
+    adb_server::device_stream(&serial, port).map_err(|e| match e {
+        Error::NoDaemon(why) => io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("no daemon on {serial} ({why}); start it with `mobax use {serial}`"),
+        ),
+        e => e.into(),
+    })
+}
+
 /// A `ui_watch` frame, `{"seq":N,"ev":E,"dump":{…}}` → (N, E, dump).
 pub fn parse_watch_frame(frame: &[u8]) -> io::Result<(i64, i64, Value)> {
     let text = std::str::from_utf8(frame).map_err(|e| io::Error::other(format!("ui_watch frame not utf-8: {e}")))?;

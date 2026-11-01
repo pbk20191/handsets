@@ -50,8 +50,12 @@ Options:
   --tile N            tile edge in px (tilejpeg only, default 128)
   --fps N             frame-rate hint
   --no-native         don't request max=1; use --size literally
-  --host H            default 127.0.0.1
-  --port P            default 9008
+  --device, -s S      the device (default: the one `mobax use` picked last,
+                      or the only one attached)
+  --host H            a remote daemon host; local devices go through the adb
+                      server, no port forward needed
+  --port P            daemon instance on the device (default 9008); with
+                      --host, the TCP port there
   -h, --help          show this message
 ";
 
@@ -115,6 +119,7 @@ fn parse_args() -> Result<Args, String> {
             "--fps" => a.fps = Some(it.next().ok_or("--fps needs a value")?.parse().map_err(|_| "bad --fps")?),
             "--tile" => a.tile = Some(it.next().ok_or("--tile needs a value")?.parse().map_err(|_| "bad --tile")?),
             "--no-native" => a.native = false,
+            "--device" | "-s" => mobax_core::device::set_target(Some(it.next().ok_or("--device needs a SERIAL")?)),
             "--host" => a.host = it.next().ok_or("--host needs a value")?,
             "--port" => a.port = it.next().ok_or("--port needs a value")?.parse().map_err(|_| "bad --port")?,
             other => return Err(format!("unknown arg: {other}")),
@@ -374,7 +379,7 @@ impl App {
 
 fn input_thread(host: String, port: u16, rx: Receiver<InputCmd>) {
     // Persistent socket; on error, drop the channel by exiting.
-    let sock = match TcpStream::connect((host.as_str(), port)) {
+    let sock = match open(&host, port) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("viewer: input socket connect failed: {e}");
@@ -466,7 +471,7 @@ fn network_thread_jpeg(
     latest: Arc<Mutex<Option<DecodedFrame>>>,
     proxy: EventLoopProxy<UserEvent>,
 ) {
-    let mut sock = match TcpStream::connect((args.host.as_str(), args.port)) {
+    let mut sock = match open(&args.host, args.port) {
         Ok(s) => s,
         Err(e) => {
             let _ = proxy.send_event(UserEvent::Disconnected(format!("connect failed: {e}")));
@@ -598,7 +603,7 @@ fn network_thread_h264(
         }
     };
 
-    let mut sock = match TcpStream::connect((args.host.as_str(), args.port)) {
+    let mut sock = match open(&args.host, args.port) {
         Ok(s) => s,
         Err(e) => {
             let _ = proxy.send_event(UserEvent::Disconnected(format!("connect failed: {e}")));
@@ -699,7 +704,7 @@ fn network_thread_tilejpeg(
     latest: Arc<Mutex<Option<DecodedFrame>>>,
     proxy: EventLoopProxy<UserEvent>,
 ) {
-    let mut sock = match TcpStream::connect((args.host.as_str(), args.port)) {
+    let mut sock = match open(&args.host, args.port) {
         Ok(s) => s,
         Err(e) => {
             let _ = proxy.send_event(UserEvent::Disconnected(format!("connect failed: {e}")));
@@ -843,9 +848,18 @@ fn write_cmd(sock: &mut TcpStream, cmd: &[u8]) -> std::io::Result<()> {
     sock.write_all(cmd)
 }
 
+/// A socket to the daemon: through the adb server for a device on this
+/// machine (no host port needed), else TCP on `host`. Frames can be far
+/// apart on a still screen, so reads don't time out.
+fn open(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    let s = mobax_core::wire::daemon_stream(host, port)?;
+    s.set_read_timeout(None)?;
+    Ok(s)
+}
+
 /// One-shot `info` request — returns the device display dimensions in pixels.
 fn fetch_device_size(host: &str, port: u16) -> std::io::Result<(u32, u32)> {
-    let mut s = TcpStream::connect((host, port))?;
+    let mut s = open(host, port)?;
     let _ = s.set_nodelay(true);
     let cmd = b"info";
     s.write_all(&(cmd.len() as u32).to_be_bytes())?;

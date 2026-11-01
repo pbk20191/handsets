@@ -9,6 +9,7 @@ name = "mobax-viewer"
 path = "src/main.rs"
 
 [dependencies]
+mobax-core = { path = "../mobax-core" }
 winit = "0.30"
 raw-window-handle = "0.6"
 
