@@ -955,18 +955,18 @@ dependencies = [
 
 [[package]]
 name = "mobax"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "mobax-core",
 ]
 
 [[package]]
 name = "mobax-core"
-version = "0.5.0"
+version = "0.5.1"
 
 [[package]]
 name = "mobax-tui"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "crossterm",
  "mobax-core",
@@ -975,11 +975,12 @@ dependencies = [
 
 [[package]]
 name = "mobax-viewer"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "ffmpeg-sys-next",
  "glow",
  "glutin",
+ "mobax-core",
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-core-media",

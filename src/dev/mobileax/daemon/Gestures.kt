@@ -35,8 +35,8 @@ internal class Gestures(private val h: Server.Handlers) {
 
     // ── gestures ────────────────────────────────────────────────────────
 
-    private suspend fun motion(down: Long, at: Long, action: Int, x: Int, y: Int) =
-        withContext(Loop.Work) { h.input.motion(down, at, action, x, y) }
+    private suspend fun motion(down: Long, at: Long, action: Int, x: Int, y: Int, sync: Boolean = true) =
+        withContext(Loop.Work) { h.input.motion(down, at, action, x, y, sync) }
 
     /** Down, one 60 Hz frame, up — reads as a real tap to gesture detectors. */
     suspend fun tap(x: Int, y: Int) {
@@ -50,19 +50,20 @@ internal class Gestures(private val h: Server.Handlers) {
      * One MOVE per vsync, stamped with the frame time, positioned by elapsed
      * time; the last MOVE lands on the endpoint and UP shares its time.
      */
-    suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durMs0: Int) {
+    /** [sync]: each event waits until the window has handled it (see [Input.motion]). */
+    suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durMs0: Int, sync: Boolean = true) {
         val durMs = if (durMs0 <= 0) 500 else durMs0
         val t0 = SystemClock.uptimeMillis()
-        motion(t0, t0, MotionEvent.ACTION_DOWN, x1, y1)
+        motion(t0, t0, MotionEvent.ACTION_DOWN, x1, y1, sync)
         var at: Long
         do {
             at = maxOf(Frames.next(), t0 + 1)
             val f = minOf(1f, (at - t0).toFloat() / durMs)
             motion(t0, at, MotionEvent.ACTION_MOVE, (x1 + (x2 - x1) * f).roundToInt(),
-                (y1 + (y2 - y1) * f).roundToInt()
+                (y1 + (y2 - y1) * f).roundToInt(), sync
             )
         } while (at - t0 < durMs)
-        motion(t0, at, MotionEvent.ACTION_UP, x2, y2)
+        motion(t0, at, MotionEvent.ACTION_UP, x2, y2, sync)
     }
 
     private suspend fun input(head: String, cmd: String): ByteArray = try {
@@ -87,11 +88,11 @@ internal class Gestures(private val h: Server.Handlers) {
                 "scroll" -> {
                     // Positive dy → swipe up → content scrolls up.
                     val dy = if (a.dy == 0) 1 else a.dy
-                    swipe(a.x, a.y, a.x, a.y - dy, 120); OK
+                    swipe(a.x, a.y, a.x, a.y - dy, 120, a.wait); OK
                 }
                 "key" -> when {
-                    a.code != 0 -> { withContext(Loop.Work) { h.input.key(a.code) }; OK }
-                    a.keyName != null -> { withContext(Loop.Work) { h.input.keyByName(a.keyName) }; OK }
+                    a.code != 0 -> { withContext(Loop.Work) { h.input.key(a.code, a.wait) }; OK }
+                    a.keyName != null -> { withContext(Loop.Work) { h.input.keyByName(a.keyName, a.wait) }; OK }
                     else -> Server.errBytes("key-needs-name-or-code")
                 }
                 else -> Server.errBytes("unknown-input:$head")

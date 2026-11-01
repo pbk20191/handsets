@@ -28,6 +28,16 @@ import kotlin.time.Duration.Companion.milliseconds
 internal class Input(private val ua: UiAutomation) {
     private val virtualKeyMap: KeyCharacterMap?
 
+    /** `injectInputEvent(event, sync, waitForAnimations)`; hidden, so looked up. */
+    private val injectNoAnimWait: java.lang.reflect.Method? = try {
+        UiAutomation::class.java.getMethod(
+            "injectInputEvent", android.view.InputEvent::class.java, java.lang.Boolean.TYPE, java.lang.Boolean.TYPE
+        )
+    } catch (t: Throwable) {
+        Logx.w("no injectInputEvent(event, sync, waitForAnimations); live input waits for animations", t)
+        null
+    }
+
     // Streamed-pointer state. Guarded by `this`.
     private var pointerActive = false
     private var pointerDownTime = 0L
@@ -55,7 +65,7 @@ internal class Input(private val ua: UiAutomation) {
             // A stray second DOWN — emit an UP first to keep the dispatcher happy.
             motion(
                 pointerDownTime, SystemClock.uptimeMillis(),
-                MotionEvent.ACTION_UP, pointerLastX, pointerLastY
+                MotionEvent.ACTION_UP, pointerLastX, pointerLastY, sync = false
             )
         }
         pointerActive = true
@@ -64,7 +74,7 @@ internal class Input(private val ua: UiAutomation) {
         pointerLastY = y
         motion(
             pointerDownTime, pointerDownTime,
-            MotionEvent.ACTION_DOWN, x, y
+            MotionEvent.ACTION_DOWN, x, y, sync = false
         )
     }
 
@@ -76,7 +86,7 @@ internal class Input(private val ua: UiAutomation) {
         pointerLastY = y
         motion(
             pointerDownTime, SystemClock.uptimeMillis(),
-            MotionEvent.ACTION_MOVE, x, y
+            MotionEvent.ACTION_MOVE, x, y, sync = false
         )
     }
 
@@ -88,26 +98,27 @@ internal class Input(private val ua: UiAutomation) {
         pointerLastY = y
         motion(
             pointerDownTime, SystemClock.uptimeMillis(),
-            MotionEvent.ACTION_UP, x, y
+            MotionEvent.ACTION_UP, x, y, sync = false
         )
         pointerActive = false
     }
 
     // ---------- keys ----------
-    fun key(code: Int) {
-        keyPress(code)
+    /** [sync]: wait until the window has handled it (see [motion]). */
+    fun key(code: Int, sync: Boolean = true) {
+        keyPress(code, sync)
     }
 
     /** Resolve a friendly name (BACK, HOME, etc.) to a KEYCODE_* and press.  */
-    fun keyByName(name: String?) {
+    fun keyByName(name: String?, sync: Boolean = true) {
         val code = requireNotNull(keycodeForName(name)) { "unknown key name: $name" }
-        keyPress(code)
+        keyPress(code, sync)
     }
 
-    private fun keyPress(code: Int) {
+    private fun keyPress(code: Int, sync: Boolean = true) {
         val t = SystemClock.uptimeMillis()
-        keyEvent(t, t, KeyEvent.ACTION_DOWN, code)
-        keyEvent(t, t + 1, KeyEvent.ACTION_UP, code)
+        keyEvent(t, t, KeyEvent.ACTION_DOWN, code, sync)
+        keyEvent(t, t + 1, KeyEvent.ACTION_UP, code, sync)
     }
 
     /**
@@ -196,7 +207,15 @@ internal class Input(private val ua: UiAutomation) {
     }
 
     // ---------- low-level helpers ----------
-    fun motion(downTime: Long, eventTime: Long, action: Int, x: Int, y: Int) {
+    /**
+     * Injects one touch event. [sync] waits until the window has handled it,
+     * so a `tap` or `swipe` returns after its effect has started. A streamed
+     * pointer (down/move/up from the viewer) passes false: the input queue
+     * keeps the order anyway, and a window slow to finish an event (the
+     * launcher just after Recents opens took 5 s) must not hold up the
+     * replies the stream paces itself by.
+     */
+    fun motion(downTime: Long, eventTime: Long, action: Int, x: Int, y: Int, sync: Boolean = true) {
         // Build a full-fidelity MotionEvent so gesture detectors that check
         // toolType + pressure (launcher swipes, ViewPager flings, AndroidX
         // GestureDetector) treat it as a real finger. The 6-arg
@@ -225,19 +244,35 @@ internal class Input(private val ua: UiAutomation) {
             0
         )
         try {
-            ua.injectInputEvent(ev, true)
+            inject(ev, sync)
         } finally {
             ev.recycle()
         }
     }
 
-    private fun keyEvent(downTime: Long, eventTime: Long, action: Int, code: Int) {
+    /**
+     * `sync` waits until the window has handled the event. Not waiting goes
+     * further: the 2-argument `injectInputEvent` also waits for the window
+     * animations to finish (`waitForAnimations`), sync or not, and in Recents
+     * that took 5 s for a Back key. A live stream skips both, through the
+     * hidden 3-argument form where the device has it.
+     */
+    private fun inject(ev: android.view.InputEvent, sync: Boolean) {
+        val noWait = injectNoAnimWait
+        if (sync || noWait == null) {
+            ua.injectInputEvent(ev, sync)
+        } else {
+            noWait.invoke(ua, ev, false, false)
+        }
+    }
+
+    private fun keyEvent(downTime: Long, eventTime: Long, action: Int, code: Int, sync: Boolean = true) {
         val ev = KeyEvent(
             downTime, eventTime, action, code, 0, 0,
             KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
             KeyEvent.FLAG_FROM_SYSTEM, InputDevice.SOURCE_KEYBOARD
         )
-        ua.injectInputEvent(ev, true)
+        inject(ev, sync)
     }
 
     companion object {

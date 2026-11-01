@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use mobax_core::adb_server::{self, socket_name as device_socket, Forward as ForwardEntry};
+use mobax_core::adb_server::{self, Forward as ForwardEntry};
 use mobax_core::device::{clear_current, home_dir, is_set, write_current};
 
 use crate::state_cache;
@@ -374,18 +374,6 @@ fn remove_daemon_forwards(serial: &str) {
             let _ = state_cache::stop_watcher(port);
         }
     }
-}
-
-/// A host port forwarded to the daemon on `serial`, for programs that can
-/// only speak TCP (the viewer, the TUI). The caller removes it with
-/// [`remove_forward`] when done.
-pub(crate) fn temporary_forward(serial: &str, port: u16) -> io::Result<u16> {
-    let out = adb_ok(Some(serial), &["forward", "tcp:0", &device_socket(port)], "forward")?;
-    out.trim().parse().map_err(|_| io::Error::other(format!("adb forward: unexpected reply {out:?}")))
-}
-
-pub(crate) fn remove_forward(serial: &str, host_port: u16) {
-    let _ = adb(Some(serial), &["forward", "--remove", &format!("tcp:{host_port}")]);
 }
 
 pub(crate) fn disconnect(opts: &DisconnectOpts) -> io::Result<()> {

@@ -42,8 +42,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn draw_title(f: &mut Frame, area: Rect, app: &App) {
     let n = app.elements.len();
     let title = format!(
-        " mobax tui   {}:{}   {} element{} ",
-        app.host, app.port, n, if n == 1 { "" } else { "s" }
+        " mobax tui   {}   {} element{} ",
+        app.source, n, if n == 1 { "" } else { "s" }
     );
     let p = Paragraph::new(title).style(Style::default()
         .fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD));

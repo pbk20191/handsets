@@ -58,6 +58,9 @@ up          x=NUM y=NUM                                  releases the down point
 scroll      x=NUM y=NUM dy=NUM                           wheel scroll at point
 key         NAME                                         e.g. BACK, HOME, ENTER
 key         code=N                                       raw KeyEvent code
+                                                         key/scroll take wait=0: don't wait for the
+                                                         window to handle it or for animations to
+                                                         end (a live viewer; Back in Recents took 5 s)
 text        STRING                                       insert at the focused field's cursor
                                                          (KeyEvents for a password field or a
                                                          view with no editable focus)
