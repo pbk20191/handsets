@@ -89,6 +89,8 @@ internal class Server(private val h: Handlers) {
     }
 
     internal class InputArgs {
+        /** `wait=0`: don't wait for the window to handle a key (a live viewer). */
+        var wait = true
         var x: Int = 0
         var y: Int = 0
         var x1: Int = 0
@@ -336,6 +338,7 @@ internal class Server(private val h: Handlers) {
                         "dur" -> a.dur = v.toInt()
                         "dy" -> a.dy = v.toInt()
                         "code" -> a.code = v.toInt()
+                        "wait" -> a.wait = v != "0"
                         else -> {}
                     }
                 } catch (_: NumberFormatException) {

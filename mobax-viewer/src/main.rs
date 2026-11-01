@@ -464,8 +464,10 @@ fn send_one_with_ack(
         InputCmd::PointerDown(x, y) => format!("down x={x} y={y}"),
         InputCmd::PointerMove(x, y) => format!("move x={x} y={y}"),
         InputCmd::PointerUp(x, y) => format!("up x={x} y={y}"),
-        InputCmd::Scroll { x, y, dy } => format!("scroll x={x} y={y} dy={dy}"),
-        InputCmd::KeyName(name) => format!("key {name}"),
+        InputCmd::Scroll { x, y, dy } => format!("scroll x={x} y={y} dy={dy} wait=0"),
+        // wait=0: Back in Recents took 5 s to be handled; a live viewer
+        // must not wait for it (the stream's order is kept anyway).
+        InputCmd::KeyName(name) => format!("key {name} wait=0"),
         InputCmd::Text(s) => format!("text {s}"),
     };
     let bytes = wire.as_bytes();
