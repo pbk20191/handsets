@@ -10,7 +10,7 @@ import java.io.IOException
 
 /**
  * Listening socket in the abstract Unix namespace (`@mobaxd_<port>`), reached
- * from the host through `adb forward tcp:N localabstract:mobaxd_N`. Accepted on
+ * from the host through the adb server (`localabstract:mobaxd_N`). Accepted on
  * the main looper.
  *
  * Unlike a TCP port on 127.0.0.1, a Unix socket tells us the peer's uid, so

@@ -12,7 +12,6 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::daemon;
 use crate::flags::OutFmt;
 use crate::json_out::Obj;
 
@@ -20,26 +19,19 @@ pub fn run(out_fmt: OutFmt, serials: &[String], argv: &[String]) -> io::Result<(
     if argv.is_empty() {
         return Err(io::Error::other("fan: nothing to run after `--`"));
     }
-    let rows = daemon::devices()?;
-    // Map serial → host_port so the child invocation hits the right daemon.
     let exe = std::env::current_exe()?;
     let exe = Arc::new(exe);
 
     let mut handles = Vec::with_capacity(serials.len());
     let outputs: Arc<Mutex<Vec<(String, FanResult)>>> = Arc::new(Mutex::new(Vec::new()));
     for serial in serials {
-        let port = rows.iter()
-            .find(|r| &r.serial == serial)
-            .and_then(|r| r.host_port);
         let exe = Arc::clone(&exe);
         let serial = serial.clone();
         let argv = argv.to_vec();
         let outputs = Arc::clone(&outputs);
         handles.push(thread::spawn(move || {
             let mut cmd = Command::new(&*exe);
-            if let Some(p) = port {
-                cmd.args(["--port", &p.to_string()]);
-            }
+            cmd.args(["--device", &serial]);
             cmd.args(&argv);
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::piped());

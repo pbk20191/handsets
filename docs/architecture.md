@@ -3,7 +3,7 @@
 ```
 host                                  device (shell UID, app_process)
 ─────                                  ──────────────────────────────
-mobax <verb> ──► adb forward ────►     MobaxServer → Dispatch (one coroutine per connection)
+mobax <verb> ──► adb server ─────►     MobaxServer → Dispatch (one coroutine per connection)
                                        ├─ Server.respond     sync verbs (Pm Am Wm Props Providers …)
                                        ├─ Gestures           input, wait_for_*, tap_and_*
                                        ├─ Transfers          push/pull, install, uninstall
@@ -15,7 +15,8 @@ mobax <verb> ──► adb forward ────►     MobaxServer → Dispatch 
 
 The daemon runs as the shell UID via `app_process` with hidden-API
 restrictions lifted. It listens on the abstract Unix socket `@mobaxd_<port>`
-(host side: `adb forward tcp:<port> localabstract:mobaxd_<port>`) and refuses
+(the host opens it through the adb server: `host:transport:SERIAL`, then
+`localabstract:mobaxd_<port>`, with no host port forward) and refuses
 any peer whose `SO_PEERCRED` uid isn't shell or root. The host runs a
 background `state-daemon` that subscribes to `state_watch` and atomically rewrites
 `~/.mobileax/state-<port>.json` on every event-driven refresh. `mobax info` /

@@ -85,8 +85,11 @@ Exit codes:
 
 Global options:
   --host HOST        default 127.0.0.1
-  --port PORT        default 9008
-  --device, -s SERIAL  route to a daemon, or select the device for `mobax use`
+  --port PORT        daemon instance on the device (default 9008); with --host,
+                     the TCP port there
+  --device, -s SERIAL  the device to talk to, or to set up with `mobax use`
+                     (default: $MOBILEAX_SERIAL / $ANDROID_SERIAL, the device
+                     `mobax use` picked last, or the only one attached)
   --json             default output to JSON (or set HS_FORMAT=json)
 
 Low-level / debugging:

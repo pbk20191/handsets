@@ -280,32 +280,29 @@ pub(crate) struct DisconnectOpts {
     pub keep_jar: bool,
 }
 
-pub(crate) fn connect(opts: &ConnectOpts) -> io::Result<u16> {
-    // Talk to the adb-server directly over its host protocol on tcp:5037.
-    // Each query is a sub-ms round-trip vs ~40ms for spawning the adb
-    // subprocess. Falls back to subprocess if adb-server isn't reachable
-    // (e.g. first `mobax use` since boot), which is the only path that still
-    // needs to start the server anyway.
+/// `mobax use`: make sure the daemon runs on the device and answers.
+/// Returns the device's serial and the daemon instance (port).
+pub(crate) fn connect(opts: &ConnectOpts) -> io::Result<(String, u16)> {
+    // Talk to the adb-server directly over its host protocol. Each query is
+    // a sub-ms round-trip vs ~40ms for spawning the adb subprocess. Falls
+    // back to the subprocess if the server isn't reachable (e.g. first
+    // `mobax use` since boot), which is the only path that still needs to
+    // start the server anyway.
     let serial = match adb_server_resolve_serial(opts.serial.as_deref()) {
         Ok(s) => s,
         Err(_) => resolve_serial(opts.serial.as_deref())?,
     };
-    let forwards = adb_server_list_forwards().unwrap_or_else(|_|
-        list_forwards().unwrap_or_default());
+    let port = opts.port.unwrap_or(DEFAULT_PORT);
+    // Older versions reached the daemon through a host port forward; this
+    // one goes through the adb server and binds no host port.
+    remove_daemon_forwards(&serial);
 
-    let port = pick_port_with(opts.port, &serial, &forwards)?;
-
-    // Fast path: if the chosen port is already forwarded to this serial AND
-    // the daemon answers `ping`, we're done. This is the common case when
-    // RPA scripts re-invoke `mobax use` defensively before each step.
-    // Matching the device side too means a daemon from an older mobax (which
-    // listened on TCP) is restarted rather than reused.
-    let already_forwarded = forwards.iter().any(|f|
-        f.serial == serial && f.host_spec == format!("tcp:{port}")
-            && f.remote_spec == device_socket(port));
-    if already_forwarded && ping_daemon(port).is_ok() {
-        let _ = state_cache::spawn_detached("127.0.0.1", port);
-        return Ok(port);
+    // Fast path: the daemon already answers. The common case when scripts
+    // re-run `mobax use` defensively before each step.
+    if ping_daemon(&serial, port).is_ok() {
+        write_current(&serial);
+        let _ = state_cache::spawn_detached(&serial, port);
+        return Ok((serial, port));
     }
 
     // --- slow path: (re)start the daemon ---
@@ -332,29 +329,21 @@ pub(crate) fn connect(opts: &ConnectOpts) -> io::Result<u16> {
     let jar_str = jar.to_string_lossy();
     adb_ok(Some(&serial), &["push", &jar_str, DEVICE_JAR], "push jar")?;
 
-    // 3. (Re)set forward.
-    let _ = adb(Some(&serial), &["forward", "--remove", &format!("tcp:{port}")]);
-    adb_ok(
-        Some(&serial),
-        &["forward", &format!("tcp:{port}"), &device_socket(port)],
-        "forward",
-    )?;
-
-    // 4. Start the daemon detached.
+    // 3. Start the daemon detached.
     let start = format!(
         "CLASSPATH={DEVICE_JAR} nohup app_process /system/bin \
          --nice-name=mobaxd dev.mobileax.daemon.Main --port={port} > {DEVICE_LOG} 2>&1 &"
     );
     adb_ok(Some(&serial), &["shell", &start], "start daemon")?;
 
-    // 5. Wait until the daemon answers `ping`. TCP probes against the local
-    //    forward are ~5ms each, so we can poll much tighter than the old
-    //    200ms `adb shell cat $LOG` loop.
+    // 4. Wait until the daemon answers `ping` (each probe is a few ms
+    //    through the adb server).
     let deadline = Instant::now() + Duration::from_secs(6);
     while Instant::now() < deadline {
-        if ping_daemon(port).is_ok() {
-            let _ = state_cache::spawn_detached("127.0.0.1", port);
-            return Ok(port);
+        if ping_daemon(&serial, port).is_ok() {
+            write_current(&serial);
+            let _ = state_cache::spawn_detached(&serial, port);
+            return Ok((serial, port));
         }
         thread::sleep(Duration::from_millis(40));
     }
@@ -366,12 +355,11 @@ pub(crate) fn connect(opts: &ConnectOpts) -> io::Result<u16> {
 }
 
 /// Send a length-prefixed `ping` and expect `pong`. Tight timeouts so a
-/// dead-but-still-listening forward fails quickly into the slow path.
-fn ping_daemon(port: u16) -> io::Result<()> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut sock = TcpStream::connect_timeout(&addr, Duration::from_millis(250))?;
+/// daemon that isn't there fails quickly into the slow path.
+pub(crate) fn ping_daemon(serial: &str, port: u16) -> io::Result<()> {
+    let mut sock = device_stream(serial, port)?;
     sock.set_nodelay(true)?;
-    sock.set_read_timeout(Some(Duration::from_millis(250)))?;
+    sock.set_read_timeout(Some(Duration::from_millis(500)))?;
     sock.set_write_timeout(Some(Duration::from_millis(250)))?;
     let payload = b"ping";
     sock.write_all(&(payload.len() as u32).to_be_bytes())?;
@@ -387,6 +375,30 @@ fn ping_daemon(port: u16) -> io::Result<()> {
     if buf == b"pong" { Ok(()) } else { Err(io::Error::other("ping: unexpected reply")) }
 }
 
+/// Removes host port forwards to this device's daemon (older versions made them).
+fn remove_daemon_forwards(serial: &str) {
+    let forwards = adb_server_list_forwards().unwrap_or_else(|_| list_forwards().unwrap_or_default());
+    for f in forwards.iter().filter(|f| f.serial == serial && f.remote_spec.starts_with("localabstract:mobaxd_")) {
+        let _ = adb(Some(serial), &["forward", "--remove", &f.host_spec]);
+        // Their state watchers were keyed by host port (state-9008.*).
+        if let Some(port) = f.host_spec.strip_prefix("tcp:") {
+            let _ = state_cache::stop_watcher(port);
+        }
+    }
+}
+
+/// A host port forwarded to the daemon on `serial`, for programs that can
+/// only speak TCP (the viewer, the TUI). The caller removes it with
+/// [`remove_forward`] when done.
+pub(crate) fn temporary_forward(serial: &str, port: u16) -> io::Result<u16> {
+    let out = adb_ok(Some(serial), &["forward", "tcp:0", &device_socket(port)], "forward")?;
+    out.trim().parse().map_err(|_| io::Error::other(format!("adb forward: unexpected reply {out:?}")))
+}
+
+pub(crate) fn remove_forward(serial: &str, host_port: u16) {
+    let _ = adb(Some(serial), &["forward", "--remove", &format!("tcp:{host_port}")]);
+}
+
 pub(crate) fn disconnect(opts: &DisconnectOpts) -> io::Result<()> {
     let serial = resolve_serial(opts.serial.as_deref())?;
     // Every step below ignores adb failures, so an unknown serial would
@@ -398,28 +410,17 @@ pub(crate) fn disconnect(opts: &DisconnectOpts) -> io::Result<()> {
                 "--device {serial}: not attached — check `adb devices`")));
         }
     }
-    // 1. Kill the host-side state watcher(s) for any forward this device owns.
-    if let Ok(forwards) = list_forwards() {
-        for f in forwards.iter().filter(|f| f.serial == serial) {
-            if let Some(p) = f.host_spec.strip_prefix("tcp:") {
-                if let Ok(port) = p.parse::<u16>() {
-                    let _ = state_cache::stop_watcher(port);
-                }
-            }
-        }
-    }
+    // 1. Stop the host-side state watcher.
+    let _ = state_cache::stop_watcher(&serial);
     // 2. Kill the device-side daemon.
     let _ = adb(Some(&serial), &["shell", "pkill", "-9", "-f", "mobaxd"]);
-    // 3. Remove any matching adb forwards for this device.
-    if let Ok(forwards) = list_forwards() {
-        for f in forwards.iter().filter(|f| f.serial == serial) {
-            let _ = adb(Some(&serial), &["forward", "--remove", &f.host_spec]);
-        }
-    }
+    // 3. Remove forwards older versions left.
+    remove_daemon_forwards(&serial);
     // 4. Optionally delete the on-device jar.
     if !opts.keep_jar {
         let _ = adb(Some(&serial), &["shell", "rm", "-f", DEVICE_JAR, DEVICE_LOG]);
     }
+    clear_current(&serial);
     Ok(())
 }
 
@@ -428,7 +429,8 @@ pub(crate) struct DeviceRow {
     pub state: String,
     pub jar_present: bool,
     pub running: bool,
-    pub host_port: Option<u16>,
+    /// The daemon answers on the default instance.
+    pub daemon: bool,
     pub sdk: Option<String>,
     pub model: Option<String>,
 }
@@ -440,8 +442,6 @@ pub(crate) fn devices() -> io::Result<Vec<DeviceRow>> {
         Ok(body) => body,
         Err(_) => adb_ok(None, &["devices"], "adb devices")?,
     };
-    let forwards = adb_server_list_forwards().unwrap_or_else(|_|
-        list_forwards().unwrap_or_default());
     let mut rows = Vec::new();
     for line in listing.lines() {
         let line = line.trim();
@@ -456,22 +456,19 @@ pub(crate) fn devices() -> io::Result<Vec<DeviceRow>> {
             state: state.clone(),
             jar_present: false,
             running: false,
-            host_port: None,
+            daemon: false,
             sdk: None,
             model: None,
         };
         if state == "device" {
-            row.host_port = forwards.iter()
-                .find(|f| f.serial == serial && f.host_spec.starts_with("tcp:"))
-                .and_then(|f| f.host_spec.strip_prefix("tcp:")?.parse().ok());
-
-            // Fast path: if a forward exists and the daemon answers `ping`,
+            // Fast path: if the daemon answers `ping`,
             // we know the daemon is running and the on-device jar must be
             // present (the daemon can't start without it). sdk/model don't
             // change between reboots, so serve them from a per-serial cache
             // and skip the 16ms shell round-trip entirely. Falls through to
             // the shell probe if any of these aren't met.
-            let pinged = row.host_port.is_some_and(|p| ping_daemon(p).is_ok());
+            let pinged = ping_daemon(&serial, DEFAULT_PORT).is_ok();
+            row.daemon = pinged;
             let cached = if pinged { read_devinfo_cache(&serial) } else { None };
             if let (true, Some((sdk, model))) = (pinged, cached) {
                 row.running = true;
@@ -567,38 +564,6 @@ fn resolve_serial(explicit: Option<&str>) -> io::Result<String> {
     }
 }
 
-/// Pick a host port for this device. Default 9008. If already forwarded to a
-/// different device, walk forward until we find one nobody uses.
-fn pick_port_with(
-    requested: Option<u16>,
-    our_serial: &str,
-    forwards: &[ForwardEntry],
-) -> io::Result<u16> {
-    if let Some(p) = requested {
-        // Honour the explicit request; if a different device claims it, fail.
-        for f in forwards {
-            if f.host_spec == format!("tcp:{p}") && f.serial != our_serial {
-                return Err(io::Error::other(format!(
-                    "host port {p} is already forwarded to device {}", f.serial
-                )));
-            }
-        }
-        return Ok(p);
-    }
-    let mut p = DEFAULT_PORT;
-    loop {
-        let busy_elsewhere = forwards.iter().any(|f|
-            f.host_spec == format!("tcp:{p}") && f.serial != our_serial);
-        if !busy_elsewhere { return Ok(p); }
-        p = p.checked_add(1).ok_or_else(||
-            io::Error::other("ran out of TCP ports above 9008"))?;
-        if p > 9100 {
-            return Err(io::Error::other(
-                "couldn't find a free local port in 9008..9100"));
-        }
-    }
-}
-
 // ---------- per-serial device-info cache (sdk + model) ----------
 //
 // sdk and model never change for a given device, so we cache them in
@@ -645,10 +610,33 @@ fn write_devinfo_cache(serial: &str, sdk: &str, model: &str) -> io::Result<()> {
 // host:* queries; the writeable / device-targeted commands still go through
 // the subprocess `adb` since they're invoked at most once per connect.
 
-const ADB_SERVER_PORT: u16 = 5037;
+/// Where the adb server listens: what `adb` itself would use. adb reads
+/// $ADB_SERVER_SOCKET (`tcp:PORT` or `tcp:HOST:PORT`), else
+/// $ANDROID_ADB_SERVER_ADDRESS and $ANDROID_ADB_SERVER_PORT, else
+/// 127.0.0.1:5037.
+fn adb_server_addr() -> io::Result<SocketAddr> {
+    use std::net::ToSocketAddrs;
+    let env = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let (host, port) = if let Some(spec) = env("ADB_SERVER_SOCKET") {
+        let rest = spec.strip_prefix("tcp:").ok_or_else(|| io::Error::other(format!(
+            "ADB_SERVER_SOCKET={spec}: only tcp:[HOST:]PORT is supported")))?;
+        match rest.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.to_string()),
+            None => ("127.0.0.1".to_string(), rest.to_string()),
+        }
+    } else {
+        (
+            env("ANDROID_ADB_SERVER_ADDRESS").unwrap_or_else(|| "127.0.0.1".to_string()),
+            env("ANDROID_ADB_SERVER_PORT").unwrap_or_else(|| "5037".to_string()),
+        )
+    };
+    let port: u16 = port.parse().map_err(|_| io::Error::other(format!("adb server port {port:?} is not a number")))?;
+    (host.as_str(), port).to_socket_addrs()?.next()
+        .ok_or_else(|| io::Error::other(format!("adb server host {host:?} does not resolve")))
+}
 
 fn adb_server_query(payload: &str) -> io::Result<String> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], ADB_SERVER_PORT));
+    let addr = adb_server_addr()?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(200))?;
     s.set_read_timeout(Some(Duration::from_millis(500)))?;
     s.set_write_timeout(Some(Duration::from_millis(500)))?;
@@ -696,7 +684,7 @@ fn adb_server_resolve_serial(explicit: Option<&str>) -> io::Result<String> {
 /// streamed output until the server closes the connection. ~5-15ms vs ~30ms
 /// for `adb shell` through the subprocess.
 fn adb_server_shell(serial: &str, cmd: &str) -> io::Result<String> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], ADB_SERVER_PORT));
+    let addr = adb_server_addr()?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(200))?;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -730,7 +718,7 @@ fn adb_server_shell(serial: &str, cmd: &str) -> io::Result<String> {
 /// the daemon. Same data path as a forward (adb opens a forward's device
 /// stream on its first byte), so a request costs the same once connected.
 pub(crate) fn device_stream(serial: &str, port: u16) -> io::Result<TcpStream> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], ADB_SERVER_PORT));
+    let addr = adb_server_addr()?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(500))?;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     for req in [format!("host:transport:{serial}"), device_socket(port)] {
@@ -751,13 +739,96 @@ pub(crate) fn device_stream(serial: &str, port: u16) -> io::Result<TcpStream> {
     Ok(s)
 }
 
-/// The device `mobax use` bound to host `port`, else the only attached one.
-pub(crate) fn serial_for_port(port: u16) -> io::Result<String> {
-    let want = format!("tcp:{port}");
-    if let Some(f) = adb_server_list_forwards()?.into_iter().find(|f| f.host_spec == want) {
-        return Ok(f.serial);
+// ---------- which device a call talks to ----------
+//
+// The daemon is reached through the adb server, so the device is named by
+// its serial: `--device`, else $MOBILEAX_SERIAL / $ANDROID_SERIAL, else the
+// device `mobax use` picked last (~/.mobileax/current), else the only one
+// attached. The port names the daemon instance on the device
+// (`mobaxd_<port>`); every device can run its own `mobaxd_9008`.
+
+thread_local! {
+    /// A per-thread choice, for the MCP server's calls on other devices.
+    static THREAD_TARGET: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+static PROCESS_TARGET: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The device named on the command line (`--device`), for this process.
+pub(crate) fn set_target(serial: Option<String>) {
+    *PROCESS_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = serial;
+}
+
+/// Runs `f` with calls on this thread going to `serial`.
+pub(crate) fn with_target<R>(serial: &str, f: impl FnOnce() -> R) -> R {
+    let prev = THREAD_TARGET.with(|t| t.borrow_mut().replace(serial.to_string()));
+    let r = f();
+    THREAD_TARGET.with(|t| *t.borrow_mut() = prev);
+    r
+}
+
+/// The serial calls on this thread go to (see the section comment).
+pub(crate) fn target_serial() -> io::Result<String> {
+    if let Some(s) = THREAD_TARGET.with(|t| t.borrow().clone()) {
+        return Ok(s);
     }
-    adb_server_resolve_serial(None)
+    if let Some(s) = PROCESS_TARGET.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Ok(s);
+    }
+    for var in ["MOBILEAX_SERIAL", "ANDROID_SERIAL"] {
+        if let Some(s) = std::env::var_os(var).filter(|v| is_set(v)) {
+            return Ok(s.to_string_lossy().into_owned());
+        }
+    }
+    let attached = attached_serials()?;
+    if let Some(cur) = read_current().filter(|c| attached.contains(c)) {
+        return Ok(cur);
+    }
+    match attached.len() {
+        0 => Err(io::Error::new(io::ErrorKind::NotFound, "no device attached — check `adb devices`")),
+        1 => Ok(attached[0].clone()),
+        _ => Err(io::Error::other(format!(
+            "{} devices attached ({}); pass --device SERIAL or `mobax use SERIAL` one",
+            attached.len(), attached.join(", ")))),
+    }
+}
+
+/// Serials in the `device` state.
+pub(crate) fn attached_serials() -> io::Result<Vec<String>> {
+    let body = adb_server_query("host:devices")
+        .or_else(|_| adb_ok(None, &["devices"], "adb devices"))?;
+    Ok(body.lines().filter_map(|l| {
+        let mut it = l.split_whitespace();
+        let s = it.next()?;
+        (it.next() == Some("device")).then(|| s.to_string())
+    }).collect())
+}
+
+fn current_path() -> Option<PathBuf> {
+    Some(home_dir()?.join(".mobileax").join("current"))
+}
+
+fn read_current() -> Option<String> {
+    let s = std::fs::read_to_string(current_path()?).ok()?;
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+fn write_current(serial: &str) {
+    if let Some(p) = current_path() {
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(p, serial);
+    }
+}
+
+fn clear_current(serial: &str) {
+    if read_current().as_deref() == Some(serial) {
+        if let Some(p) = current_path() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 fn adb_server_list_forwards() -> io::Result<Vec<ForwardEntry>> {

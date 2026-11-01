@@ -256,9 +256,9 @@ impl Engine {
             return Ok(t.clone());
         }
         let t = match &key {
-            Some(serial) => Target { serial: serial.clone(), port: crate::resolve_device_port(serial)? },
+            Some(serial) => Target { serial: serial.clone(), port: self.port },
             None => Target {
-                serial: crate::daemon::serial_for_port(self.port)
+                serial: crate::daemon::target_serial()
                     .map_err(|e| format!("ERR:DEVICE_GONE:{e}\nCall `use` first."))?,
                 port: self.port,
             },
@@ -314,7 +314,7 @@ impl Engine {
             Ok(s) => s,
             Err(e) => return (false, e),
         };
-        let r = run_verb(&mut sess, argv);
+        let r = run_verb(&t.serial, &mut sess, argv);
         if r.keep {
             self.checkin(&t, sess);
         }
@@ -335,7 +335,7 @@ impl Engine {
             Err(e) => return (false, e),
         };
         let seq = if observe { event_seq(&mut sess.conn) } else { None };
-        let mut r = run_verb(&mut sess, argv);
+        let mut r = run_verb(&t.serial, &mut sess, argv);
         if r.ok && observe {
             let budget = settle_budget(argv.first().map(String::as_str).unwrap_or(""));
             match self.observe_change(&t, &mut sess.conn, seq, budget) {
@@ -523,9 +523,12 @@ struct VerbRun {
     keep: bool,
 }
 
-/// One CLI verb on `sess`, its output captured.
-fn run_verb(sess: &mut Session, argv: &[String]) -> VerbRun {
-    let (res, text) = output::capture(|| crate::dispatch_session_verb(sess, argv));
+/// One CLI verb on `sess` (a socket to `serial`), its output captured.
+/// Verbs that open their own connections go to the same device.
+fn run_verb(serial: &str, sess: &mut Session, argv: &[String]) -> VerbRun {
+    let (res, text) = crate::daemon::with_target(serial, || {
+        output::capture(|| crate::dispatch_session_verb(sess, argv))
+    });
     let text = text.trim_end().to_string();
     match res {
         Ok(()) => VerbRun { ok: true, text, keep: true },
@@ -691,7 +694,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "drop",
-            description: "Stop the on-device daemon and remove its port forward.",
+            description: "Stop the on-device daemon.",
             schema: obj(&[DEVICE], &[]),
         },
         Tool {
