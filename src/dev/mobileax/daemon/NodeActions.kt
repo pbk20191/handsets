@@ -136,18 +136,7 @@ internal class NodeActions(private val ua: UiAutomation) {
 
     /** Walk every window's tree looking for the node that holds input focus
      * (an EditText the IME is bound to). Falls back to the active window.  */
-    private fun findInputFocus(): AccessibilityNodeInfo? {
-        val windows = ua.getWindows()
-        if (windows != null) {
-            for (w in windows) {
-                val root = w.root ?: continue
-                val f = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-                if (f != null) return f
-            }
-        }
-        val root = ua.rootInActiveWindow
-        return if (root == null) null else root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-    }
+    private fun findInputFocus(): AccessibilityNodeInfo? = inputFocus(ua)
 
     /**
      * Locate the first node matching `sel`, or null. Windows are searched
@@ -337,4 +326,18 @@ internal class NodeActions(private val ua: UiAutomation) {
             return ("ERR:$tail").toByteArray(StandardCharsets.UTF_8)
         }
     }
+}
+
+/**
+ * The editable field that has input focus, in any window. Skips the
+ * keyboard's own window: while it is up it holds a focused, non-editable
+ * view and is listed first.
+ */
+internal fun inputFocus(ua: UiAutomation): AccessibilityNodeInfo? {
+    val editable = { n: AccessibilityNodeInfo? -> n?.takeIf { it.isEditable } }
+    for (w in ua.getWindows().orEmpty()) {
+        if (w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+        editable(w.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT))?.let { return it }
+    }
+    return editable(ua.rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT))
 }
