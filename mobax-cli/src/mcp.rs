@@ -25,6 +25,7 @@ use crate::json_out::encode_str;
 use crate::mcp_screen::{Change, Screen};
 use crate::session::Session;
 use crate::{output, Conn};
+use crate::Connect;
 
 /// Protocol revisions this server speaks; the newest is offered when the
 /// client asks for one we don't know.
@@ -399,7 +400,7 @@ impl Engine {
         let first = settle(conn, seq, b.first_ms)?;
         let mut reacted = !String::from_utf8_lossy(&first).contains("changed=0");
         let still_moving = first.starts_with(b"ERR:");
-        let had_rows = lock(&self.screens).get(t).is_some_and(|s| s.len() > 0);
+        let had_rows = lock(&self.screens).get(t).is_some_and(|s| !s.is_empty());
         let mut dump = self.read_settled(conn, had_rows, deadline)?;
         // A tap that starts another activity can go quiet before the new
         // screen draws (another process starting). If nothing visible changed,
@@ -460,7 +461,7 @@ impl Engine {
             if frame.starts_with(b"ERR:") {
                 return (false, String::from_utf8_lossy(&frame).into_owned());
             }
-            let dump = match crate::watch::parse_frame(&frame) {
+            let dump = match mobax_core::wire::parse_watch_frame(&frame) {
                 Ok((_, _, d)) => d,
                 Err(e) => return (false, format!("ERR:DAEMON_ERROR:{e}")),
             };
@@ -468,7 +469,7 @@ impl Engine {
             let prev = screens.get(&t);
             // Skip mid-transition frames (a starting window, rows that all
             // vanished while the next activity draws); the next frame follows.
-            let had_rows = prev.is_some_and(|s| s.len() > 0);
+            let had_rows = prev.is_some_and(|s| !s.is_empty());
             if Screen::is_starting(&dump) || (had_rows && Screen::row_count(&dump) == 0) {
                 continue;
             }

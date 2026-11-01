@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use crate::json::{self, Value};
 use crate::ui_dump;
 
-pub(crate) struct Screen {
+pub struct Screen {
     /// App windows, bottom first, as `id:package`; a different set is a new screen.
     key: String,
     /// Package of the topmost app window.
@@ -24,7 +24,7 @@ pub(crate) struct Screen {
     next: u32,
 }
 
-pub(crate) struct Ref {
+pub struct Ref {
     pub n: u32,
     ident: String,
     pub line: String,
@@ -35,7 +35,7 @@ pub(crate) struct Ref {
 }
 
 /// How a screen differs from the one before it.
-pub(crate) enum Change {
+pub enum Change {
     /// Another screen, or so much changed that the full table is clearer.
     New,
     /// Nothing visible changed.
@@ -47,7 +47,7 @@ pub(crate) enum Change {
 impl Screen {
     /// The screen in `dump` (a `dump` or `dump_active` payload). Rows keep
     /// their refs from `prev` when it is the same screen.
-    pub(crate) fn from_dump(dump: &Value, prev: Option<&Screen>) -> Screen {
+    pub fn from_dump(dump: &Value, prev: Option<&Screen>) -> Screen {
         let (key, pkg) = identity(dump);
         let rows = ui_dump::interactive_rows(&json::app_roots(dump));
         let same = prev.filter(|p| p.key == key);
@@ -78,38 +78,42 @@ impl Screen {
 
     /// A launching app's starting window: an app window whose root names
     /// no package and holds no rows yet.
-    pub(crate) fn is_starting(dump: &Value) -> bool {
+    pub fn is_starting(dump: &Value) -> bool {
         let (_, pkg) = identity(dump);
         pkg.is_empty() && ui_dump::interactive_rows(&json::app_roots(dump)).is_empty()
     }
 
     /// Rows `ui` would list for `dump`.
-    pub(crate) fn row_count(dump: &Value) -> usize {
+    pub fn row_count(dump: &Value) -> usize {
         ui_dump::interactive_rows(&json::app_roots(dump)).len()
     }
 
-    pub(crate) fn get(&self, n: u32) -> Option<&Ref> {
+    pub fn get(&self, n: u32) -> Option<&Ref> {
         self.rows.iter().find(|r| r.n == n)
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
         self.rows.len()
     }
 
     /// The package, and whether the keyboard is up.
-    pub(crate) fn title(&self) -> String {
+    pub fn title(&self) -> String {
         if self.keyboard { format!("{} · keyboard open", self.pkg) } else { self.pkg.clone() }
     }
 
     /// Some row shows `text` (case-insensitive).
-    pub(crate) fn shows(&self, text: &str) -> bool {
+    pub fn shows(&self, text: &str) -> bool {
         let t = text.to_lowercase();
         self.rows.iter().any(|r| r.line.to_lowercase().contains(&t))
     }
 
     /// What an agent reads after an action or a watch: `note`, the package,
     /// then the rows that changed, or the whole new screen.
-    pub(crate) fn describe(&self, note: &str, change: Change) -> String {
+    pub fn describe(&self, note: &str, change: Change) -> String {
         let mut out = format!("{note} · {}", self.title());
         match change {
             Change::Same => out.push_str(" · no visible change"),
@@ -126,7 +130,7 @@ impl Screen {
     }
 
     /// The rows as a JSON array of `{"ref","line","x","y"}`.
-    pub(crate) fn rows_json(&self) -> String {
+    pub fn rows_json(&self) -> String {
         let mut out = String::from("[");
         for (i, r) in self.rows.iter().enumerate() {
             if i > 0 {
@@ -139,7 +143,7 @@ impl Screen {
     }
 
     /// The whole table, one `@N  row` per line.
-    pub(crate) fn table(&self) -> String {
+    pub fn table(&self) -> String {
         let w = self.ref_width();
         let mut out = String::new();
         for r in &self.rows {
@@ -149,7 +153,7 @@ impl Screen {
     }
 
     /// What changed since `prev`.
-    pub(crate) fn change_from(&self, prev: Option<&Screen>) -> Change {
+    pub fn change_from(&self, prev: Option<&Screen>) -> Change {
         let Some(prev) = prev.filter(|p| p.key == self.key) else { return Change::New };
         let before: HashMap<&str, &Ref> = prev.rows.iter().map(|r| (r.ident.as_str(), r)).collect();
         let now: HashMap<&str, &Ref> = self.rows.iter().map(|r| (r.ident.as_str(), r)).collect();

@@ -24,7 +24,7 @@ struct Row {
 }
 
 /// One row of the `ui` table with what a caller needs to act on it.
-pub(crate) struct UiRow {
+pub struct UiRow {
     /// The rendered table line, without a trailing newline.
     pub line: String,
     /// What identifies the row across observations: verb, class and the
@@ -49,7 +49,7 @@ pub(crate) struct UiRow {
 /// The verb column collapses to `-` for nodes that are informational
 /// only (TextView labels, headings) so the layout still aligns and the
 /// agent sees the context without picking a non-actionable target.
-pub(crate) fn render_interactive(roots: &[&Value]) -> String {
+pub fn render_interactive(roots: &[&Value]) -> String {
     let mut out = String::with_capacity(8 * 1024);
     for r in interactive_rows(roots) {
         out.push_str(&r.line);
@@ -59,7 +59,7 @@ pub(crate) fn render_interactive(roots: &[&Value]) -> String {
 }
 
 /// The rows of [`render_interactive`], one per node, in table order.
-pub(crate) fn interactive_rows(roots: &[&Value]) -> Vec<UiRow> {
+pub fn interactive_rows(roots: &[&Value]) -> Vec<UiRow> {
     let mut rows: Vec<Row> = Vec::new();
     for root in roots {
         collect_interactive(root, None, Absorb::None, &mut rows);
@@ -289,7 +289,7 @@ fn collect_interactive<'a>(node: &'a Value, slot: Option<(&str, usize)>, absorb:
             flags:  tags,
             x,
             y,
-            sel:    crate::node_to_daemon_selector(node),
+            sel:    crate::selector::node_to_daemon_selector(node),
         });
     }
 
@@ -344,7 +344,7 @@ fn is_input_widget(simple: &str) -> bool {
         | "MultiAutoCompleteTextView")
 }
 
-pub(crate) fn render_human(roots: &[&Value]) -> String {
+pub fn render_human(roots: &[&Value]) -> String {
     let mut out = String::with_capacity(8 * 1024);
     for root in roots {
         walk(root, 0, &mut out);

@@ -956,6 +956,13 @@ dependencies = [
 [[package]]
 name = "mobax"
 version = "0.4.0"
+dependencies = [
+ "mobax-core",
+]
+
+[[package]]
+name = "mobax-core"
+version = "0.4.0"
 
 [[package]]
 name = "mobax-tui"

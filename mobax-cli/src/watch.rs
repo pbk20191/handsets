@@ -12,10 +12,10 @@
 
 use std::io::{self, Write};
 
-use crate::json::{self, Value};
 use crate::json_out::Obj;
 use crate::mcp_screen::{Change, Screen};
 use crate::Conn;
+use crate::Connect;
 
 pub(crate) fn run(host: &str, port: u16, json_out: bool, min_ms: Option<u64>, moves: bool) -> io::Result<()> {
     let mut conn = Conn::connect(host, port)?;
@@ -36,7 +36,7 @@ pub(crate) fn run(host: &str, port: u16, json_out: bool, min_ms: Option<u64>, mo
         if frame.starts_with(b"ERR:") {
             return Err(io::Error::other(String::from_utf8_lossy(&frame).into_owned()));
         }
-        let (seq, ev, dump) = parse_frame(&frame)?;
+        let (seq, ev, dump) = mobax_core::wire::parse_watch_frame(&frame)?;
         let screen = Screen::from_dump(&dump, prev.as_ref());
         let change = screen.change_from(prev.as_ref());
         if json_out {
@@ -61,19 +61,6 @@ pub(crate) fn run(host: &str, port: u16, json_out: bool, min_ms: Option<u64>, mo
     }
 }
 
-/// `{"seq":N,"ev":E,"dump":{…}}` → (N, E, dump).
-pub(crate) fn parse_frame(frame: &[u8]) -> io::Result<(i64, i64, Value)> {
-    let text = std::str::from_utf8(frame).map_err(|e| io::Error::other(format!("ui_watch frame not utf-8: {e}")))?;
-    let v = json::parse(text).map_err(|e| io::Error::other(format!("ui_watch frame not json: {e}")))?;
-    let num = |k: &str| json::obj_get(&v, k).and_then(json::as_num).unwrap_or(0);
-    let (seq, ev) = (num("seq"), num("ev"));
-    let dump = match v {
-        Value::Obj(pairs) => pairs.into_iter().find(|(k, _)| k == "dump").map(|(_, d)| d),
-        _ => None,
-    }
-    .ok_or_else(|| io::Error::other("ui_watch frame has no dump"))?;
-    Ok((seq, ev, dump))
-}
 
 fn json_strings(items: &[String]) -> String {
     let mut out = String::from("[");
@@ -85,15 +72,4 @@ fn json_strings(items: &[String]) -> String {
     }
     out.push(']');
     out
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn frames_carry_seq_events_and_the_dump() {
-        let (seq, ev, dump) = super::parse_frame(br#"{"seq":3,"ev":812,"dump":{"ts":1,"windows":[]}}"#).unwrap();
-        assert_eq!((seq, ev), (3, 812));
-        assert!(crate::json::obj_get(&dump, "windows").is_some());
-        assert!(super::parse_frame(br#"{"seq":1}"#).is_err());
-    }
 }

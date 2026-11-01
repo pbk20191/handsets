@@ -95,6 +95,98 @@ impl std::fmt::Display for ErrInfo {
     }
 }
 
+/// What went wrong reaching or using a device, in terms a caller can act on.
+#[derive(Debug)]
+pub enum Error {
+    /// The daemon answered `ERR:…`.
+    Daemon(ErrInfo),
+    /// No device by that serial is attached (or none at all).
+    NoDevice(String),
+    /// The device is attached, but no daemon listens on it.
+    NoDaemon(String),
+    /// Several devices are attached and nothing chose one.
+    WhichDevice(String),
+    /// The caller passed something unusable.
+    BadArg(String),
+    /// The connection failed.
+    Io(std::io::Error),
+}
+
+impl Error {
+    pub fn code(&self) -> ErrCode {
+        match self {
+            Error::Daemon(info) => info.code,
+            Error::NoDevice(_) | Error::NoDaemon(_) => ErrCode::DeviceGone,
+            Error::WhichDevice(_) => ErrCode::Ambiguous,
+            Error::BadArg(_) => ErrCode::BadArg,
+            Error::Io(e) => io_code(e),
+        }
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Daemon(info) => write!(f, "{info}"),
+            Error::NoDevice(s) | Error::NoDaemon(s) | Error::WhichDevice(s) | Error::BadArg(s) => f.write_str(s),
+            Error::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::Io(e)
+    }
+}
+
+/// Into an `io::Error` that keeps both a matching kind (a missing device is
+/// NotFound, a missing daemon ConnectionRefused) and this error as its
+/// payload, so [`code_of`] still knows what it was.
+impl From<Error> for std::io::Error {
+    fn from(e: Error) -> Self {
+        use std::io::ErrorKind;
+        let kind = match &e {
+            Error::Io(_) => return match e { Error::Io(io) => io, _ => unreachable!() },
+            Error::NoDevice(_) => ErrorKind::NotFound,
+            Error::NoDaemon(_) => ErrorKind::ConnectionRefused,
+            Error::BadArg(_) => ErrorKind::InvalidInput,
+            Error::Daemon(_) | Error::WhichDevice(_) => ErrorKind::Other,
+        };
+        std::io::Error::new(kind, e)
+    }
+}
+
+/// The code of an error that came back as an `io::Error`: an [`Error`] it
+/// carries, or what its kind says about the connection.
+pub fn code_of(e: &std::io::Error) -> ErrCode {
+    match e.get_ref().and_then(|inner| inner.downcast_ref::<Error>()) {
+        Some(inner) => inner.code(),
+        None => io_code(e),
+    }
+}
+
+fn io_code(e: &std::io::Error) -> ErrCode {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        TimedOut | WouldBlock => ErrCode::Timeout,
+        ConnectionRefused | ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof | NotConnected => {
+            ErrCode::DeviceGone
+        }
+        InvalidInput => ErrCode::BadArg,
+        _ => ErrCode::Internal,
+    }
+}
+
 /// Parse the daemon's response body. Returns `None` for non-error bodies.
 pub fn parse_err(body: &[u8]) -> Option<ErrInfo> {
     if !body.starts_with(b"ERR:") { return None; }
@@ -190,6 +282,20 @@ mod tests {
     #[test]
     fn infers_secure_window() {
         assert_eq!(parse_err(b"ERR:secure-window:com.x").unwrap().code, ErrCode::SecureWindow);
+    }
+
+    #[test]
+    fn errors_keep_their_code_through_io_error() {
+        let e: std::io::Error = Error::NoDaemon("emulator-5554: no daemon".into()).into();
+        assert_eq!(e.kind(), std::io::ErrorKind::ConnectionRefused);
+        assert_eq!(code_of(&e), ErrCode::DeviceGone);
+        let e: std::io::Error = Error::WhichDevice("2 devices".into()).into();
+        assert_eq!(code_of(&e), ErrCode::Ambiguous);
+        let e: std::io::Error = Error::Daemon(parse_err(b"ERR:TIMEOUT:wait").unwrap()).into();
+        assert_eq!(code_of(&e), ErrCode::Timeout);
+        assert_eq!(code_of(&std::io::Error::from(std::io::ErrorKind::TimedOut)), ErrCode::Timeout);
+        assert_eq!(code_of(&std::io::Error::from(std::io::ErrorKind::BrokenPipe)), ErrCode::DeviceGone);
+        assert_eq!(code_of(&std::io::Error::other("x")), ErrCode::Internal);
     }
 
     #[test]

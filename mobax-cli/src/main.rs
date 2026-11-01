@@ -6,28 +6,26 @@
 // One-shot calls open a fresh socket each invocation. The `bench` subcommand
 // reuses a persistent socket to measure true wire-level latency.
 
-use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::io::{self, Write};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 mod act;
+// Shared with the TUI (and any Rust caller): see mobax-core.
+pub(crate) use mobax_core::{errors, json, json_out, selector, ui_dump, xml_dump};
+pub(crate) use mobax_core::screen as mcp_screen;
+pub(crate) use mobax_core::selector::node_to_daemon_selector;
 mod adb;
 mod daemon;
-mod errors;
 mod fan;
 mod flags;
 mod init;
-mod json;
-mod json_out;
 mod mcp;
-mod mcp_screen;
 mod mirror;
 mod output;
 mod provider;
 mod run_script;
 mod screen;
-mod selector;
 mod session;
 mod shell;
 mod snapshot;
@@ -35,10 +33,8 @@ mod state_cache;
 mod tap_text;
 mod term;
 mod tui;
-mod ui_dump;
 mod usage;
 mod watch;
-mod xml_dump;
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 9008;
@@ -1362,7 +1358,7 @@ fn resolve_fill_selector(conn: &mut Conn, sel_in: &str, flags: &flags::ActionFla
             Some(sels) => {
                 let ctx = selector::MatchCtx::from_roots(roots.clone());
                 let mut matches = selector::find_all_with(&ctx, sels);
-                selector::apply_filters(&mut matches, flags);
+                selector::apply_filters(&mut matches, flags.require());
                 // An input widget among the matches wins; else the first match.
                 matches.iter().find(|n| is_input_widget(n)).or(matches.first()).map(|n| node_to_daemon_selector(n))
             }
@@ -1382,22 +1378,6 @@ fn resolve_fill_selector(conn: &mut Conn, sel_in: &str, flags: &flags::ActionFla
     }
 }
 
-/// Build a daemon-grammar selector that uniquely names `node`. Prefers the
-/// full resource id when present (always unique); falls back to class + the
-/// node's own text when the widget is anonymous.
-pub(crate) fn node_to_daemon_selector(node: &json::Value) -> String {
-    let rid = selector::get_str(node, "rid").unwrap_or("");
-    if !rid.is_empty() {
-        return format!("id={rid}");
-    }
-    let cls_full = selector::get_str(node, "cls").unwrap_or("EditText");
-    let simple = cls_full.rsplit('.').next().unwrap_or(cls_full);
-    let txt = selector::get_str(node, "text").unwrap_or("");
-    if !txt.is_empty() {
-        return format!("class={simple} text={txt:?}");
-    }
-    format!("class={simple}")
-}
 
 fn is_input_widget(node: &json::Value) -> bool {
     let cls = selector::get_str(node, "cls").unwrap_or("");
@@ -1821,7 +1801,7 @@ fn run_wait_selector(
             .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
         let ctx = selector::MatchCtx::from_roots(json::app_roots(&dump).into_iter().rev().collect());
         let mut matches = selector::find_all_with(&ctx, sels);
-        selector::apply_filters(&mut matches, f);
+        selector::apply_filters(&mut matches, f.require());
         if let Some(n) = matches.first() {
             let elapsed = start.elapsed().as_millis() as i64;
             let (l, t, r, b) = selector::bounds(n).unwrap_or((0, 0, 0, 0));
@@ -1863,7 +1843,7 @@ pub(crate) fn run_find(
     // App windows, topmost first — the order `mobax tap` prefers.
     let ctx = selector::MatchCtx::from_roots(json::app_roots(&json).into_iter().rev().collect());
     let mut matches = selector::find_all_with(&ctx, &selectors);
-    selector::apply_filters(&mut matches, f);
+    selector::apply_filters(&mut matches, f.require());
 
     if matches.is_empty() {
         return Err(reporter.fail("find",
@@ -2327,141 +2307,37 @@ fn write_response(cmd: &Cmd, body: &[u8]) -> io::Result<()> {
 
 // ---------- protocol ----------
 
-pub(crate) struct Conn {
-    sock: TcpStream,
+pub(crate) use mobax_core::Conn;
+
+/// How the CLI connects: the target device's daemon through the adb server,
+/// starting it when it isn't running, or a TCP port on a remote `--host`.
+pub(crate) trait Connect: Sized {
+    fn connect(host: &str, port: u16) -> io::Result<Self>;
+    /// The daemon on `serial`, as an `io::Error` on failure (its kind tells a
+    /// missing device, NotFound, from a missing daemon, ConnectionRefused).
+    fn connect_device(serial: &str, port: u16) -> io::Result<Self>;
 }
 
-impl Conn {
-    /// The daemon this call talks to: on this machine, the target device's
-    /// (see `daemon::target_serial`) through the adb server; on a remote
-    /// `--host`, a TCP port there.
-    pub(crate) fn connect(host: &str, port: u16) -> io::Result<Self> {
+impl Connect for Conn {
+    fn connect(host: &str, port: u16) -> io::Result<Self> {
         if !is_local(host) {
-            return Self::tcp(TcpStream::connect((host, port))?);
+            return Conn::tcp(host, port);
         }
         let serial = daemon::target_serial()?;
-        match Self::connect_device(&serial, port) {
+        match Conn::device(&serial, port) {
             Ok(c) => Ok(c),
             // No daemon there yet: start it, so users don't have to run
             // `mobax use` first.
-            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => match try_auto_use(&serial, port) {
-                Ok(()) => Self::connect_device(&serial, port),
-                Err(why) => Err(io::Error::new(e.kind(), format!("no daemon on {serial}; {why}"))),
+            Err(mobax_core::Error::NoDaemon(why_not)) => match try_auto_use(&serial, port) {
+                Ok(()) => Ok(Conn::device(&serial, port)?),
+                Err(why) => Err(io::Error::new(io::ErrorKind::ConnectionRefused, format!("{why_not}; {why}"))),
             },
-            Err(e) => Err(e),
+            Err(e) => Err(e.into()),
         }
     }
 
-    fn tcp(sock: TcpStream) -> io::Result<Self> {
-        sock.set_nodelay(true)?;
-        sock.set_read_timeout(Some(Duration::from_secs(30)))?;
-        sock.set_write_timeout(Some(Duration::from_secs(10)))?;
-        Ok(Self { sock })
-    }
-
-    /// The daemon on device `serial` (instance `port`) through the adb
-    /// server, without a host port forward.
-    pub(crate) fn connect_device(serial: &str, port: u16) -> io::Result<Self> {
-        Self::tcp(daemon::device_stream(serial, port)?)
-    }
-
-    /// False once the peer has closed (or sent bytes nobody asked for): a
-    /// pooled socket idle across a daemon restart.
-    pub(crate) fn is_alive(&self) -> bool {
-        if self.sock.set_nonblocking(true).is_err() { return false; }
-        let mut b = [0u8; 1];
-        let alive = matches!(self.sock.peek(&mut b), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock);
-        self.sock.set_nonblocking(false).is_ok() && alive
-    }
-
-    pub(crate) fn call(&mut self, cmd: &str) -> io::Result<Vec<u8>> {
-        self.send_cmd(cmd)?;
-        self.read_frame()
-    }
-
-    /// Length-prefixed command write; doesn't read a reply.
-    /// `None` waits as long as it takes (a push stream on a still screen).
-    pub(crate) fn set_read_timeout(&self, t: Option<Duration>) -> io::Result<()> {
-        self.sock.set_read_timeout(t)
-    }
-
-    pub(crate) fn send_cmd(&mut self, cmd: &str) -> io::Result<()> {
-        let payload = cmd.as_bytes();
-        let len = u32::try_from(payload.len())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "cmd too long"))?;
-        self.sock.write_all(&len.to_be_bytes())?;
-        self.sock.write_all(payload)?;
-        Ok(())
-    }
-
-    /// Read one length-prefixed response frame.
-    pub(crate) fn read_frame(&mut self) -> io::Result<Vec<u8>> {
-        let mut hdr = [0u8; 4];
-        self.sock.read_exact(&mut hdr)?;
-        let n = u32::from_be_bytes(hdr) as usize;
-        if n > 256 * 1024 * 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("oversized response: {n} bytes"),
-            ));
-        }
-        let mut buf = vec![0u8; n];
-        self.sock.read_exact(&mut buf)?;
-        Ok(buf)
-    }
-
-    /// Drain a server-streamed chunked response into `out`. Reads
-    /// `[len][chunk]…` frames until `len == 0`. A leading `ERR:` payload is
-    /// surfaced as an io::Error.
-    pub(crate) fn recv_chunks_to(&mut self, out: &mut dyn Write) -> io::Result<u64> {
-        let mut total = 0u64;
-        let mut first = true;
-        let mut buf = vec![0u8; 256 * 1024];
-        loop {
-            let mut hdr = [0u8; 4];
-            self.sock.read_exact(&mut hdr)?;
-            let n = u32::from_be_bytes(hdr) as usize;
-            if n == 0 {
-                return Ok(total);
-            }
-            if n > 8 * 1024 * 1024 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("oversized chunk: {n} bytes"),
-                ));
-            }
-            if buf.len() < n { buf.resize(n, 0); }
-            self.sock.read_exact(&mut buf[..n])?;
-            if first && n >= 4 && &buf[..4] == b"ERR:" {
-                let msg = String::from_utf8_lossy(&buf[..n]).into_owned();
-                // Drain the terminating 0-frame so the socket stays in sync.
-                let mut h2 = [0u8; 4];
-                let _ = self.sock.read_exact(&mut h2);
-                return Err(io::Error::other(msg));
-            }
-            first = false;
-            out.write_all(&buf[..n])?;
-            total += n as u64;
-        }
-    }
-
-    /// Stream `src` to the server as `[len][chunk]…[len=0]` frames.
-    pub(crate) fn send_chunks_from(&mut self, src: &mut dyn Read) -> io::Result<u64> {
-        let mut total = 0u64;
-        let mut buf = vec![0u8; 256 * 1024];
-        loop {
-            let n = src.read(&mut buf)?;
-            if n == 0 {
-                self.sock.write_all(&0u32.to_be_bytes())?;
-                return Ok(total);
-            }
-            let len = u32::try_from(n).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "chunk too large")
-            })?;
-            self.sock.write_all(&len.to_be_bytes())?;
-            self.sock.write_all(&buf[..n])?;
-            total += n as u64;
-        }
+    fn connect_device(serial: &str, port: u16) -> io::Result<Self> {
+        Ok(Conn::device(serial, port)?)
     }
 }
 

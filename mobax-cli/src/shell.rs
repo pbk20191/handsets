@@ -20,6 +20,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 use crate::Conn;
+use crate::Connect;
 
 const STREAM_COMMANDS: &[&str] = &[
     "pull", "dumpsys", "logcat", "shell", "monitor",

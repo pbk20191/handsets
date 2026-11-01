@@ -32,7 +32,7 @@
 use crate::json::Value;
 
 #[derive(Debug, Clone)]
-pub(crate) struct Selector {
+pub struct Selector {
     pub class: ClassMatch,
     pub attrs: Vec<AttrPred>,
     pub flags: Vec<char>,
@@ -43,7 +43,7 @@ pub(crate) struct Selector {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum Relation {
+pub enum Relation {
     In(Vec<Selector>),                       // descendant of any matching ancestor
     Near(Vec<Selector>, i64),                // centre distance ≤ PX
     Below(Vec<Selector>),                    // top edge ≥ anchor's bottom
@@ -51,21 +51,21 @@ pub(crate) enum Relation {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum ClassMatch {
+pub enum ClassMatch {
     Any,
     Exact(String),       // full match, e.g. "android.widget.EditText"
     Simple(String),      // last segment only, e.g. "EditText"
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AttrPred {
+pub struct AttrPred {
     pub key: String,     // normalised to the JSON field name ("rid", "text", …)
     pub op: AttrOp,
     pub val: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AttrOp { Eq, Has, Substr, Prefix, Suffix }
+pub enum AttrOp { Eq, Has, Substr, Prefix, Suffix }
 
 impl Selector {
     pub fn parse(input: &str) -> Result<Vec<Selector>, String> {
@@ -385,7 +385,7 @@ fn unquote(s: &str) -> String {
 
 // ---------- tree walking ----------
 
-pub(crate) fn get_str<'a>(node: &'a Value, key: &str) -> Option<&'a str> {
+pub fn get_str<'a>(node: &'a Value, key: &str) -> Option<&'a str> {
     if let Value::Obj(fields) = node {
         for (k, v) in fields {
             if k == key {
@@ -396,7 +396,7 @@ pub(crate) fn get_str<'a>(node: &'a Value, key: &str) -> Option<&'a str> {
     None
 }
 
-pub(crate) fn children(node: &Value) -> Option<&Vec<Value>> {
+pub fn children(node: &Value) -> Option<&Vec<Value>> {
     if let Value::Obj(fields) = node {
         for (k, v) in fields {
             if k == "children" {
@@ -407,7 +407,7 @@ pub(crate) fn children(node: &Value) -> Option<&Vec<Value>> {
     None
 }
 
-pub(crate) fn bounds(node: &Value) -> Option<(i64, i64, i64, i64)> {
+pub fn bounds(node: &Value) -> Option<(i64, i64, i64, i64)> {
     if let Value::Obj(fields) = node {
         for (k, v) in fields {
             if k == "bounds" {
@@ -426,7 +426,7 @@ pub(crate) fn bounds(node: &Value) -> Option<(i64, i64, i64, i64)> {
 /// Re-usable context for selector evaluation — caches the per-window roots
 /// so relational pseudo-classes (:in / :near / :below / :right-of) can do
 /// quick ancestor/anchor lookups without re-walking the envelope each time.
-pub(crate) struct MatchCtx<'a> {
+pub struct MatchCtx<'a> {
     pub roots: Vec<&'a Value>,
     /// Parent map keyed by node pointer-identity (raw `*const Value`),
     /// computed lazily on first relational evaluation.
@@ -531,7 +531,7 @@ fn build_parents<'a>(
 
 /// Like `find_all` but reuses a pre-built `MatchCtx`. Internal — public
 /// callers use `find_all`.
-pub(crate) fn find_all_with<'a>(ctx: &MatchCtx<'a>, selectors: &[Selector]) -> Vec<&'a Value> {
+pub fn find_all_with<'a>(ctx: &MatchCtx<'a>, selectors: &[Selector]) -> Vec<&'a Value> {
     let mut out = Vec::new();
     for &root in &ctx.roots {
         let mut stack: Vec<&'a Value> = vec![root];
@@ -547,15 +547,24 @@ pub(crate) fn find_all_with<'a>(ctx: &MatchCtx<'a>, selectors: &[Selector]) -> V
     out
 }
 
-/// Apply `--visible`/`--clickable`/`--enabled` filters in-place on a match
-/// list. Cheap and lossless: callers can chain it after `find_all`.
-pub(crate) fn apply_filters(matches: &mut Vec<&Value>, f: &crate::flags::ActionFlags) {
-    if !f.require_visible && !f.require_clickable && !f.require_enabled { return; }
+/// What a match must be, beyond the selector (`--visible` / `--clickable`
+/// / `--enabled`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Require {
+    pub visible: bool,
+    pub clickable: bool,
+    pub enabled: bool,
+}
+
+/// Apply [`Require`] filters in-place on a match list. Cheap and lossless:
+/// callers can chain it after `find_all`.
+pub fn apply_filters(matches: &mut Vec<&Value>, f: Require) {
+    if !f.visible && !f.clickable && !f.enabled { return; }
     matches.retain(|n| {
         let flags = get_str(n, "flags").unwrap_or("");
-        if f.require_clickable && !flags.contains('c') { return false; }
-        if f.require_enabled   && !flags.contains('e') { return false; }
-        if f.require_visible {
+        if f.clickable && !flags.contains('c') { return false; }
+        if f.enabled   && !flags.contains('e') { return false; }
+        if f.visible {
             // `:visible` here means "has bounds and at least one of the
             // a11y visibility flags". The daemon emits 'v' for nodes that
             // pass AccessibilityNodeInfo.isVisibleToUser().
@@ -567,6 +576,22 @@ pub(crate) fn apply_filters(matches: &mut Vec<&Value>, f: &crate::flags::ActionF
         }
         true
     });
+}
+
+/// A daemon-grammar selector that names `node`: the full resource id when
+/// it has one (always unique), else class plus the node's own text.
+pub fn node_to_daemon_selector(node: &Value) -> String {
+    let rid = get_str(node, "rid").unwrap_or("");
+    if !rid.is_empty() {
+        return format!("id={rid}");
+    }
+    let cls_full = get_str(node, "cls").unwrap_or("EditText");
+    let simple = cls_full.rsplit('.').next().unwrap_or(cls_full);
+    let txt = get_str(node, "text").unwrap_or("");
+    if !txt.is_empty() {
+        return format!("class={simple} text={txt:?}");
+    }
+    format!("class={simple}")
 }
 
 #[cfg(test)]

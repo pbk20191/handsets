@@ -1,0 +1,12 @@
+[package]
+name = "mobax-core"
+version.workspace = true
+edition.workspace = true
+description = "mobileAX core: the daemon connection, device targeting, and the screen model (rows, @N refs, changes)"
+
+[lib]
+name = "mobax_core"
+path = "src/lib.rs"
+
+[dependencies]
+# None: like the `mobax` CLI, the core is pure std.

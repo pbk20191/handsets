@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["mobax-cli", "mobax-tui", "mobax-viewer"]
+members = ["mobax-core", "mobax-cli", "mobax-tui", "mobax-viewer"]
 # A bare `cargo build` skips the viewer: it is the heavy one (GPU and codec
 # bindings, libavcodec on Linux). Build it with `-p mobax-viewer` or
 # `--workspace`.
