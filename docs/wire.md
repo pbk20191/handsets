@@ -76,6 +76,14 @@ settle             since=N [first_ms=200] [idle_ms=120] [timeout_ms=1500]
                                                          settle: waits up to first_ms for the
                                                          action's first event, then idle_ms of
                                                          quiet; changed=0 when nothing happened
+settle_dump        since=N [first_ms=200] [idle_ms=120] [timeout_ms=1500]
+                                                       → ok elapsed=N changed=0|1 moving=0|1
+                                                         then a newline and the `dump` JSON
+                                                         settle, then the screen once it holds
+                                                         still: while an app window reaches past
+                                                         the screen's edge (sliding in) it waits
+                                                         for the next event, and two dumps 40 ms
+                                                         apart must agree; moving=1: never quiet
 wait_for_text      text="…" [match=sub|exact] [scope=all|app|active] [timeout_ms=5000]
                                                        → ok x=… y=… w=… h=… elapsed=…
 wait_for_activity  n=COMPONENT [timeout_ms=5000]       prefix-matches the package
