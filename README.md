@@ -9,7 +9,7 @@
 
 > mobileAX started as a fork of [elliotgao2/handsets](https://github.com/elliotgao2/handsets)
 > (MIT). The daemon here is built with the Android Gradle Plugin and listens
-> on an abstract Unix socket. The PyPI package and the blog posts are upstream's.
+> on an abstract Unix socket.
 
 ---
 
@@ -153,6 +153,6 @@ missing, once the SDK licenses are accepted (`sdkmanager --licenses`).
 
 Exit codes: `0` ok · `1` failure · `2` NOT_FOUND · `3` TIMEOUT · `4` AMBIGUOUS. Full structured `error.code` in `mobax --json` output for the long tail.
 
-`mobax --help` is the verb table. Recipes in the [Cookbook](docs/cookbook.md), long-form posts on the [Blog](https://elliotgao2.github.io/handsets/blog/) (upstream).
+`mobax --help` is the verb table. Recipes in the [Cookbook](docs/cookbook.md).
 
 Pre-1.0. CLI surface stable since v0.1.0. Wire protocol versioned via the `info` verb. MIT — see [LICENSE](LICENSE).

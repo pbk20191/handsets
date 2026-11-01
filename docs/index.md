@@ -98,7 +98,6 @@ That's the shape any subprocess driver should consume. A first-party Python SDK 
 - **[Wire reference](wire.md)** — the raw protocol if you want to write your own client
 - **[Sharp edges](sharp-edges.md)** — what doesn't work and why
 - **[Benchmark](benchmark.md)** — full latency numbers vs uiautomator2 and Appium
-- **[Blog](blog/index.md)** — long-form posts on how mobileAX works
 
 ## Status
 
