@@ -3,7 +3,6 @@
 // --device/--host/--port. The connection and wire protocol are
 // mobax-core's Conn, the same one the CLI uses.
 
-
 mod app;
 mod conn;
 mod json;
