@@ -664,11 +664,13 @@ struct Settle {
 
 /// An app launch takes a few hundred ms to show anything and arrives in
 /// bursts; a tap or a key may open another screen; typing and scrolling
-/// react at once.
+/// react at once. A tap's second look is short: launching apps from the
+/// home screen always showed a change within the first window, so it mostly
+/// runs for taps that do nothing.
 fn settle_budget(verb: &str) -> Settle {
     match verb {
         "open" => Settle { first_ms: 3000, idle_ms: 300, timeout_ms: 6000, second_look_ms: 0 },
-        "tap" | "go" => Settle { first_ms: 500, idle_ms: 200, timeout_ms: 3000, second_look_ms: 700 },
+        "tap" | "go" => Settle { first_ms: 500, idle_ms: 200, timeout_ms: 3000, second_look_ms: 400 },
         "swipe" => Settle { first_ms: 300, idle_ms: 200, timeout_ms: 2000, second_look_ms: 0 },
         _ => Settle { first_ms: 300, idle_ms: 150, timeout_ms: 1500, second_look_ms: 0 },
     }
