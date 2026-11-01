@@ -13,6 +13,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import android.view.MotionEvent.PointerCoords
 import android.view.MotionEvent.PointerProperties
+import kotlinx.coroutines.delay
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Input event injection via UiAutomation.injectInputEvent. The daemon already
@@ -116,28 +118,35 @@ internal class Input(private val ua: UiAutomation) {
      * text reads back masked) or a view that only takes keys gets key
      * presses.
      */
-    fun text(s: String?) {
+    suspend fun text(s: String?) {
         if (s.isNullOrEmpty()) return
-        // A tap on a search bar can open the search screen and settle before
-        // its field takes focus, or while it still slides in and turns text
-        // away. Give it a second. Runs on Work, so the wait blocks no looper.
-        val until = SystemClock.uptimeMillis() + 1000
-        var field: AccessibilityNodeInfo?
-        while (true) {
-            field = inputFocus(ua)?.also { it.refresh() }
-            if (field != null && (field.isPassword || commit(field, s))) break
-            if (SystemClock.uptimeMillis() >= until) {
-                check(field == null) { "the field refused the text" }
-                break
-            }
-            Thread.sleep(50)
-        }
+        val field = typeInto(s)
         if (field != null && !field.isPassword) return
         val keymap = checkNotNull(virtualKeyMap) { "no virtual key map" }
         checkNotNull(keymap.getEvents(s.toCharArray())) {
             if (field == null) "no focused field, and the text has characters with no key" else "a password field takes only keyboard characters"
         }
         keys(s)
+    }
+
+    /**
+     * Inserts `s` into the editable field with input focus, waiting up to a
+     * second: a tap on a search bar can open the search screen and settle
+     * before its field takes focus, or while it still slides in and turns
+     * text away. Returns the field (a password field untouched), or null if
+     * none took focus.
+     */
+    private suspend fun typeInto(s: String): AccessibilityNodeInfo? {
+        val until = SystemClock.uptimeMillis() + 1000
+        while (true) {
+            val field = inputFocus(ua)?.also { it.refresh() }
+            if (field != null && (field.isPassword || commit(field, s))) return field
+            if (SystemClock.uptimeMillis() >= until) {
+                check(field == null) { "the field refused the text" }
+                return null
+            }
+            delay(50.milliseconds)
+        }
     }
 
     /** Inserts `run` at `node`'s cursor (replacing a selection); false if the field refused it. */
