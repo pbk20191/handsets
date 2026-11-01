@@ -66,14 +66,14 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             // If the verb funnelled its failure through `output::Reporter`,
-            // the structured ErrCode rides in the error payload so we can
-            // surface a distinct exit status. Otherwise this is a generic
-            // I/O / setup failure and we fall back to 1.
+            // the structured ErrCode rides in the error payload and was
+            // already printed. Otherwise print it here; its code comes from
+            // the typed error inside, or the I/O kind.
             if let Some(code) = output::err_code_of(&e) {
                 ExitCode::from(code.exit_code())
             } else {
                 crate::errln!("mobax: {e}");
-                ExitCode::from(1)
+                ExitCode::from(errors::code_of(&e).exit_code())
             }
         }
     }

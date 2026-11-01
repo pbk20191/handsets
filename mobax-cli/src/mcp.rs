@@ -265,7 +265,7 @@ impl Engine {
             Some(serial) => Target { serial: serial.clone(), port: self.port },
             None => Target {
                 serial: crate::daemon::target_serial()
-                    .map_err(|e| format!("ERR:DEVICE_GONE:{e}\nCall `use` first."))?,
+                    .map_err(|e| format!("ERR:{}:{e}\nPass `device`, or call `use` first.", e.code().as_short()))?,
                 port: self.port,
             },
         };
@@ -621,9 +621,18 @@ fn run_verb(serial: &str, sess: &mut Session, argv: &[String]) -> VerbRun {
         Err(e) => match output::err_code_of(&e) {
             // A reported failure: the daemon's reply was read in full.
             Some(code) => VerbRun { ok: false, text: with_hint(text, code), keep: true },
+            // Not reported: setup or the socket failed. Only a bad argument
+            // is caught before anything is sent, so only then is the socket
+            // still in step.
             None => {
-                let msg = format!("{text}\nERR:DAEMON_ERROR:{e}");
-                VerbRun { ok: false, text: msg.trim_start().to_string(), keep: false }
+                let code = crate::errors::code_of(&e);
+                let msg = format!("{text}\nERR:{}:{e}", code.as_short());
+                let msg = msg.trim_start().to_string();
+                let text = match e.get_ref().and_then(|i| i.downcast_ref::<mobax_core::Error>()) {
+                    Some(mobax_core::Error::WhichDevice(_)) => format!("{msg}\nPass `device`, or call `use` with one."),
+                    _ => with_hint(msg, code),
+                };
+                VerbRun { ok: false, text, keep: code == crate::errors::ErrCode::BadArg }
             }
         },
     }

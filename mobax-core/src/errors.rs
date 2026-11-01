@@ -117,7 +117,8 @@ impl Error {
         match self {
             Error::Daemon(info) => info.code,
             Error::NoDevice(_) | Error::NoDaemon(_) => ErrCode::DeviceGone,
-            Error::WhichDevice(_) => ErrCode::Ambiguous,
+            // Not AMBIGUOUS: exit 4 means a selector matched several nodes.
+            Error::WhichDevice(_) => ErrCode::Precondition,
             Error::BadArg(_) => ErrCode::BadArg,
             Error::Io(e) => io_code(e),
         }
@@ -290,7 +291,7 @@ mod tests {
         assert_eq!(e.kind(), std::io::ErrorKind::ConnectionRefused);
         assert_eq!(code_of(&e), ErrCode::DeviceGone);
         let e: std::io::Error = Error::WhichDevice("2 devices".into()).into();
-        assert_eq!(code_of(&e), ErrCode::Ambiguous);
+        assert_eq!(code_of(&e), ErrCode::Precondition);
         let e: std::io::Error = Error::Daemon(parse_err(b"ERR:TIMEOUT:wait").unwrap()).into();
         assert_eq!(code_of(&e), ErrCode::Timeout);
         assert_eq!(code_of(&std::io::Error::from(std::io::ErrorKind::TimedOut)), ErrCode::Timeout);
