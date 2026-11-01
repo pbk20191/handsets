@@ -97,7 +97,7 @@ pub(crate) fn run(host: &str, port: u16, cmd: &Cmd) -> io::Result<()> {
     // file (populated by the `state-daemon` watcher that `connect` spawns).
     // No TCP, no parsing on the wire — just a file read + tiny string scan.
     if let Cmd::State(field) = cmd {
-        if let Some(snap) = state_cache::read_cached(port) {
+        if let Some(snap) = crate::cached_state() {
             return print_state_field(&snap, field);
         }
     }

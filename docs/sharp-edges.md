@@ -16,7 +16,7 @@
 
 - Two SDKs on one machine (say Android Studio's and the one `android info`
   reports) ship different adb versions. Whichever client talks to the other's
-  server kills and restarts it, which drops port forwards and can hang a
+  server kills and restarts it, which drops open connections and can hang a
   pipeline waiting on output. Point everything at one SDK, or pin
   `MOBILEAX_ADB`.
 - A set-but-empty `ANDROID_HOME` makes `android info` report an empty SDK

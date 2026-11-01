@@ -633,16 +633,11 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     }
 
     // During `use` and `drop`, `--device SERIAL` selects the ADB device to
-    // bootstrap or tear down. Other verbs use it to route to a daemon that
-    // `mobax use` already started.
+    // bootstrap or tear down. Other verbs talk to that device's daemon.
+    // (Script lines without --device keep the device the script started on.)
     let selects_device = matches!(positional.first(), Some(&"use") | Some(&"drop"));
-    if !selects_device {
-        if let Some(serial) = device_serial.as_deref() {
-            {
-                let p = resolve_device_port(serial)?;
-                port = p
-            }
-        }
+    if !selects_device && device_serial.is_some() {
+        daemon::set_target(device_serial.clone());
     }
 
     let cmd = match positional.split_first() {
@@ -1061,14 +1056,9 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
 
 /// `--device SERIAL` → host-side forwarded port for that device. Errors if
 /// the device isn't attached or the daemon hasn't been brought up with
-/// `mobax use`. Keeps the global flag thin so it doesn't accidentally touch
-/// the daemon lifecycle.
-pub(crate) fn resolve_device_port(serial: &str) -> Result<u16, String> {
-    let rows = daemon::devices().map_err(|e| format!("adb devices: {e}"))?;
-    let row = rows.iter().find(|r| r.serial == serial)
-        .ok_or_else(|| format!("--device {serial}: not attached"))?;
-    row.host_port.ok_or_else(|| format!(
-        "--device {serial}: no forwarded daemon — run `mobax use {serial}` first"))
+/// The host-side state mirror for the device this call talks to.
+pub(crate) fn cached_state() -> Option<Vec<u8>> {
+    state_cache::read_cached(&daemon::target_serial().ok()?)
 }
 
 fn run(opts: &Opts) -> io::Result<()> {
@@ -1104,13 +1094,13 @@ fn run(opts: &Opts) -> io::Result<()> {
         }
         Cmd::Adb(sub) => adb::run(&opts.host, opts.port, sub),
         Cmd::Connect(o) => {
-            let port = daemon::connect(o)?;
-            crate::errln!("daemon up on tcp:{port}");
+            let (serial, _) = daemon::connect(o)?;
+            crate::errln!("daemon up on {serial}");
             Ok(())
         }
         Cmd::Disconnect(o) => daemon::disconnect(o),
         Cmd::Devices => print_devices(),
-        Cmd::StateDaemon => state_cache::run_daemon(&opts.host, opts.port),
+        Cmd::StateDaemon => state_cache::run_daemon(&daemon::target_serial()?, opts.port),
         Cmd::Shell => shell::run(&opts.host, opts.port),
         Cmd::Find { selector, flags } => {
             run_find(&mut Conn::connect(&opts.host, opts.port)?, opts.out_fmt, selector, flags)
@@ -2124,7 +2114,7 @@ fn format_bytes_pair(used_kb: u64, total_kb: u64) -> String {
 /// total cost is one file read + JSON parse + format.
 fn run_info(host: &str, port: u16) -> io::Result<()> {
     // 1. Fast path — cache file written by the host-side state-daemon.
-    let snap_bytes = match state_cache::read_cached(port) {
+    let snap_bytes = match cached_state() {
         Some(b) => b,
         None => {
             // No daemon yet (or stale). Fall back to a single wire call.
@@ -2323,22 +2313,27 @@ pub(crate) struct Conn {
 }
 
 impl Conn {
+    /// The daemon this call talks to: on this machine, the target device's
+    /// (see `daemon::target_serial`) through the adb server; on a remote
+    /// `--host`, a TCP port there.
     pub(crate) fn connect(host: &str, port: u16) -> io::Result<Self> {
-        let sock = match TcpStream::connect((host, port)) {
-            Ok(s) => s,
-            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused
-                    && is_local(host) => {
-                // No daemon listening on the default port. If exactly
-                // one device is attached, transparently auto-`mobax use`
-                // it so users don't have to do that step manually.
-                match try_auto_use(port) {
-                    Ok(()) => TcpStream::connect((host, port))?,
-                    Err(why) => return Err(io::Error::new(e.kind(),
-                        format!("no daemon on {host}:{port}; {why}"))),
-                }
-            }
-            Err(e) => return Err(e),
-        };
+        if !is_local(host) {
+            return Self::tcp(TcpStream::connect((host, port))?);
+        }
+        let serial = daemon::target_serial()?;
+        match Self::connect_device(&serial, port) {
+            Ok(c) => Ok(c),
+            // No daemon there yet: start it, so users don't have to run
+            // `mobax use` first.
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => match try_auto_use(&serial, port) {
+                Ok(()) => Self::connect_device(&serial, port),
+                Err(why) => Err(io::Error::new(e.kind(), format!("no daemon on {serial}; {why}"))),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    fn tcp(sock: TcpStream) -> io::Result<Self> {
         sock.set_nodelay(true)?;
         sock.set_read_timeout(Some(Duration::from_secs(30)))?;
         sock.set_write_timeout(Some(Duration::from_secs(10)))?;
@@ -2348,11 +2343,7 @@ impl Conn {
     /// The daemon on device `serial` (instance `port`) through the adb
     /// server, without a host port forward.
     pub(crate) fn connect_device(serial: &str, port: u16) -> io::Result<Self> {
-        let sock = daemon::device_stream(serial, port)?;
-        sock.set_nodelay(true)?;
-        sock.set_read_timeout(Some(Duration::from_secs(30)))?;
-        sock.set_write_timeout(Some(Duration::from_secs(10)))?;
-        Ok(Self { sock })
+        Self::tcp(daemon::device_stream(serial, port)?)
     }
 
     /// False once the peer has closed (or sent bytes nobody asked for): a
@@ -2474,7 +2465,7 @@ struct BenchResult {
 
 fn bench(host: &str, port: u16, n: u32, json_output: bool) -> io::Result<()> {
     let mut conn = Conn::connect(host, port)?;
-    let meta = bench_metadata(&mut conn, port)?;
+    let meta = bench_metadata(&mut conn)?;
     // Discover available commands by probing — start with cheap ones.
     // Warm the default mirror first so the size-sweep timing doesn't include
     // the one-time VirtualDisplay creation for each new size.
@@ -2672,8 +2663,8 @@ impl BenchMeta {
     }
 }
 
-fn bench_metadata(conn: &mut Conn, port: u16) -> io::Result<BenchMeta> {
-    let snap = match state_cache::read_cached(port) {
+fn bench_metadata(conn: &mut Conn) -> io::Result<BenchMeta> {
+    let snap = match cached_state() {
         Some(b) => b,
         None => conn.call("state device")?,
     };
@@ -2769,23 +2760,23 @@ fn print_devices() -> io::Result<()> {
             serial: Some(rows[0].serial.clone()),
             port: None,
         };
-        if let Ok(port) = daemon::connect(&opts) {
-            crate::errln!("daemon up on tcp:{port} (auto)");
+        if let Ok((serial, _)) = daemon::connect(&opts) {
+            crate::errln!("daemon up on {serial} (auto)");
             rows = daemon::devices()?;
         }
     }
     crate::outln!(
-        "{:<24} {:<10} {:<7} {:<8} {:<10} {:<16} model",
-        "serial", "state", "jar", "running", "host_port", "sdk"
+        "{:<24} {:<10} {:<7} {:<8} {:<8} {:<16} model",
+        "serial", "state", "jar", "running", "daemon", "sdk"
     );
     for r in rows {
         crate::outln!(
-            "{:<24} {:<10} {:<7} {:<8} {:<10} {:<16} {}",
+            "{:<24} {:<10} {:<7} {:<8} {:<8} {:<16} {}",
             r.serial,
             r.state,
             if r.jar_present { "yes" } else { "no" },
             if r.running { "yes" } else { "no" },
-            r.host_port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+            if r.daemon { "up" } else { "-" },
             r.sdk.unwrap_or_else(|| "-".into()),
             r.model.unwrap_or_else(|| "-".into()),
         );
@@ -2797,28 +2788,14 @@ pub(crate) fn is_local(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
-/// If exactly one device is attached, run the equivalent of `mobax use`
-/// against it so daemon-needing verbs work without an explicit `mobax use`
-/// first. Returns a short human reason on the error path.
-fn try_auto_use(port: u16) -> Result<(), String> {
-    let rows = daemon::devices().map_err(|e| format!("adb devices failed: {e}"))?;
-    let alive: Vec<_> = rows.iter().filter(|r| r.state == "device").collect();
-    match alive.len() {
-        0 => Err("no devices attached".into()),
-        1 => {
-            let opts = daemon::ConnectOpts {
-                serial: Some(alive[0].serial.clone()),
-                port: Some(port),
-            };
-            let p = daemon::connect(&opts)
-                .map_err(|e| format!("daemon::connect failed: {e}"))?;
-            crate::errln!("daemon up on tcp:{p} (auto)");
-            Ok(())
-        }
-        n => Err(format!(
-            "{n} devices attached; pass `mobax use SERIAL` to pick one"
-        )),
-    }
+/// Run the equivalent of `mobax use` against `serial` so daemon-needing
+/// verbs work without an explicit `mobax use` first. Returns a short human
+/// reason on the error path.
+fn try_auto_use(serial: &str, port: u16) -> Result<(), String> {
+    let opts = daemon::ConnectOpts { serial: Some(serial.to_string()), port: Some(port) };
+    let (serial, _) = daemon::connect(&opts).map_err(|e| format!("starting the daemon failed: {e}"))?;
+    crate::errln!("daemon up on {serial} (auto)");
+    Ok(())
 }
 
 #[cfg(test)]

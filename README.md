@@ -15,7 +15,7 @@
 
 ```bash
 $ mobax use                              # connect, start the on-device daemon
-daemon up on tcp:9008
+daemon up on emulator-5554
 
 $ mobax ui                               # flat table of tappable nodes
 fill  EditText  "Email"     #email     540,540
@@ -96,7 +96,7 @@ Vocabulary: `#id` `[a=v]` `[a~=sub]` `[a^=pre]` `[a$=suf]` · `:visible :clickab
 ```
 host                                  device (shell UID via app_process)
 ─────                                  ─────────────────────────────────
-  mobax ─── adb forward ────► @mobaxd_9008 ─► Server.java
+  mobax ─── adb server ─────► @mobaxd_9008 ─► Server.java
                                          ├─ accessibility dump
                                          ├─ binder reflection (Pm/Am/Wm/Settings)
                                          └─ screenshots + state mirror
@@ -104,7 +104,12 @@ host                                  device (shell UID via app_process)
 
 The daemon listens on an abstract Unix socket (`@mobaxd_<port>`) and only accepts
 adbd (shell) or root, so other apps on the device can't reach it.
-Length-prefixed binary frames over `adb forward tcp:<port> localabstract:mobaxd_<port>`:
+The host reaches it through the adb server itself (`host:transport:SERIAL`,
+then `localabstract:mobaxd_<port>`), so no host port is bound per device and
+devices are named by serial: `--device SERIAL`, `$MOBILEAX_SERIAL` /
+`$ANDROID_SERIAL`, the device `mobax use` picked last, or the only one
+attached. The adb server's address follows adb's own `$ADB_SERVER_SOCKET` /
+`$ANDROID_ADB_SERVER_PORT`. Length-prefixed binary frames:
 
 ```
 host → device:   [u32 BE len][ascii: verb [k=v ...]]

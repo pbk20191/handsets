@@ -23,9 +23,23 @@ pub(crate) fn run(host: &str, port: u16, _args: Args) -> io::Result<()> {
          Then ensure it's on PATH, or run mobax from the workspace root.",
     ))?;
 
+    // The viewer speaks plain TCP: give it a host port to this device's
+    // daemon for as long as it runs.
+    let local = crate::is_local(host);
+    let (serial, port) = if local {
+        let serial = daemon::target_serial()?;
+        let hp = daemon::temporary_forward(&serial, port)?;
+        (Some(serial), hp)
+    } else {
+        (None, port)
+    };
     let status = Command::new(viewer)
         .args(["--host", host, "--port", &port.to_string()])
-        .status()?;
+        .status();
+    if let Some(s) = &serial {
+        daemon::remove_forward(s, port);
+    }
+    let status = status?;
 
     if !status.success() {
         return Err(io::Error::other(format!(
