@@ -25,6 +25,7 @@ internal class Gestures(private val h: Server.Handlers) {
         "wait_for_idle" -> waitForIdle(cmd)
         "event_seq" -> utf8("seq=${waits.seq}")
         "settle" -> settle(cmd)
+        "settle_dump" -> settleDump(cmd)
         "wait_for_text" -> waitForText(cmd)
         "wait_for_activity" -> waitForActivity(cmd)
         "tap_and_dump" -> tapAnd(cmd, dump = true)
@@ -155,6 +156,51 @@ internal class Gestures(private val h: Server.Handlers) {
         return utf8("ok elapsed=${r.first} changed=${if (r.second) 1 else 0}")
     }
 
+    /**
+     * `settle_dump since=SEQ [first_ms] [idle_ms] [timeout_ms]`: settle as
+     * `settle` does, then answer with the screen once it holds still, in one
+     * round trip: `ok elapsed=N changed=0|1 moving=0|1` (moving: it never went
+     * quiet), a newline, and the `dump` payload.
+     *
+     * Quiet is not still. A window sliding in sends no events while it moves,
+     * and its nodes report where they were mid-slide; so while an app window
+     * reaches past the screen's edge, wait for the next event (the slide's
+     * end). Then two dumps [STILL_GAP_MS] apart must agree.
+     */
+    private suspend fun settleDump(cmd: String): ByteArray {
+        val since = Server.longArg(cmd, "since", -1)
+        if (since < 0) return Server.errBytes("BAD_ARG:settle_dump-needs-since")
+        val first = Server.longArg(cmd, "first_ms", 200)
+        val idle = Server.longArg(cmd, "idle_ms", 120)
+        val timeout = Server.longArg(cmd, "timeout_ms", 1500)
+        val start = System.currentTimeMillis()
+        val left = { timeout - (System.currentTimeMillis() - start) }
+        val r = waits.awaitSettle(since, first, idle, timeout)
+        val changed = r?.second ?: true
+        var dump = h.dumper.dumpAll()
+        if (changed) {
+            while (left() > 0) {
+                if (h.dumper.sliding()) {
+                    waits.awaitEvent(minOf(SLIDE_MS, left()))
+                    dump = h.dumper.dumpAll()
+                    continue
+                }
+                delay(STILL_GAP_MS.milliseconds)
+                val again = h.dumper.dumpAll()
+                val still = sansTimestamp(again) == sansTimestamp(dump)
+                dump = again
+                if (still) break
+            }
+        }
+        val head = "ok elapsed=${System.currentTimeMillis() - start} changed=${if (changed) 1 else 0} moving=${if (r == null) 1 else 0}"
+        return utf8("$head\n$dump")
+    }
+
+    private fun sansTimestamp(dump: String): String {
+        val i = dump.indexOf(",\"windows\"")
+        return if (i >= 0) dump.substring(i) else dump
+    }
+
     private suspend fun waitForText(cmd: String): ByteArray {
         val text = Server.strArg(cmd, "text")
         if (text.isNullOrEmpty()) return Server.errBytes("wait_for_text-needs-text")
@@ -214,6 +260,12 @@ internal class Gestures(private val h: Server.Handlers) {
     }
 
     private companion object {
+        /** Longest wait for the event that ends a window slide. */
+        const val SLIDE_MS = 700L
+
+        /** Two dumps this far apart that agree mean the screen holds still. */
+        const val STILL_GAP_MS = 40L
+
         val OK = "ok".toByteArray(StandardCharsets.UTF_8)
         fun utf8(s: String) = s.toByteArray(StandardCharsets.UTF_8)
     }

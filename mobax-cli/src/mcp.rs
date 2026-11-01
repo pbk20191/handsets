@@ -402,14 +402,6 @@ impl Engine {
     fn observe_change(&self, t: &Target, conn: &mut Conn, seq: Option<u64>, b: Settle, verb_ms: u128) -> io::Result<(String, String)> {
         let started = Instant::now();
         let deadline = started + Duration::from_millis(b.timeout_ms as u64);
-        let settle = |conn: &mut Conn, since: Option<u64>, first_ms: u32| -> io::Result<Vec<u8>> {
-            match since {
-                Some(n) => conn.call(&format!(
-                    "settle since={n} first_ms={first_ms} idle_ms={} timeout_ms={}", b.idle_ms, b.timeout_ms)),
-                // An older daemon: a plain quiet period.
-                None => conn.call(&format!("wait_for_idle idle_ms={} timeout_ms={}", b.idle_ms, b.timeout_ms)),
-            }
-        };
         // MOBAX_TIMING=1: where the time went, appended to the note.
         let mut parts = vec![format!("verb {verb_ms}")];
         let mut lap = Instant::now();
@@ -417,38 +409,40 @@ impl Engine {
             parts.push(format!("{what} {}", lap.elapsed().as_millis()));
             lap = Instant::now();
         };
-        let first = settle(conn, seq, b.first_ms)?;
-        mark("settle", &mut parts);
-        let mut reacted = !String::from_utf8_lossy(&first).contains("changed=0");
-        let still_moving = first.starts_with(b"ERR:");
         let had_rows = lock(&self.screens).get(t).is_some_and(|s| !s.is_empty());
-        let mut dump = self.read_settled(conn, had_rows, deadline)?;
-        mark("dump", &mut parts);
+        // The daemon settles and hands back the screen once it holds still,
+        // in one round trip; an older one gets the steps one by one.
+        let settled = match seq {
+            Some(since) => settle_dump(conn, since, b.first_ms, b)?,
+            None => None,
+        };
+        let (mut reacted, still_moving, mut dump) = match settled {
+            Some(s) => {
+                mark("settle", &mut parts);
+                s
+            }
+            None => self.observe_stepwise(t, conn, seq, b, had_rows, deadline, &mut parts)?,
+        };
+        // A launching app shows its starting window first: wait for content.
+        while transitional(&dump, had_rows) && Instant::now() < deadline {
+            let Some(since) = event_seq(conn) else { break };
+            match settle_dump(conn, since, 300, b)? {
+                Some((_, _, d)) => dump = d,
+                None => break,
+            }
+            mark("launch", &mut parts);
+        }
         // A tap that starts another activity can go quiet before the new
         // screen draws (another process starting). If nothing visible changed,
         // give it one more short window to show up.
         if b.second_look_ms > 0 && self.unchanged(t, &dump) {
-            let since = event_seq(conn);
-            let again = settle(conn, since, b.second_look_ms)?;
+            if let Some(since) = event_seq(conn) {
+                if let Some((true, _, d)) = settle_dump(conn, since, b.second_look_ms, b)? {
+                    reacted = true;
+                    dump = d;
+                }
+            }
             mark("second look", &mut parts);
-            if since.is_some() && String::from_utf8_lossy(&again).contains("changed=1") {
-                reacted = true;
-                dump = self.read_settled(conn, had_rows, deadline)?;
-                mark("dump", &mut parts);
-            }
-        }
-        if reacted {
-            dump = self.read_still(conn, dump, deadline)?;
-            mark("still", &mut parts);
-            // Mid-slide positions hold still until the slide ends; its end
-            // is the next event.
-            if Screen::is_sliding(&dump) {
-                let since = event_seq(conn);
-                settle(conn, since, 700)?;
-                let fresh = self.read_settled(conn, had_rows, deadline)?;
-                dump = self.read_still(conn, fresh, deadline)?;
-                mark("slide", &mut parts);
-            }
         }
         let ms = started.elapsed().as_millis();
         let note = if still_moving {
@@ -469,6 +463,48 @@ impl Engine {
         let out = screen.describe(&note, screen.change_from(prev));
         screens.insert(t.clone(), screen);
         Ok((note, out))
+    }
+
+    /// `observe_change` against a daemon without `settle_dump`: settle, read,
+    /// then read until two reads agree and no window is mid-slide.
+    /// (reacted, still moving, the screen).
+    #[allow(clippy::too_many_arguments)]
+    fn observe_stepwise(
+        &self,
+        t: &Target,
+        conn: &mut Conn,
+        seq: Option<u64>,
+        b: Settle,
+        had_rows: bool,
+        deadline: Instant,
+        parts: &mut Vec<String>,
+    ) -> io::Result<(bool, bool, Value)> {
+        let settle = |conn: &mut Conn, since: Option<u64>, first_ms: u32| -> io::Result<Vec<u8>> {
+            match since {
+                Some(n) => conn.call(&format!(
+                    "settle since={n} first_ms={first_ms} idle_ms={} timeout_ms={}", b.idle_ms, b.timeout_ms)),
+                // Older still: a plain quiet period.
+                None => conn.call(&format!("wait_for_idle idle_ms={} timeout_ms={}", b.idle_ms, b.timeout_ms)),
+            }
+        };
+        let lap = Instant::now();
+        let first = settle(conn, seq, b.first_ms)?;
+        let reacted = !String::from_utf8_lossy(&first).contains("changed=0");
+        let still_moving = first.starts_with(b"ERR:");
+        let mut dump = self.read_settled(conn, had_rows, deadline)?;
+        if reacted && !self.unchanged(t, &dump) {
+            dump = self.read_still(conn, dump, deadline)?;
+            // Mid-slide positions hold still until the slide ends; its end
+            // is the next event.
+            if Screen::is_sliding(&dump) {
+                let since = event_seq(conn);
+                settle(conn, since, 700)?;
+                let fresh = self.read_settled(conn, had_rows, deadline)?;
+                dump = self.read_still(conn, fresh, deadline)?;
+            }
+        }
+        parts.push(format!("stepwise {}", lap.elapsed().as_millis()));
+        Ok((reacted, still_moving, dump))
     }
 
     /// `watch`: waits, without polling, until the screen differs from the
@@ -543,8 +579,7 @@ impl Engine {
     fn read_settled(&self, conn: &mut Conn, had_rows: bool, deadline: Instant) -> io::Result<Value> {
         loop {
             let dump = parse_dump(&conn.call("dump")?)?;
-            let transitional = Screen::is_starting(&dump) || (had_rows && Screen::row_count(&dump) == 0);
-            if !transitional || Instant::now() >= deadline {
+            if !transitional(&dump, had_rows) || Instant::now() >= deadline {
                 return Ok(dump);
             }
             std::thread::sleep(Duration::from_millis(150));
@@ -725,6 +760,27 @@ fn with_hint(text: String, code: crate::errors::ErrCode) -> String {
         Precondition | Internal => "",
     };
     if hint.is_empty() { text } else { format!("{text}\n{hint}") }
+}
+
+/// `settle_dump`: the daemon settles after the action that followed
+/// `since` and answers with the screen once it holds still. (reacted, still
+/// moving, the screen), or None from a daemon that predates the verb.
+fn settle_dump(conn: &mut Conn, since: u64, first_ms: u32, b: Settle) -> io::Result<Option<(bool, bool, Value)>> {
+    let body = conn.call(&format!(
+        "settle_dump since={since} first_ms={first_ms} idle_ms={} timeout_ms={}", b.idle_ms, b.timeout_ms))?;
+    if body.starts_with(b"ERR:UNKNOWN_CMD") {
+        return Ok(None);
+    }
+    let nl = body.iter().position(|&c| c == b'\n')
+        .ok_or_else(|| io::Error::other(format!("settle_dump: {}", String::from_utf8_lossy(&body))))?;
+    let head = String::from_utf8_lossy(&body[..nl]);
+    Ok(Some((head.contains("changed=1"), head.contains("moving=1"), parse_dump(&body[nl + 1..])?)))
+}
+
+/// A launching app's starting window, or rows gone that were there: the
+/// screen in between two others.
+fn transitional(dump: &Value, had_rows: bool) -> bool {
+    Screen::is_starting(dump) || (had_rows && Screen::row_count(dump) == 0)
 }
 
 /// The daemon's event counter, to settle against after an action.

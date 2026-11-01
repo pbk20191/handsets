@@ -130,6 +130,13 @@ class Waits {
         return (System.currentTimeMillis() - start) to true
     }
 
+    /** Waits up to [timeoutMs] for the next event; true if one came. */
+    suspend fun awaitEvent(timeoutMs: Long): Boolean {
+        val seen = eventSeq
+        if (timeoutMs > 0) withTimeoutOrNull(timeoutMs.milliseconds) { nextEvent() }
+        return eventSeq != seen
+    }
+
     /** @return ms until [check] first held, or -1 on timeout. */
     suspend fun awaitPredicate(timeoutMs: Long, check: suspend () -> Boolean): Long {
         val start = System.currentTimeMillis()

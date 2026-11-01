@@ -34,6 +34,28 @@ class Dumper(private val ua: UiAutomation) {
         return out.finish()
     }
 
+    /**
+     * An app window reaches past the screen's edge: it is sliding in or out
+     * (an activity transition), and its nodes report where they were
+     * mid-slide. The screen's width is the widest window at x=0 (the status
+     * bar spans it).
+     */
+    suspend fun sliding(): Boolean = withContext(Loop.Work) {
+        val windows = ua.getWindows() ?: return@withContext false
+        val r = Rect()
+        var width = 0
+        for (w in windows) {
+            w.getBoundsInScreen(r)
+            if (r.left == 0) width = maxOf(width, r.right)
+        }
+        width > 0 && windows.any { w ->
+            w.type == AccessibilityWindowInfo.TYPE_APPLICATION && run {
+                w.getBoundsInScreen(r)
+                r.left < 0 || r.right > width
+            }
+        }
+    }
+
     suspend fun dumpActive(): String = mutex.withLock { withContext(Loop.Work) { dumpActiveLocked() } }
 
     private fun dumpActiveLocked(): String {
