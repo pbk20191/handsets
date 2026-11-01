@@ -58,7 +58,9 @@ up          x=NUM y=NUM                                  releases the down point
 scroll      x=NUM y=NUM dy=NUM                           wheel scroll at point
 key         NAME                                         e.g. BACK, HOME, ENTER
 key         code=N                                       raw KeyEvent code
-text        STRING                                       KeyEvents to the focused field
+text        STRING                                       insert at the focused field's cursor
+                                                         (KeyEvents for a password field or a
+                                                         view with no editable focus)
 ```
 
 ## Waits — event-driven, no polling

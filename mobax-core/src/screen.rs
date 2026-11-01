@@ -11,8 +11,10 @@
 use std::collections::HashMap;
 
 use crate::json::{self, Value};
+use crate::selector;
 use crate::ui_dump;
 
+#[derive(Clone)]
 pub struct Screen {
     /// App windows, bottom first, as `id:package`; a different set is a new screen.
     key: String,
@@ -24,6 +26,7 @@ pub struct Screen {
     next: u32,
 }
 
+#[derive(Clone)]
 pub struct Ref {
     pub n: u32,
     ident: String,
@@ -81,6 +84,23 @@ impl Screen {
     pub fn is_starting(dump: &Value) -> bool {
         let (_, pkg) = identity(dump);
         pkg.is_empty() && ui_dump::interactive_rows(&json::app_roots(dump)).is_empty()
+    }
+
+    /// An app window reaches past the screen's edge: it is sliding in or out
+    /// (an activity transition), and its rows' coordinates are where they
+    /// were mid-slide. The screen's width is the widest window at x=0 (the
+    /// status bar spans it).
+    pub fn is_sliding(dump: &Value) -> bool {
+        const TYPE_APPLICATION: i64 = 1;
+        let windows = json::obj_get(dump, "windows").and_then(json::as_arr).unwrap_or(&[]);
+        let Some(width) = windows.iter().filter_map(selector::bounds).filter(|b| b.0 == 0).map(|b| b.2).max() else {
+            return false;
+        };
+        windows
+            .iter()
+            .filter(|w| json::obj_get(w, "type").and_then(json::as_num) == Some(TYPE_APPLICATION))
+            .filter_map(selector::bounds)
+            .any(|(l, _, r, _)| l < 0 || r > width)
     }
 
     /// Rows `ui` would list for `dump`.
@@ -234,6 +254,22 @@ mod tests {
             kids.join(",")
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn a_window_mid_slide_is_told_from_a_still_one() {
+        let at = |l: i64| json::parse(&format!(
+            r#"{{"windows":[{{"type":3,"bounds":[0,0,1080,63],"root":{{}}}},
+                {{"type":1,"bounds":[{l},0,{},2400],"root":{{"bounds":[{l},0,{},2400]}}}}]}}"#,
+            l + 1080, l + 1080
+        )).unwrap();
+        assert!(!Screen::is_sliding(&at(0)));
+        assert!(Screen::is_sliding(&at(53)));
+        assert!(Screen::is_sliding(&at(-300)));
+        // A dialog inside the screen is not a slide.
+        let dialog = json::parse(r#"{"windows":[{"type":3,"bounds":[0,0,1080,63],"root":{}},
+            {"type":1,"bounds":[0,0,1080,2400],"root":{}},{"type":1,"bounds":[90,800,990,1600],"root":{}}]}"#).unwrap();
+        assert!(!Screen::is_sliding(&dialog));
     }
 
     #[test]

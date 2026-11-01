@@ -63,7 +63,13 @@ after 1830 ms · com.example.mail · new screen, 12 rows
 - **Replies carry the change.** `tap`, `fill`, `type`, `swipe`, `go` and
   `open` wait for the screen to settle (the device's own accessibility
   events, not a fixed sleep) and answer with `+` added, `~` changed, `-`
-  removed rows, or the new screen.
+  removed rows, or the new screen. A screen still sliding in is waited out,
+  so the coordinates in a reply are where the rows end up.
+- **Several steps, one call.** `batch` runs a known sequence (tap the search
+  bar, type, wait for a result) in one round trip, one line per step, then
+  what changed over the whole batch.
+- **Any language.** `type` inserts at the cursor, so Korean, CJK and emoji go
+  in as written, and a Korean keyboard layout can't turn `abc` into `뮻`.
 - **Waiting is free.** `watch` returns when the screen differs from what the
   agent last saw, or when some text shows. The device pushes changes, so
   nothing is polled while it waits.
@@ -72,9 +78,9 @@ after 1830 ms · com.example.mail · new screen, 12 rows
 
 Each release ships `mobileax-<platform>.mcpb`, a one-click bundle for MCP hosts
 such as Claude Desktop, or point any MCP client at `mobax mcp` (stdio). Tools:
-`use`, `ui`, `screenshot`, `tap`, `type`, `fill`, `swipe`, `go`, `wait`,
-`watch`, `find`, `open`, `close`, `logcat`, `info`, `drop`, and `mobax` for any
-other verb.
+`use`, `ui`, `screenshot`, `tap`, `type`, `fill`, `swipe`, `go`, `batch`,
+`wait`, `watch`, `find`, `open`, `close`, `logcat`, `info`, `drop`, and `mobax`
+for any other verb.
 
 ## From the shell
 
@@ -195,7 +201,7 @@ curl -fsSL https://raw.githubusercontent.com/pbk20191/mobileax/main/install.sh |
 Needs `adb`: `mobax` finds it through Google's Android CLI (`android info`),
 then `$ANDROID_HOME`, `$PATH` and Android Studio's default SDK;
 `MOBILEAX_ADB` overrides. macOS and Linux (Windows: the release zip). Pin a
-version with `MOBILEAX_VERSION=v0.4.0`. Emulator setup (Android CLI, host
+version with `MOBILEAX_VERSION=v0.5.0`. Emulator setup (Android CLI, host
 GPU): [docs/emulator.md](docs/emulator.md).
 
 Python bindings: `pip install ./bindings/python` (not on PyPI yet).

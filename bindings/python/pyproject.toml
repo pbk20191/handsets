@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mobileax"
-version = "0.4.0"
+version = "0.5.0"
 description = "Pythonic bindings for the mobileAX Android control CLI"
 readme = "README.md"
 license = { text = "MIT" }

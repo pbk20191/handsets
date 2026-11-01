@@ -58,6 +58,9 @@ reply with what changed: + added, ~ changed and - removed rows, or the whole new
 screen. You rarely need `ui` after an action. A ref stays valid until a reply \
 shows a new screen.\n\
 \n\
+When you already know several steps (tap a field, fill it, press enter, wait for \
+the result), send them as one `batch`: one call instead of one per step.\n\
+\n\
 To wait for the screen, use `watch` (any change, or `until` some text shows) or \
 `wait` (a selector) instead of calling `ui` repeatedly; the device pushes \
 changes, so waiting is free. Use `screenshot` only when the rows don't tell \
@@ -354,8 +357,9 @@ impl Engine {
     }
 
     /// Runs an action verb, then (with `observe`) waits for the screen to
-    /// settle and appends what changed.
-    fn act(&self, device: Option<&str>, argv: &[String], observe: bool) -> Reply {
+    /// settle and appends what changed, or with `brief` only how it settled
+    /// (a `batch` step: the batch describes the screen once, at the end).
+    fn act(&self, device: Option<&str>, argv: &[String], observe: bool, brief: bool) -> Reply {
         let t = match self.target(device) {
             Ok(t) => t,
             Err(e) => return (false, e),
@@ -367,11 +371,19 @@ impl Engine {
             Err(e) => return (false, e),
         };
         let seq = if observe { event_seq(&mut sess.conn) } else { None };
+        let verb_started = Instant::now();
         let mut r = run_verb(&t.serial, &mut sess, argv);
+        let verb_ms = verb_started.elapsed().as_millis();
         if r.ok && observe {
-            let budget = settle_budget(argv.first().map(String::as_str).unwrap_or(""));
-            match self.observe_change(&t, &mut sess.conn, seq, budget) {
-                Ok(s) => r.text.push_str(&s),
+            let mut budget = settle_budget(argv.first().map(String::as_str).unwrap_or(""));
+            // START_DELIVERED_TO_TOP: the app was already in front; nothing
+            // is coming, so don't wait seconds for it.
+            if argv.first().map(String::as_str) == Some("open") && r.text.contains("result=3") {
+                budget.first_ms = 300;
+            }
+            match self.observe_change(&t, &mut sess.conn, seq, budget, verb_ms) {
+                Ok((note, _)) if brief => r.text.push_str(&format!("\n{note}")),
+                Ok((_, change)) => r.text.push_str(&format!("\n{change}")),
                 Err(e) => {
                     r.text.push_str(&format!("\n(could not read the screen afterwards: {e})"));
                     r.keep = false;
@@ -385,8 +397,9 @@ impl Engine {
     }
 
     /// Waits for the action that followed `seq` to settle, reads the screen,
-    /// and describes it against the last one this server saw.
-    fn observe_change(&self, t: &Target, conn: &mut Conn, seq: Option<u64>, b: Settle) -> io::Result<String> {
+    /// and describes it against the last one this server saw: (how it
+    /// settled, that plus what changed).
+    fn observe_change(&self, t: &Target, conn: &mut Conn, seq: Option<u64>, b: Settle, verb_ms: u128) -> io::Result<(String, String)> {
         let started = Instant::now();
         let deadline = started + Duration::from_millis(b.timeout_ms as u64);
         let settle = |conn: &mut Conn, since: Option<u64>, first_ms: u32| -> io::Result<Vec<u8>> {
@@ -397,20 +410,44 @@ impl Engine {
                 None => conn.call(&format!("wait_for_idle idle_ms={} timeout_ms={}", b.idle_ms, b.timeout_ms)),
             }
         };
+        // MOBAX_TIMING=1: where the time went, appended to the note.
+        let mut parts = vec![format!("verb {verb_ms}")];
+        let mut lap = Instant::now();
+        let mut mark = |what: &str, parts: &mut Vec<String>| {
+            parts.push(format!("{what} {}", lap.elapsed().as_millis()));
+            lap = Instant::now();
+        };
         let first = settle(conn, seq, b.first_ms)?;
+        mark("settle", &mut parts);
         let mut reacted = !String::from_utf8_lossy(&first).contains("changed=0");
         let still_moving = first.starts_with(b"ERR:");
         let had_rows = lock(&self.screens).get(t).is_some_and(|s| !s.is_empty());
         let mut dump = self.read_settled(conn, had_rows, deadline)?;
+        mark("dump", &mut parts);
         // A tap that starts another activity can go quiet before the new
         // screen draws (another process starting). If nothing visible changed,
         // give it one more short window to show up.
         if b.second_look_ms > 0 && self.unchanged(t, &dump) {
             let since = event_seq(conn);
             let again = settle(conn, since, b.second_look_ms)?;
+            mark("second look", &mut parts);
             if since.is_some() && String::from_utf8_lossy(&again).contains("changed=1") {
                 reacted = true;
                 dump = self.read_settled(conn, had_rows, deadline)?;
+                mark("dump", &mut parts);
+            }
+        }
+        if reacted {
+            dump = self.read_still(conn, dump, deadline)?;
+            mark("still", &mut parts);
+            // Mid-slide positions hold still until the slide ends; its end
+            // is the next event.
+            if Screen::is_sliding(&dump) {
+                let since = event_seq(conn);
+                settle(conn, since, 700)?;
+                let fresh = self.read_settled(conn, had_rows, deadline)?;
+                dump = self.read_still(conn, fresh, deadline)?;
+                mark("slide", &mut parts);
             }
         }
         let ms = started.elapsed().as_millis();
@@ -421,12 +458,17 @@ impl Engine {
         } else {
             "no reaction on screen".to_string()
         };
+        let note = if std::env::var_os("MOBAX_TIMING").is_some() {
+            format!("{note} [{}]", parts.join(" · "))
+        } else {
+            note
+        };
         let mut screens = lock(&self.screens);
         let prev = screens.get(t);
         let screen = Screen::from_dump(&dump, prev);
-        let out = format!("\n{}", screen.describe(&note, screen.change_from(prev)));
+        let out = screen.describe(&note, screen.change_from(prev));
         screens.insert(t.clone(), screen);
-        Ok(out)
+        Ok((note, out))
     }
 
     /// `watch`: waits, without polling, until the screen differs from the
@@ -509,6 +551,23 @@ impl Engine {
         }
     }
 
+    /// Window animations send no accessibility events, so a screen can be
+    /// quiet and still sliding in, its rows at coordinates about to change.
+    /// Reads again until two reads agree on the rows and where they are.
+    fn read_still(&self, conn: &mut Conn, mut dump: Value, deadline: Instant) -> io::Result<Value> {
+        let mut rows = Screen::from_dump(&dump, None).table();
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(60));
+            dump = parse_dump(&conn.call("dump")?)?;
+            let now = Screen::from_dump(&dump, None).table();
+            if now == rows {
+                break;
+            }
+            rows = now;
+        }
+        Ok(dump)
+    }
+
     /// `dump` shows nothing new against the last screen seen on `t`.
     fn unchanged(&self, t: &Target, dump: &Value) -> bool {
         let screens = lock(&self.screens);
@@ -522,20 +581,33 @@ impl Engine {
             Ok(t) => t,
             Err(e) => return (false, e),
         };
-        let mut sess = match self.checkout(&t) {
-            Ok(s) => s,
-            Err(e) => return (false, e),
-        };
-        let dump = match sess.conn.call("dump").and_then(|b| parse_dump(&b)) {
-            Ok(d) => d,
-            Err(e) => return (false, format!("ERR:DAEMON_ERROR:{e}")),
-        };
-        self.checkin(&t, sess);
+        if let Err(e) = self.reread(&t) {
+            return (false, e);
+        }
+        let screens = lock(&self.screens);
+        let Some(screen) = screens.get(&t) else { return (false, "ERR:INTERNAL:no screen".into()) };
+        (true, format!("{} · {} rows\n{}", screen.title(), screen.len(), screen.table().trim_end()))
+    }
+
+    /// Reads the screen now and remembers it (refs carried over).
+    fn reread(&self, t: &Target) -> Result<(), String> {
+        let mut sess = self.checkout(t)?;
+        let dump = sess.conn.call("dump").and_then(|b| parse_dump(&b)).map_err(|e| format!("ERR:DAEMON_ERROR:{e}"))?;
+        self.checkin(t, sess);
         let mut screens = lock(&self.screens);
-        let screen = Screen::from_dump(&dump, screens.get(&t));
-        let text = format!("{} · {} rows\n{}", screen.title(), screen.len(), screen.table().trim_end());
-        screens.insert(t, screen);
-        (true, text)
+        let screen = Screen::from_dump(&dump, screens.get(t));
+        screens.insert(t.clone(), screen);
+        Ok(())
+    }
+
+    /// The remembered screen is no longer `seen` (another window set), so
+    /// refs taken from `seen` mean nothing now.
+    fn left(&self, t: &Target, seen: Option<&Screen>) -> bool {
+        let screens = lock(&self.screens);
+        match (screens.get(t), seen) {
+            (Some(now), Some(seen)) => matches!(now.change_from(Some(seen)), Change::New),
+            _ => true,
+        }
     }
 
     /// The x,y and selector of row `@n`, checked against the screen as it
@@ -592,11 +664,13 @@ struct Settle {
 
 /// An app launch takes a few hundred ms to show anything and arrives in
 /// bursts; a tap or a key may open another screen; typing and scrolling
-/// react at once.
+/// react at once. A tap's second look is short: launching apps from the
+/// home screen always showed a change within the first window, so it mostly
+/// runs for taps that do nothing.
 fn settle_budget(verb: &str) -> Settle {
     match verb {
         "open" => Settle { first_ms: 3000, idle_ms: 300, timeout_ms: 6000, second_look_ms: 0 },
-        "tap" | "go" => Settle { first_ms: 500, idle_ms: 200, timeout_ms: 3000, second_look_ms: 700 },
+        "tap" | "go" => Settle { first_ms: 500, idle_ms: 200, timeout_ms: 3000, second_look_ms: 400 },
         "swipe" => Settle { first_ms: 300, idle_ms: 200, timeout_ms: 2000, second_look_ms: 0 },
         _ => Settle { first_ms: 300, idle_ms: 150, timeout_ms: 1500, second_look_ms: 0 },
     }
@@ -730,7 +804,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "type",
-            description: "Type text into the focused field (keystrokes). Replies with what changed on screen.",
+            description: "Type text into the focused field at the cursor, in any language (Korean, emoji, …). Replies with what changed on screen.",
             schema: obj(&[r#""text":{"type":"string"}"#, OBSERVE, DEVICE], &["text"]),
         },
         Tool {
@@ -747,6 +821,14 @@ fn tools() -> Vec<Tool> {
             name: "go",
             description: "Press a navigation / system key: back, home, recents, enter, … Replies with what changed on screen.",
             schema: obj(&[r#""key":{"type":"string","description":"back, home, recents, enter, menu, …"}"#, OBSERVE, DEVICE], &["key"]),
+        },
+        Tool {
+            name: "batch",
+            description: "Run several steps in one call when you already know the sequence, e.g. [{\"tool\":\"tap\",\"target\":\"@3\"},{\"tool\":\"fill\",\"selector\":\"Search\",\"text\":\"cats\"},{\"tool\":\"go\",\"key\":\"enter\"},{\"tool\":\"wait\",\"target\":\"Results\"}]. Each step takes that tool's arguments; each action waits for the screen to settle before the next. Stops at the first failure. Replies with one line per step, then what changed on screen over the whole batch. @N refs are from the screen you last saw: once a step opens another screen, name later targets by text or selector.",
+            schema: obj(&[
+                r#""steps":{"type":"array","maxItems":20,"items":{"type":"object","properties":{"tool":{"type":"string","enum":["tap","type","fill","swipe","go","open","close","wait","find","watch"]}},"required":["tool"]},"description":"Steps in order: {\"tool\": NAME, ...that tool's arguments}"}"#,
+                DEVICE,
+            ], &["steps"]),
         },
         Tool {
             name: "wait",
@@ -829,13 +911,31 @@ fn tools_call(params: Option<&Value>, engine: &Engine) -> Result<String, (i32, S
     let name = json::obj_get(params, "name").and_then(json::as_str).unwrap_or("");
     let empty = Value::Obj(Vec::new());
     let args = json::obj_get(params, "arguments").unwrap_or(&empty);
+    if name == "batch" {
+        return Ok(reply(batch(args, engine)));
+    }
+    Ok(match call_tool(name, args, engine, None, false)? {
+        Out::Text(r) => reply(r),
+        Out::Json(result) => result,
+    })
+}
+
+/// A tool's result: text, or a ready `tools/call` result (an image).
+enum Out {
+    Text(Reply),
+    Json(String),
+}
+
+/// Runs tool `name`. `device` is the batch's device, for a step that names
+/// none; `brief` keeps an action's reply to how the screen settled.
+fn call_tool(name: &str, args: &Value, engine: &Engine, device: Option<&str>, brief: bool) -> Result<Out, (i32, String)> {
     let s = |k: &str| json::obj_get(args, k).and_then(json::as_str).map(str::to_string);
     let n = |k: &str| json::obj_get(args, k).and_then(json::as_num);
     let b = |k: &str| matches!(json::obj_get(args, k), Some(Value::Bool(true)));
     let need = |k: &str| s(k).ok_or_else(|| (-32602, format!("{name}: missing \"{k}\"")));
     // Actions report what changed unless the caller opts out.
     let observe = !matches!(json::obj_get(args, "observe"), Some(Value::Bool(false)));
-    let device = s("device");
+    let device = s("device").or_else(|| device.map(str::to_string));
     let dev = device.as_deref();
 
     let mut argv: Vec<String> = Vec::new();
@@ -865,7 +965,7 @@ fn tools_call(params: Option<&Value>, engine: &Engine) -> Result<String, (i32, S
                 argv.extend(["ui".into(), "--all".into()]);
                 Via::Run
             }
-            _ if engine.in_process() => return Ok(reply(engine.ui(dev))),
+            _ if engine.in_process() => return Ok(Out::Text(engine.ui(dev))),
             _ => {
                 argv.push("ui".into());
                 Via::Run
@@ -873,15 +973,15 @@ fn tools_call(params: Option<&Value>, engine: &Engine) -> Result<String, (i32, S
         },
         "screenshot" => {
             if !engine.in_process() {
-                return screenshot_child(n("size"), b("native"), device, &engine.global);
+                return screenshot_child(n("size"), b("native"), device, &engine.global).map(Out::Json);
             }
-            return Ok(match engine.screenshot(dev, n("size"), b("native")) {
+            return Ok(Out::Json(match engine.screenshot(dev, n("size"), b("native")) {
                 Ok(jpeg) => format!(
                     r#"{{"content":[{{"type":"image","mimeType":"image/jpeg","data":"{}"}}],"isError":false}}"#,
                     base64(&jpeg)
                 ),
                 Err(e) => text_result(&e, true),
-            });
+            }));
         }
         "find" => {
             argv.extend(["find".into(), need("selector")?]);
@@ -894,7 +994,7 @@ fn tools_call(params: Option<&Value>, engine: &Engine) -> Result<String, (i32, S
                 (Some(t), _, _) => match row_ref(&t) {
                     Some(r) => match engine.row(dev, r) {
                         Ok((x, y, _)) => argv.extend([x.to_string(), y.to_string()]),
-                        Err(e) => return Ok(text_result(&e, true)),
+                        Err(e) => return Ok(Out::Text((false, e))),
                     },
                     None => argv.push(t),
                 },
@@ -913,7 +1013,7 @@ fn tools_call(params: Option<&Value>, engine: &Engine) -> Result<String, (i32, S
             let sel = match row_ref(&sel) {
                 Some(r) => match engine.row(dev, r) {
                     Ok((_, _, daemon_sel)) => daemon_sel,
-                    Err(e) => return Ok(text_result(&e, true)),
+                    Err(e) => return Ok(Out::Text((false, e))),
                 },
                 None => sel,
             };
@@ -936,10 +1036,10 @@ fn tools_call(params: Option<&Value>, engine: &Engine) -> Result<String, (i32, S
         }
         "watch" => {
             if !engine.in_process() {
-                return Ok(text_result("ERR:PRECONDITION:watch needs the daemon reachable through the local adb server", true));
+                return Ok(Out::Text((false, "ERR:PRECONDITION:watch needs the daemon reachable through the local adb server".into())));
             }
             let timeout = n("timeout_ms").filter(|t| *t > 0).unwrap_or(10_000) as u64;
-            return Ok(reply(engine.watch(dev, s("until").as_deref(), timeout)));
+            return Ok(Out::Text(engine.watch(dev, s("until").as_deref(), timeout)));
         }
         "open" => {
             argv.extend(["open".into(), need("app")?]);
@@ -1002,7 +1102,7 @@ fn tools_call(params: Option<&Value>, engine: &Engine) -> Result<String, (i32, S
                 return Err((-32602, "mobax: \"args\" needs at least a verb".into()));
             }
             if BLOCKED_VERBS.contains(&verb) || (verb == "see" && argv.len() == 1) {
-                return Ok(text_result(&format!("`mobax {verb}` is interactive or opens a window; it isn't available over MCP"), true));
+                return Ok(Out::Text((false, format!("`mobax {verb}` is interactive or opens a window; it isn't available over MCP"))));
             }
             Via::Child
         }
@@ -1011,7 +1111,7 @@ fn tools_call(params: Option<&Value>, engine: &Engine) -> Result<String, (i32, S
     let (ok, text) = match via {
         Via::Run | Via::Act if !engine.in_process() => child(engine, device, &argv),
         Via::Run => engine.run(dev, &argv),
-        Via::Act => engine.act(dev, &argv, observe),
+        Via::Act => engine.act(dev, &argv, observe, brief),
         Via::Child => {
             let r = child(engine, device, &argv);
             if matches!(name, "use" | "drop") {
@@ -1020,7 +1120,82 @@ fn tools_call(params: Option<&Value>, engine: &Engine) -> Result<String, (i32, S
             r
         }
     };
-    Ok(text_result(&text, !ok))
+    Ok(Out::Text((ok, text)))
+}
+
+/// Tools a `batch` step may be: the ones that act or wait on the screen.
+const BATCH_TOOLS: &[&str] = &["tap", "type", "fill", "swipe", "go", "open", "close", "wait", "find", "watch"];
+
+/// Most steps in one `batch`.
+const BATCH_MAX: usize = 20;
+
+/// `batch`: several steps in one call, so an agent spends one round trip on
+/// a sequence it already knows. Each action still waits for the screen to
+/// settle (the next step needs a still screen), but replies only with how
+/// it settled; the reply ends with what changed over the whole batch. Stops
+/// at the first failing step.
+fn batch(args: &Value, engine: &Engine) -> Reply {
+    let steps = json::obj_get(args, "steps").and_then(json::as_arr).unwrap_or(&[]);
+    if steps.is_empty() || steps.len() > BATCH_MAX {
+        return (false, format!("ERR:BAD_ARG:batch needs 1 to {BATCH_MAX} steps"));
+    }
+    if !engine.in_process() {
+        return (false, "ERR:PRECONDITION:batch needs the daemon reachable through the local adb server".into());
+    }
+    let device = json::obj_get(args, "device").and_then(json::as_str);
+    let t = match engine.target(device) {
+        Ok(t) => t,
+        Err(e) => return (false, e),
+    };
+    // @N refs name rows of the screen the agent last saw.
+    let seen = lock(&engine.screens).get(&t).cloned();
+    let mut out = String::new();
+    let mut ok = true;
+    for (i, step) in steps.iter().enumerate() {
+        let name = json::obj_get(step, "tool").and_then(json::as_str).unwrap_or("");
+        let text = if !BATCH_TOOLS.contains(&name) {
+            Err(format!("ERR:BAD_ARG:\"{name}\" can't be a batch step; use one of {}", BATCH_TOOLS.join(", ")))
+        } else if i > 0 && uses_ref(step) && engine.left(&t, seen.as_ref()) {
+            Err("ERR:PRECONDITION:an earlier step opened another screen, so its @N refs are gone; nothing was done\n\
+                 Name the target by text or selector, or call `ui`."
+                .to_string())
+        } else {
+            match call_tool(name, step, engine, Some(&t.serial), true) {
+                Ok(Out::Text((true, text))) => Ok(text),
+                Ok(Out::Text((false, text))) => Err(text),
+                Ok(Out::Json(_)) => Err(format!("ERR:BAD_ARG:\"{name}\" can't be a batch step")),
+                Err((_, e)) => Err(format!("ERR:BAD_ARG:{e}")),
+            }
+        };
+        let (mark, text) = match text {
+            Ok(t) => ("ok", t),
+            Err(t) => ("FAILED", t),
+        };
+        let text = text.trim();
+        out.push_str(&format!("{}. {name} {mark}{}{}\n", i + 1, if text.is_empty() { "" } else { ": " }, text.replace('\n', " · ")));
+        if mark == "FAILED" {
+            ok = false;
+            break;
+        }
+    }
+    // The screen now, against the one the agent saw before the batch.
+    match engine.reread(&t) {
+        Ok(()) => {
+            let screens = lock(&engine.screens);
+            if let Some(now) = screens.get(&t) {
+                out.push_str(&now.describe("after the batch", now.change_from(seen.as_ref())));
+            }
+        }
+        Err(e) => out.push_str(&format!("(could not read the screen afterwards: {e})")),
+    }
+    (ok, out)
+}
+
+/// The step names a row by @N.
+fn uses_ref(step: &Value) -> bool {
+    ["target", "selector"]
+        .iter()
+        .any(|k| json::obj_get(step, k).and_then(json::as_str).and_then(row_ref).is_some())
 }
 
 fn reply((ok, text): Reply) -> String {
@@ -1250,5 +1425,25 @@ mod tests {
         assert!(r.contains("-32602"), "{r}");
         let r = handle(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mobax","arguments":{"args":["tui"]}}}"#, &Engine::new(&[])).unwrap();
         assert!(r.contains(r#""isError":true"#), "{r}");
+    }
+
+    #[test]
+    fn batch_checks_its_steps_before_touching_a_device() {
+        let call = |args: &str| {
+            handle(&format!(r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"batch","arguments":{args}}}}}"#), &Engine::new(&[])).unwrap()
+        };
+        let r = call(r#"{"steps":[]}"#);
+        assert!(r.contains("BAD_ARG") && r.contains(r#""isError":true"#), "{r}");
+        let many = vec![r#"{"tool":"go","key":"back"}"#; super::BATCH_MAX + 1].join(",");
+        assert!(call(&format!(r#"{{"steps":[{many}]}}"#)).contains("BAD_ARG"));
+    }
+
+    #[test]
+    fn a_step_names_a_row_by_ref() {
+        let step = |s: &str| json::parse(s).unwrap();
+        assert!(super::uses_ref(&step(r#"{"tool":"tap","target":"@3"}"#)));
+        assert!(super::uses_ref(&step(r#"{"tool":"fill","selector":"@12","text":"x"}"#)));
+        assert!(!super::uses_ref(&step(r#"{"tool":"tap","target":"OK"}"#)));
+        assert!(!super::uses_ref(&step(r#"{"tool":"type","text":"@3"}"#)));
     }
 }
