@@ -92,6 +92,43 @@ impl Screen {
         self.rows.len()
     }
 
+    /// Some row shows `text` (case-insensitive).
+    pub(crate) fn shows(&self, text: &str) -> bool {
+        let t = text.to_lowercase();
+        self.rows.iter().any(|r| r.line.to_lowercase().contains(&t))
+    }
+
+    /// What an agent reads after an action or a watch: `note`, the package,
+    /// then the rows that changed, or the whole new screen.
+    pub(crate) fn describe(&self, note: &str, change: Change) -> String {
+        let mut out = format!("{note} · {}", self.pkg);
+        match change {
+            Change::Same => out.push_str(" · no visible change"),
+            Change::Rows(lines) => {
+                out.push('\n');
+                out.push_str(&lines.join("\n"));
+            }
+            Change::New => {
+                out.push_str(&format!(" · new screen, {} rows\n", self.len()));
+                out.push_str(self.table().trim_end());
+            }
+        }
+        out
+    }
+
+    /// The rows as a JSON array of `{"ref","line","x","y"}`.
+    pub(crate) fn rows_json(&self) -> String {
+        let mut out = String::from("[");
+        for (i, r) in self.rows.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&crate::json_out::Obj::new().n("ref", r.n as i64).s("line", &r.line).n("x", r.x).n("y", r.y).finish());
+        }
+        out.push(']');
+        out
+    }
+
     /// The whole table, one `@N  row` per line.
     pub(crate) fn table(&self) -> String {
         let w = self.ref_width();

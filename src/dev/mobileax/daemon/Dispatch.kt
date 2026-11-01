@@ -40,6 +40,7 @@ internal class Dispatch(
                     "dump", "dump_active", "screenshot" -> c.send(s.capture(head, cmd))
                     "keyframe" -> c.send(Server.utf8("ok n=" + Streams.requestKeyframeAll()))
                     "state_watch" -> { stateWatch(c, s.handlers().state); return }
+                    "ui_watch" -> { UiWatch.run(c, s.handlers(), cmd); return }
                     "clip_watch" -> {
                         c.closeOnEof()
                         procs(s).clipWatch(c, Server.longArg(cmd, "interval_ms", 500))

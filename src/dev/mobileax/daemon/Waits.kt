@@ -33,6 +33,11 @@ class UiEvents(private val ua: UiAutomation) {
         consumers.add(c)
     }
 
+    /** Main thread only. */
+    fun unsubscribe(c: Consumer) {
+        consumers.remove(c)
+    }
+
     private fun install() {
         if (installed) return
         try {

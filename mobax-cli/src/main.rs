@@ -37,6 +37,7 @@ mod term;
 mod tui;
 mod ui_dump;
 mod usage;
+mod watch;
 mod xml_dump;
 
 const DEFAULT_HOST: &str = "127.0.0.1";
@@ -110,6 +111,8 @@ enum Cmd {
     TapXY { x: i32, y: i32, flags: flags::ActionFlags },
     Snapshot,
     Screen,
+    /// `mobax watch [--json] [--min-ms N]`: follow the screen.
+    Watch { json: bool, min_ms: Option<u64> },
     Quit,
     Bench { n: u32, json: bool },
     Adb(adb::Cmd),
@@ -467,11 +470,10 @@ fn suggest(old: &str) -> String {
         "mirror"       => Some("mobax see   (bare opens the viewer)"),
         "pull" | "push" => Some("mobax cp  (device:/path host:/path or reverse)"),
         "pm"           => Some("mobax apps / mobax install / mobax uninstall / mobax show <pkg>"),
-        "am"           => Some("mobax open / mobax close / mobax watch events"),
+        "am"           => Some("mobax open / mobax close / mobax events"),
         "getprop" | "setprop" => Some("mobax prop KEY [VAL]"),
         "logcat"       => Some("mobax logs"),
         "monitor"      => Some("mobax events"),
-        "watch"        => Some("mobax logs | mobax events | mobax do state_watch"),
         "dumpsys"      => Some("mobax do dumpsys <svc>"),
         "state"        => Some("mobax show  /  mobax watch"),
         "input"        => Some("mobax tap / mobax type / mobax go / mobax swipe"),
@@ -1041,6 +1043,20 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         // (`mobax ping`, `mobax snapshot`, …) stay as undocumented aliases so
         // older scripts and the test harness don't break.
         Some((&"dev", rest)) => parse_dev(rest)?,
+        Some((&"watch", rest)) => {
+            let mut json = out_fmt == flags::OutFmt::Json;
+            let mut min_ms = None;
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match *a {
+                    "--json" => json = true,
+                    "--min-ms" => min_ms = Some(it.next().and_then(|v| v.parse().ok())
+                        .ok_or("--min-ms needs a number of milliseconds")?),
+                    other => return Err(format!("watch: unknown argument {other:?}")),
+                }
+            }
+            Cmd::Watch { json, min_ms }
+        }
         Some((&"ping", _))      => Cmd::Ping,
         Some((&"snapshot", _))  => Cmd::Snapshot,
         Some((&"screen", _))    => Cmd::Screen,
@@ -1088,6 +1104,7 @@ fn run(opts: &Opts) -> io::Result<()> {
             let mut conn = Conn::connect(&opts.host, opts.port)?;
             snapshot::run(&mut conn)
         }
+        Cmd::Watch { json, min_ms } => watch::run(&opts.host, opts.port, *json, *min_ms),
         Cmd::Screen => {
             let mut conn = Conn::connect(&opts.host, opts.port)?;
             screen::run(&mut conn)
@@ -2361,6 +2378,11 @@ impl Conn {
     }
 
     /// Length-prefixed command write; doesn't read a reply.
+    /// `None` waits as long as it takes (a push stream on a still screen).
+    pub(crate) fn set_read_timeout(&self, t: Option<Duration>) -> io::Result<()> {
+        self.sock.set_read_timeout(t)
+    }
+
     pub(crate) fn send_cmd(&mut self, cmd: &str) -> io::Result<()> {
         let payload = cmd.as_bytes();
         let len = u32::try_from(payload.len())
