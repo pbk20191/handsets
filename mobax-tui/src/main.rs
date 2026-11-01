@@ -1,7 +1,8 @@
 // mobax-tui — keyboard-driven Android UI inspector backed by the
 // mobileax daemon. Standalone binary; `mobax tui` spawns us with the right
-// --host/--port. We talk the same length-prefixed wire protocol that the
-// rest of the CLI uses (see ../mobax-cli/src/main.rs Conn).
+// --device/--host/--port. The connection and wire protocol are
+// mobax-core's Conn, the same one the CLI uses.
+
 
 mod app;
 mod conn;

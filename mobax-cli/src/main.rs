@@ -8,32 +8,18 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-mod act;
-mod adb;
-mod bench;
 mod cli;
-mod daemon;
-mod fan;
-mod fill;
-mod flags;
-mod info;
-mod init;
-mod inspect;
+mod cmd;
+mod device;
 mod mcp;
-mod mirror;
-mod output;
-mod provider;
-mod run_script;
-mod screen;
-mod session;
-mod shell;
-mod snapshot;
-mod state_cache;
-mod tap_text;
-mod term;
-mod tui;
-mod usage;
-mod watch;
+
+// Modules keep their old `crate::name` paths.
+use cli::{args, flags, output, term, usage};
+use cmd::{
+    act, bench, fan, fill, info, init, inspect, mirror, provider, run_script, screen, shell, snapshot, tap_text,
+    tui, watch,
+};
+use device::{adb, daemon, session, state_cache};
 
 // Shared with the TUI (and any Rust caller): see mobax-core.
 pub(crate) use mobax_core::{errors, json, json_out, selector, ui_dump, xml_dump};
@@ -42,7 +28,7 @@ pub(crate) use mobax_core::selector::node_to_daemon_selector;
 pub(crate) use mobax_core::device::is_local;
 
 use bench::*;
-use cli::*;
+use args::*;
 use fill::*;
 use info::*;
 use inspect::*;
