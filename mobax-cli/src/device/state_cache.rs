@@ -19,6 +19,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use crate::Conn;
+use crate::Connect;
 
 const FRESHNESS_LIMIT: Duration = Duration::from_secs(30);
 

@@ -1,6 +1,6 @@
 // Extract the flat list of interactive nodes from a daemon dump.
 //
-// This is the data-extraction half of mobax-cli/src/ui_dump.rs ported
+// This is the data-extraction half of mobax-core/src/ui_dump.rs ported
 // over: same `is_interactive` predicate, same column derivation, but
 // instead of formatting into one big string we return structured rows
 // that the TUI can render and dispatch actions against.

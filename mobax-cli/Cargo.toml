@@ -9,5 +9,6 @@ name = "mobax"
 path = "src/main.rs"
 
 [dependencies]
+mobax-core = { path = "../mobax-core" }
 # No third-party deps — the CLI is pure std. The live screen mirror moved
 # to the mobax-viewer crate; `mobax mirror` just spawns that binary.

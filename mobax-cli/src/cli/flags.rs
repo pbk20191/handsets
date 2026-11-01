@@ -64,6 +64,17 @@ pub struct ActionFlags {
     pub out_fmt: Option<OutFmt>,
 }
 
+impl ActionFlags {
+    /// The match filters these flags ask for.
+    pub fn require(&self) -> crate::selector::Require {
+        crate::selector::Require {
+            visible: self.require_visible,
+            clickable: self.require_clickable,
+            enabled: self.require_enabled,
+        }
+    }
+}
+
 impl Default for ActionFlags {
     fn default() -> Self {
         Self {

@@ -16,6 +16,12 @@ pub struct Obj {
     first: bool,
 }
 
+impl Default for Obj {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Obj {
     pub fn new() -> Self {
         Self { buf: String::from("{"), first: true }

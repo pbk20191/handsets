@@ -4,18 +4,22 @@
 
 use std::io;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use mobax_core::adb_server::{self, socket_name as device_socket, Forward as ForwardEntry};
+use mobax_core::device::{clear_current, home_dir, is_set, write_current};
+
 use crate::state_cache;
+
+pub(crate) use mobax_core::adb_server::{device_stream, DEFAULT_PORT};
+pub(crate) use mobax_core::device::{set_target, target_serial, with_target};
 
 const DEVICE_JAR: &str = "/data/local/tmp/mobax.jar";
 const DEVICE_LOG: &str = "/data/local/tmp/mobax.log";
-pub(crate) const DEFAULT_PORT: u16 = 9008;
 
 /// Locate the on-device jar on the host. Probes (in order):
 ///   1. $MOBILEAX_JAR
@@ -165,14 +169,6 @@ fn resolve_adb() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("adb"))
 }
 
-/// An env override that is actually set. Claude Desktop passes an MCPB
-/// `${user_config.adb_path}` through verbatim when the option is left blank.
-fn is_set(v: &std::ffi::OsStr) -> bool {
-    let s = v.to_string_lossy();
-    let s = s.trim();
-    !s.is_empty() && !(s.starts_with("${") && s.ends_with('}'))
-}
-
 /// The SDK directory Google's Android CLI reports, if it is installed.
 fn android_cli_sdk() -> Option<PathBuf> {
     let mut cmd = Command::new("android");
@@ -223,13 +219,6 @@ fn strip_ansi(s: &str) -> String {
 
 fn sdk_adb(sdk: &Path) -> PathBuf {
     sdk.join("platform-tools").join(format!("adb{}", std::env::consts::EXE_SUFFIX))
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
 }
 
 fn adb(serial: Option<&str>, args: &[&str]) -> io::Result<AdbOut> {
@@ -288,7 +277,7 @@ pub(crate) fn connect(opts: &ConnectOpts) -> io::Result<(String, u16)> {
     // back to the subprocess if the server isn't reachable (e.g. first
     // `mobax use` since boot), which is the only path that still needs to
     // start the server anyway.
-    let serial = match adb_server_resolve_serial(opts.serial.as_deref()) {
+    let serial = match adb_server::resolve_serial(opts.serial.as_deref()) {
         Ok(s) => s,
         Err(_) => resolve_serial(opts.serial.as_deref())?,
     };
@@ -377,7 +366,7 @@ pub(crate) fn ping_daemon(serial: &str, port: u16) -> io::Result<()> {
 
 /// Removes host port forwards to this device's daemon (older versions made them).
 fn remove_daemon_forwards(serial: &str) {
-    let forwards = adb_server_list_forwards().unwrap_or_else(|_| list_forwards().unwrap_or_default());
+    let forwards = adb_server::list_forwards().unwrap_or_else(|_| list_forwards().unwrap_or_default());
     for f in forwards.iter().filter(|f| f.serial == serial && f.remote_spec.starts_with("localabstract:mobaxd_")) {
         let _ = adb(Some(serial), &["forward", "--remove", &f.host_spec]);
         // Their state watchers were keyed by host port (state-9008.*).
@@ -438,7 +427,7 @@ pub(crate) struct DeviceRow {
 pub(crate) fn devices() -> io::Result<Vec<DeviceRow>> {
     // Prefer the adb-server host protocol — sub-ms per query vs ~30ms per
     // `adb` subprocess fork. Fall back if adb-server is unreachable.
-    let listing = match adb_server_query("host:devices") {
+    let listing = match adb_server::query("host:devices") {
         Ok(body) => body,
         Err(_) => adb_ok(None, &["devices"], "adb devices")?,
     };
@@ -484,7 +473,7 @@ pub(crate) fn devices() -> io::Result<Vec<DeviceRow>> {
                      echo sdk=$(getprop ro.build.version.sdk); \
                      echo model=$(getprop ro.product.model)"
                 );
-                let probe = adb_server_shell(&serial, &cmd)
+                let probe = adb_server::shell(&serial, &cmd)
                     .or_else(|_| adb(Some(&serial), &["shell", &cmd]).map(|r| r.stdout))
                     .unwrap_or_default();
                 for ln in probe.lines() {
@@ -506,31 +495,10 @@ pub(crate) fn devices() -> io::Result<Vec<DeviceRow>> {
 
 // ---------- helpers ----------
 
-struct ForwardEntry {
-    serial: String,
-    host_spec: String,
-    remote_spec: String,
-}
-
-/// The daemon listens on an abstract Unix socket, not a device TCP port, so
-/// it can check the peer uid and keep other apps out. Must match
-/// MobaxServer.socketName.
-fn device_socket(port: u16) -> String {
-    format!("localabstract:mobaxd_{port}")
-}
-
 fn list_forwards() -> io::Result<Vec<ForwardEntry>> {
     let r = adb(None, &["forward", "--list"])?;
     if r.code != 0 { return Ok(Vec::new()); }
-    let mut out = Vec::new();
-    for line in r.stdout.lines() {
-        let mut it = line.split_whitespace();
-        let serial = match it.next() { Some(s) => s.to_string(), None => continue };
-        let host = match it.next() { Some(s) => s.to_string(), None => continue };
-        let remote = it.next().unwrap_or("").to_string();
-        out.push(ForwardEntry { serial, host_spec: host, remote_spec: remote });
-    }
-    Ok(out)
+    Ok(adb_server::parse_forwards(&r.stdout))
 }
 
 /// If no serial is specified and exactly one device is attached, use it.
@@ -601,264 +569,8 @@ fn write_devinfo_cache(serial: &str, sdk: &str, model: &str) -> io::Result<()> {
     std::fs::write(p, format!("sdk={sdk}\nmodel={model}\n"))
 }
 
-// ---------- direct adb-server protocol (tcp:5037) ----------
-//
-// Talking to adb-server directly skips the ~40ms `adb` subprocess fork on
-// every query. The protocol is just a 4-char hex length prefix followed by
-// an ASCII payload; the server replies "OKAY" + (hex-len + body) on success
-// or "FAIL" + (hex-len + reason) on failure. We use it for two read-only
-// host:* queries; the writeable / device-targeted commands still go through
-// the subprocess `adb` since they're invoked at most once per connect.
-
-/// Where the adb server listens: what `adb` itself would use. adb reads
-/// $ADB_SERVER_SOCKET (`tcp:PORT` or `tcp:HOST:PORT`), else
-/// $ANDROID_ADB_SERVER_ADDRESS and $ANDROID_ADB_SERVER_PORT, else
-/// 127.0.0.1:5037.
-fn adb_server_addr() -> io::Result<SocketAddr> {
-    use std::net::ToSocketAddrs;
-    let env = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-    let (host, port) = if let Some(spec) = env("ADB_SERVER_SOCKET") {
-        let rest = spec.strip_prefix("tcp:").ok_or_else(|| io::Error::other(format!(
-            "ADB_SERVER_SOCKET={spec}: only tcp:[HOST:]PORT is supported")))?;
-        match rest.rsplit_once(':') {
-            Some((h, p)) => (h.to_string(), p.to_string()),
-            None => ("127.0.0.1".to_string(), rest.to_string()),
-        }
-    } else {
-        (
-            env("ANDROID_ADB_SERVER_ADDRESS").unwrap_or_else(|| "127.0.0.1".to_string()),
-            env("ANDROID_ADB_SERVER_PORT").unwrap_or_else(|| "5037".to_string()),
-        )
-    };
-    let port: u16 = port.parse().map_err(|_| io::Error::other(format!("adb server port {port:?} is not a number")))?;
-    (host.as_str(), port).to_socket_addrs()?.next()
-        .ok_or_else(|| io::Error::other(format!("adb server host {host:?} does not resolve")))
-}
-
-fn adb_server_query(payload: &str) -> io::Result<String> {
-    let addr = adb_server_addr()?;
-    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(200))?;
-    s.set_read_timeout(Some(Duration::from_millis(500)))?;
-    s.set_write_timeout(Some(Duration::from_millis(500)))?;
-    let hdr = format!("{:04x}", payload.len());
-    s.write_all(hdr.as_bytes())?;
-    s.write_all(payload.as_bytes())?;
-    let mut status = [0u8; 4];
-    s.read_exact(&mut status)?;
-    let mut ln_buf = [0u8; 4];
-    let ln = if s.read_exact(&mut ln_buf).is_ok() {
-        usize::from_str_radix(std::str::from_utf8(&ln_buf)
-            .map_err(|_| io::Error::other("adb-server: bad length"))?, 16)
-            .map_err(|_| io::Error::other("adb-server: bad length"))?
-    } else { 0 };
-    let mut body = vec![0u8; ln];
-    if ln > 0 { s.read_exact(&mut body)?; }
-    let body = String::from_utf8(body)
-        .map_err(|_| io::Error::other("adb-server: non-utf8 body"))?;
-    if &status != b"OKAY" {
-        return Err(io::Error::other(format!("adb-server FAIL: {body}")));
-    }
-    Ok(body)
-}
-
-fn adb_server_resolve_serial(explicit: Option<&str>) -> io::Result<String> {
-    if let Some(s) = explicit { return Ok(s.to_string()); }
-    let body = adb_server_query("host:devices")?;
-    let mut found: Vec<String> = body.lines().filter_map(|l| {
-        let mut it = l.split('\t');
-        let s = it.next()?.trim();
-        let st = it.next().unwrap_or("").trim();
-        if st == "device" && !s.is_empty() { Some(s.to_string()) } else { None }
-    }).collect();
-    match found.len() {
-        0 => Err(io::Error::other("no devices in 'device' state")),
-        1 => Ok(found.remove(0)),
-        _ => Err(io::Error::other(format!(
-            "multiple devices attached ({}); pass --device SERIAL",
-            found.join(", ")
-        ))),
-    }
-}
-
-/// Run `cmd` on the device via the adb-server `shell:` channel. Reads the
-/// streamed output until the server closes the connection. ~5-15ms vs ~30ms
-/// for `adb shell` through the subprocess.
-fn adb_server_shell(serial: &str, cmd: &str) -> io::Result<String> {
-    let addr = adb_server_addr()?;
-    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(200))?;
-    s.set_read_timeout(Some(Duration::from_secs(5)))?;
-    s.set_write_timeout(Some(Duration::from_secs(2)))?;
-
-    // 1. Switch transport to the target device.
-    let xport = format!("host:transport:{serial}");
-    s.write_all(format!("{:04x}", xport.len()).as_bytes())?;
-    s.write_all(xport.as_bytes())?;
-    let mut status = [0u8; 4];
-    s.read_exact(&mut status)?;
-    if &status != b"OKAY" {
-        return Err(io::Error::other("adb-server transport switch failed"));
-    }
-
-    // 2. Run shell. The server replies OKAY then streams output until EOF.
-    let payload = format!("shell:{cmd}");
-    s.write_all(format!("{:04x}", payload.len()).as_bytes())?;
-    s.write_all(payload.as_bytes())?;
-    s.read_exact(&mut status)?;
-    if &status != b"OKAY" {
-        return Err(io::Error::other("adb-server shell open failed"));
-    }
-    let mut out = Vec::with_capacity(256);
-    s.read_to_end(&mut out)?;
-    String::from_utf8(out).map_err(|_| io::Error::other("shell: non-utf8 output"))
-}
-
-/// A stream to the daemon on `serial` through the adb server itself
-/// (`host:transport:SERIAL`, then `localabstract:mobaxd_PORT`), so no host
-/// port is bound. After the two OKAYs the socket is a plain byte pipe to
-/// the daemon. Same data path as a forward (adb opens a forward's device
-/// stream on its first byte), so a request costs the same once connected.
-pub(crate) fn device_stream(serial: &str, port: u16) -> io::Result<TcpStream> {
-    let addr = adb_server_addr()?;
-    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(500))?;
-    s.set_read_timeout(Some(Duration::from_secs(5)))?;
-    // A refused transport means no such device (NotFound); a refused socket
-    // means the device is there but no daemon listens (ConnectionRefused).
-    for (req, kind) in [
-        (format!("host:transport:{serial}"), io::ErrorKind::NotFound),
-        (device_socket(port), io::ErrorKind::ConnectionRefused),
-    ] {
-        s.write_all(format!("{:04x}{req}", req.len()).as_bytes())?;
-        let mut status = [0u8; 4];
-        s.read_exact(&mut status)?;
-        if &status != b"OKAY" {
-            let mut len = [0u8; 4];
-            let n = s.read_exact(&mut len).ok()
-                .and_then(|_| usize::from_str_radix(std::str::from_utf8(&len).ok()?, 16).ok())
-                .unwrap_or(0);
-            let mut why = vec![0u8; n.min(512)];
-            let _ = s.read_exact(&mut why);
-            return Err(io::Error::new(kind, format!(
-                "{serial}: {req}: {}", String::from_utf8_lossy(&why).trim())));
-        }
-    }
-    Ok(s)
-}
-
-// ---------- which device a call talks to ----------
-//
-// The daemon is reached through the adb server, so the device is named by
-// its serial: `--device`, else $MOBILEAX_SERIAL / $ANDROID_SERIAL, else the
-// device `mobax use` picked last (~/.mobileax/current), else the only one
-// attached. The port names the daemon instance on the device
-// (`mobaxd_<port>`); every device can run its own `mobaxd_9008`.
-
-thread_local! {
-    /// A per-thread choice, for the MCP server's calls on other devices.
-    static THREAD_TARGET: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-}
-
-static PROCESS_TARGET: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-/// The device named on the command line (`--device`), for this process.
-pub(crate) fn set_target(serial: Option<String>) {
-    *PROCESS_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = serial;
-}
-
-/// Runs `f` with calls on this thread going to `serial`.
-pub(crate) fn with_target<R>(serial: &str, f: impl FnOnce() -> R) -> R {
-    let prev = THREAD_TARGET.with(|t| t.borrow_mut().replace(serial.to_string()));
-    let r = f();
-    THREAD_TARGET.with(|t| *t.borrow_mut() = prev);
-    r
-}
-
-/// The serial calls on this thread go to (see the section comment).
-pub(crate) fn target_serial() -> io::Result<String> {
-    if let Some(s) = THREAD_TARGET.with(|t| t.borrow().clone()) {
-        return Ok(s);
-    }
-    if let Some(s) = PROCESS_TARGET.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-        return Ok(s);
-    }
-    for var in ["MOBILEAX_SERIAL", "ANDROID_SERIAL"] {
-        if let Some(s) = std::env::var_os(var).filter(|v| is_set(v)) {
-            return Ok(s.to_string_lossy().into_owned());
-        }
-    }
-    let attached = attached_serials()?;
-    if let Some(cur) = read_current().filter(|c| attached.contains(c)) {
-        return Ok(cur);
-    }
-    match attached.len() {
-        0 => Err(io::Error::new(io::ErrorKind::NotFound, "no device attached — check `adb devices`")),
-        1 => Ok(attached[0].clone()),
-        _ => Err(io::Error::other(format!(
-            "{} devices attached ({}); pass --device SERIAL or `mobax use SERIAL` one",
-            attached.len(), attached.join(", ")))),
-    }
-}
-
-/// Serials in the `device` state.
-pub(crate) fn attached_serials() -> io::Result<Vec<String>> {
-    let body = adb_server_query("host:devices")
-        .or_else(|_| adb_ok(None, &["devices"], "adb devices"))?;
-    Ok(body.lines().filter_map(|l| {
-        let mut it = l.split_whitespace();
-        let s = it.next()?;
-        (it.next() == Some("device")).then(|| s.to_string())
-    }).collect())
-}
-
-fn current_path() -> Option<PathBuf> {
-    Some(home_dir()?.join(".mobileax").join("current"))
-}
-
-fn read_current() -> Option<String> {
-    let s = std::fs::read_to_string(current_path()?).ok()?;
-    let s = s.trim();
-    (!s.is_empty()).then(|| s.to_string())
-}
-
-fn write_current(serial: &str) {
-    if let Some(p) = current_path() {
-        if let Some(d) = p.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let _ = std::fs::write(p, serial);
-    }
-}
-
-fn clear_current(serial: &str) {
-    if read_current().as_deref() == Some(serial) {
-        if let Some(p) = current_path() {
-            let _ = std::fs::remove_file(p);
-        }
-    }
-}
-
-fn adb_server_list_forwards() -> io::Result<Vec<ForwardEntry>> {
-    let body = adb_server_query("host:list-forward")?;
-    let mut out = Vec::new();
-    for line in body.lines() {
-        let mut it = line.split_whitespace();
-        let serial = match it.next() { Some(s) => s.to_string(), None => continue };
-        let host = match it.next() { Some(s) => s.to_string(), None => continue };
-        let remote = it.next().unwrap_or("").to_string();
-        out.push(ForwardEntry { serial, host_spec: host, remote_spec: remote });
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn unsubstituted_placeholder_is_unset() {
-        use std::ffi::OsStr;
-        assert!(super::is_set(OsStr::new(r"C:\sdk\platform-tools\adb.exe")));
-        assert!(!super::is_set(OsStr::new("")));
-        assert!(!super::is_set(OsStr::new("${user_config.adb_path}")));
-    }
-
     #[test]
     fn android_info_sdk_line() {
         let info = "sdk: E:\\packages\\Android\\Sdk\nversion: 1.0.16625370\n";

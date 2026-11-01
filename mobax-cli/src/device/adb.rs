@@ -11,6 +11,7 @@ use std::fs::File;
 use std::io::{self, Write};
 
 use crate::{state_cache, Conn};
+use crate::Connect;
 
 #[derive(Debug)]
 pub(crate) enum Cmd {

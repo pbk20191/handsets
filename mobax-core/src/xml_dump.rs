@@ -18,7 +18,7 @@
 use crate::json::Value;
 use crate::selector;
 
-pub(crate) fn render(dump_json: &Value, rotation: i64) -> String {
+pub fn render(dump_json: &Value, rotation: i64) -> String {
     let mut out = String::with_capacity(16 * 1024);
     out.push_str("<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n");
     out.push_str(&format!("<hierarchy rotation=\"{rotation}\">\n"));

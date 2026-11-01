@@ -242,7 +242,7 @@ fn poll_selector(
         let found = sess.with_dump(|dump| {
             let ctx = crate::selector::MatchCtx::new(dump);
             let mut matches = crate::selector::find_all_with(&ctx, &selectors);
-            crate::selector::apply_filters(&mut matches, flags);
+            crate::selector::apply_filters(&mut matches, flags.require());
             !matches.is_empty()
         })?;
         if found { return Ok(()); }

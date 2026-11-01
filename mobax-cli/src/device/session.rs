@@ -13,6 +13,7 @@ use std::io;
 use std::time::Instant;
 
 use crate::Conn;
+use crate::Connect;
 use crate::flags::{ActionFlags, OutFmt};
 
 pub struct Session {
