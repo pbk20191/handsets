@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["handsets-cli", "handsets-tui", "handsets-viewer"]
+# A bare `cargo build` skips the viewer: it is the heavy one (GPU and codec
+# bindings, libavcodec on Linux). Build it with `-p handsets-viewer` or
+# `--workspace`.
+default-members = ["handsets-cli", "handsets-tui"]
+
+[workspace.package]
+version = "0.3.3"
+edition = "2021"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"          # drop unwind tables (~10–20% binary size)
+strip = "symbols"
+debug = false
+overflow-checks = false
+
+# Speed first: the viewer's JPEG decoders are the hot path, and opt-level "z"
+# roughly doubles their decode time for ~26 KB less binary.
+[profile.release.package.handsets-viewer]
+opt-level = 3

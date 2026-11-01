@@ -1,7 +1,7 @@
 [package]
 name = "handsets-viewer"
-version = "0.3.3"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Live device-screen viewer for the handsets daemon"
 
 [[bin]]
@@ -51,14 +51,3 @@ windows = { version = "0.62", features = [
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
 ] }
-
-[profile.release]
-# Speed first: the JPEG decoders are the hot path, and opt-level "z" roughly
-# doubles their decode time for ~26 KB less binary.
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-panic = "abort"          # drop unwind tables (~10–20% binary size)
-strip = "symbols"
-debug = false
-overflow-checks = false

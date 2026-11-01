@@ -86,10 +86,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-          workspaces: |
-            handsets-cli
-            handsets-viewer
-            handsets-tui
 
       - name: Install aarch64 cross linker (Linux only)
         if: matrix.cross
@@ -106,16 +102,16 @@ jobs:
 
       - name: Build hs
         shell: bash
-        run: cargo build --release --manifest-path handsets-cli/Cargo.toml --target ${{ matrix.target }}
+        run: cargo build --release --locked -p hs --target ${{ matrix.target }}
 
       - name: Build handsets-viewer
         if: matrix.viewer
         shell: bash
-        run: cargo build --release --manifest-path handsets-viewer/Cargo.toml --target ${{ matrix.target }}
+        run: cargo build --release --locked -p handsets-viewer --target ${{ matrix.target }}
 
       - name: Build handsets-tui
         shell: bash
-        run: cargo build --release --manifest-path handsets-tui/Cargo.toml --target ${{ matrix.target }}
+        run: cargo build --release --locked -p handsets-tui --target ${{ matrix.target }}
 
       - name: Download jar artifact
         uses: actions/download-artifact@v4
@@ -139,11 +135,11 @@ jobs:
           set -euo pipefail
           stage="dist/handsets"
           mkdir -p "$stage"
-          cp "handsets-cli/target/${{ matrix.target }}/release/hs${{ matrix.exe }}" "$stage/"
+          cp "target/${{ matrix.target }}/release/hs${{ matrix.exe }}" "$stage/"
           if [[ "${{ matrix.viewer }}" == "true" ]]; then
-            cp "handsets-viewer/target/${{ matrix.target }}/release/handsets-viewer${{ matrix.exe }}" "$stage/"
+            cp "target/${{ matrix.target }}/release/handsets-viewer${{ matrix.exe }}" "$stage/"
           fi
-          cp "handsets-tui/target/${{ matrix.target }}/release/handsets-tui${{ matrix.exe }}" "$stage/"
+          cp "target/${{ matrix.target }}/release/handsets-tui${{ matrix.exe }}" "$stage/"
           cp build/hs.jar "$stage/hs.jar"
           [[ -f LICENSE ]] && cp LICENSE "$stage/" || true
           cp README.md "$stage/"
@@ -175,7 +171,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/mcpb-stage.mjs             --version "${{ steps.ver.outputs.tag }}"             --platform "${{ matrix.mcpb }}"             --hs "handsets-cli/target/${{ matrix.target }}/release/hs${{ matrix.exe }}"             --jar build/hs.jar             --out dist/mcpb
+          node scripts/mcpb-stage.mjs             --version "${{ steps.ver.outputs.tag }}"             --platform "${{ matrix.mcpb }}"             --hs "target/${{ matrix.target }}/release/hs${{ matrix.exe }}"             --jar build/hs.jar             --out dist/mcpb
           npx -y @anthropic-ai/mcpb@2.1.2 validate dist/mcpb/manifest.json
           bundle="handsets-${{ matrix.name }}.mcpb"
           npx -y @anthropic-ai/mcpb@2.1.2 pack dist/mcpb "$bundle"

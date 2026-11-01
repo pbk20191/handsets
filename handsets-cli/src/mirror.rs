@@ -19,7 +19,7 @@ pub(crate) fn run(host: &str, port: u16, _args: Args) -> io::Result<()> {
     let viewer = daemon::locate_viewer().ok_or_else(|| io::Error::new(
         io::ErrorKind::NotFound,
         "handsets-viewer binary not found. Build it with:\n  \
-         cargo build --release --manifest-path handsets-viewer/Cargo.toml\n\
+         cargo build --release -p handsets-viewer\n\
          Then ensure it's on PATH, or run hs from the workspace root.",
     ))?;
 

@@ -717,8 +717,8 @@ fn network_thread_tilejpeg(
         }
     };
     let tile_edge: u32 = args.tile.unwrap_or(128);
-    let tiles_x: u32 = (dev_w + tile_edge - 1) / tile_edge;
-    let _tiles_y: u32 = (dev_h + tile_edge - 1) / tile_edge;
+    let tiles_x: u32 = dev_w.div_ceil(tile_edge);
+    let _tiles_y: u32 = dev_h.div_ceil(tile_edge);
 
     // Build wire command.
     let mut cmd = String::from("stream_tilejpeg");

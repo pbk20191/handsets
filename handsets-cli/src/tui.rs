@@ -12,7 +12,7 @@ pub(crate) fn run(host: &str, port: u16, active: bool) -> io::Result<()> {
     let bin = daemon::locate_tui().ok_or_else(|| io::Error::new(
         io::ErrorKind::NotFound,
         "handsets-tui binary not found. Build it with:\n  \
-         cargo build --release --manifest-path handsets-tui/Cargo.toml\n\
+         cargo build --release -p handsets-tui\n\
          Then ensure it's on PATH, or run hs from the workspace root.",
     ))?;
 

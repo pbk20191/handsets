@@ -36,8 +36,9 @@ pub(crate) fn locate_jar() -> io::Result<PathBuf> {
             for rel in [
                 "hs.jar",
                 "../build/hs.jar",
+                // Dev checkout: target/release/hs → ../../build/hs.jar
                 "../../build/hs.jar",
-                // handsets-cli/target/release/hs → ../../../build/hs.jar
+                // target/<triple>/release/hs → ../../../build/hs.jar
                 "../../../build/hs.jar",
             ] {
                 let p = dir.join(rel);
@@ -76,15 +77,10 @@ fn locate_sibling_binary(name: &str) -> Option<PathBuf> {
     if let Ok(p) = which(name) { return Some(p); }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for rel in [
-                String::from(name),
-                // Dev checkout: handsets-cli/target/release/hs → ../../<crate>/target/release/<bin>
-                format!("../../{name}/target/release/{name}"),
-                format!("../../../{name}/target/release/{name}"),
-            ] {
-                let cand = dir.join(rel);
-                if cand.is_file() { return Some(cand); }
-            }
+            // Release archive, and the dev checkout too: the workspace
+            // builds every binary into the same target/<profile>/.
+            let cand = dir.join(name);
+            if cand.is_file() { return Some(cand); }
         }
     }
     if let Some(home) = std::env::var_os("HOME") {
