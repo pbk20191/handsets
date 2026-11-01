@@ -87,6 +87,7 @@ pub(crate) fn spawn_detached(serial: &str, port: u16) -> io::Result<u32> {
         return Ok(existing);
     }
     let exe = std::env::current_exe()?;
+    keep_std_handles_from_children();
     let child = Command::new(exe)
         .args(["--device", serial, "--port", &port.to_string(), "state-daemon"])
         .stdin(Stdio::null())
@@ -145,6 +146,33 @@ fn pid_is_alive(pid: u32) -> bool {
         .map(|out| String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
         .unwrap_or(false)
 }
+
+/// Windows hands every inheritable handle to a child (Rust creates processes
+/// with handle inheritance on), so the long-lived watcher would hold this
+/// process's stdout pipe open and `mobax use | cat` would never end. Marks
+/// our std handles non-inheritable; children given `Stdio::inherit` still
+/// get them, as Rust passes those as fresh inheritable duplicates.
+#[cfg(windows)]
+fn keep_std_handles_from_children() {
+    use std::ffi::c_void;
+    extern "system" {
+        fn GetStdHandle(which: u32) -> *mut c_void;
+        fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 1;
+    // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+    for which in [-10i32, -11, -12] {
+        unsafe {
+            let h = GetStdHandle(which as u32);
+            if !h.is_null() && h as isize != -1 {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn keep_std_handles_from_children() {}
 
 #[cfg(windows)]
 fn terminate_pid(pid: u32) {

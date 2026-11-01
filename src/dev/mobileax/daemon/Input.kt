@@ -1,16 +1,20 @@
 package dev.mobileax.daemon
 
 import android.app.UiAutomation
+import android.os.Bundle
 import android.os.SystemClock
 import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import android.view.MotionEvent.PointerCoords
 import android.view.MotionEvent.PointerProperties
+import kotlinx.coroutines.delay
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Input event injection via UiAutomation.injectInputEvent. The daemon already
@@ -106,11 +110,70 @@ internal class Input(private val ua: UiAutomation) {
         keyEvent(t, t + 1, KeyEvent.ACTION_UP, code)
     }
 
-    fun text(s: String?) {
-        checkNotNull(virtualKeyMap) { "no virtual key map" }
+    /**
+     * Types `s` into the focused field. An editable field gets it inserted
+     * at the cursor in one piece, the way an IME commits text: key presses
+     * pass through the IME, which in a Korean layout turns "abc" into "뮻",
+     * and Hangul, CJK or emoji have no keys at all. A password field (its
+     * text reads back masked) or a view that only takes keys gets key
+     * presses.
+     */
+    suspend fun text(s: String?) {
         if (s.isNullOrEmpty()) return
-        val events = virtualKeyMap.getEvents(s.toCharArray())
-        requireNotNull(events) { "char(s) unsupported by virtual keymap" }
+        val field = typeInto(s)
+        if (field != null && !field.isPassword) return
+        val keymap = checkNotNull(virtualKeyMap) { "no virtual key map" }
+        checkNotNull(keymap.getEvents(s.toCharArray())) {
+            if (field == null) "no focused field, and the text has characters with no key" else "a password field takes only keyboard characters"
+        }
+        keys(s)
+    }
+
+    /**
+     * Inserts `s` into the editable field with input focus, waiting up to a
+     * second: a tap on a search bar can open the search screen and settle
+     * before its field takes focus, or while it still slides in and turns
+     * text away. Returns the field (a password field untouched), or null if
+     * none took focus.
+     */
+    private suspend fun typeInto(s: String): AccessibilityNodeInfo? {
+        val until = SystemClock.uptimeMillis() + 1000
+        while (true) {
+            val field = inputFocus(ua)?.also { it.refresh() }
+            if (field != null && (field.isPassword || commit(field, s))) return field
+            if (SystemClock.uptimeMillis() >= until) {
+                check(field == null) { "the field refused the text" }
+                return null
+            }
+            delay(50.milliseconds)
+        }
+    }
+
+    /** Inserts `run` at `node`'s cursor (replacing a selection); false if the field refused it. */
+    private fun commit(node: AccessibilityNodeInfo, run: String): Boolean {
+        val cur = if (node.isShowingHintText) "" else node.text?.toString().orEmpty()
+        var a = node.textSelectionStart
+        var b = node.textSelectionEnd
+        if (a !in 0..cur.length || b !in 0..cur.length) {
+            a = cur.length
+            b = cur.length
+        }
+        val lo = minOf(a, b)
+        val hi = maxOf(a, b)
+        val set = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, cur.substring(0, lo) + run + cur.substring(hi))
+        }
+        if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, set)) return false
+        val at = lo + run.length
+        node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, at)
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, at)
+        })
+        return true
+    }
+
+    private fun keys(s: String) {
+        val events = checkNotNull(virtualKeyMap?.getEvents(s.toCharArray())) { "char(s) unsupported by virtual keymap" }
         val base = SystemClock.uptimeMillis()
         for (i in events.indices) {
             val src = events[i]
