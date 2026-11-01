@@ -215,6 +215,8 @@ struct Engine {
     screens: Mutex<HashMap<Target, Screen>>,
     /// One action at a time per device.
     locks: Mutex<HashMap<Target, Arc<Mutex<()>>>>,
+    /// One daemon start at a time per device.
+    starting: Mutex<HashMap<Target, Arc<Mutex<()>>>>,
 }
 
 /// A tool's text reply and whether it succeeded.
@@ -241,6 +243,7 @@ impl Engine {
             pool: Mutex::default(),
             screens: Mutex::default(),
             locks: Mutex::default(),
+            starting: Mutex::default(),
         }
     }
 
@@ -286,10 +289,36 @@ impl Engine {
                 None => break,
             }
         }
-        let conn = Conn::connect_device(&t.serial, t.port).map_err(|e| {
-            format!("ERR:DEVICE_GONE:cannot reach the daemon on {} ({e})\nCall `use` to start it.", t.serial)
-        })?;
+        let conn = match Conn::connect_device(&t.serial, t.port) {
+            Ok(c) => c,
+            // The device is there but its daemon isn't: never started, or the
+            // device was reset under us (a snapshot load, a reboot). Start it
+            // and carry on; screens seen before are stale.
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+                self.start_daemon(t).map_err(|e| {
+                    format!("ERR:DEVICE_GONE:no daemon on {} and starting one failed ({e})\nCall `use`.", t.serial)
+                })?;
+                Conn::connect_device(&t.serial, t.port)
+                    .map_err(|e| format!("ERR:DEVICE_GONE:{} ({e})\nCall `use`.", t.serial))?
+            }
+            Err(e) => return Err(format!("ERR:DEVICE_GONE:cannot reach {} ({e})\nCall `use` with an attached device.", t.serial)),
+        };
         Ok(Session::with_conn(conn, "127.0.0.1", t.port))
+    }
+
+    /// Starts the daemon on `t` once, however many calls find it missing at
+    /// the same time.
+    fn start_daemon(&self, t: &Target) -> io::Result<()> {
+        let guard = lock(&self.starting).entry(t.clone()).or_default().clone();
+        let _one = lock(&guard);
+        // Another call may have started it while this one waited.
+        if crate::daemon::ping_daemon(&t.serial, t.port).is_ok() {
+            return Ok(());
+        }
+        crate::daemon::connect(&crate::daemon::ConnectOpts { serial: Some(t.serial.clone()), port: Some(t.port) })?;
+        lock(&self.screens).remove(t);
+        lock(&self.pool).remove(t);
+        Ok(())
     }
 
     fn checkin(&self, t: &Target, s: Session) {
