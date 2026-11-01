@@ -57,7 +57,7 @@ pub(crate) fn ui_roots(dump: &json::Value, windows: UiWindows) -> Vec<&json::Val
 /// the format (jpg/webp/png screenshot, xml/json UI hierarchy).
 pub(crate) fn run_see(host: &str, port: u16, opts: &SeeOpts) -> io::Result<()> {
     let Some(path) = opts.path.as_deref() else {
-        return mirror::run(host, port, mirror::Args);
+        return mirror::run(host, port, &opts.viewer);
     };
     let ext = std::path::Path::new(path)
         .extension()

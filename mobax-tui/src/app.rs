@@ -33,8 +33,8 @@ use crate::model::{self, Element};
 use crate::ui;
 
 pub struct App {
-    pub host:       String,
-    pub port:       u16,
+    /// The device and daemon this shows, for the title.
+    pub source:     String,
     pub main_conn:  Conn,
     pub watcher_rx: Receiver<WatcherMsg>,
 
@@ -90,7 +90,8 @@ impl App {
         thread::spawn(move || run_watcher(host_clone, port, wire, tx));
 
         Ok(Self {
-            host, port, main_conn, watcher_rx: rx,
+            source: mobax_core::wire::describe_daemon(&host, port),
+            main_conn, watcher_rx: rx,
             elements: Vec::new(),
             cursor:   None,
             mode:     Mode::Browse,

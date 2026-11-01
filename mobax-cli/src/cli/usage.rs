@@ -44,6 +44,9 @@ Shared action flags (tap, type, find, wait, submit, paste, act):
 More verbs:
   Capture     mobax see [PATH.jpg|.webp|.png|.xml|.json] [--size N|--native]
               (.xml/.json: focused window; --all: every window)
+              mobax see | mobax mirror    live screen in a window (mobax-viewer;
+                                       [--codec jpeg|h264|tilejpeg] [--size N] [--fps N]
+                                       [--quality N] [--bitrate-kbps N] [--tile N] [--no-native])
               mobax ui [-i|--tree|--json|--xml] [--active|--all]
                                        (app windows incl. popups; --active:
                                        focused window; --all: every window)

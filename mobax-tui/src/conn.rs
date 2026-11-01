@@ -8,12 +8,7 @@ pub struct Conn(mobax_core::Conn);
 
 impl Conn {
     pub fn connect(host: &str, port: u16) -> io::Result<Self> {
-        let conn = if mobax_core::device::is_local(host) {
-            mobax_core::Conn::device(&mobax_core::device::target_serial()?, port)?
-        } else {
-            mobax_core::Conn::tcp(host, port)?
-        };
-        Ok(Self(conn))
+        Ok(Self(mobax_core::Conn::from_stream(mobax_core::wire::daemon_stream(host, port)?)?))
     }
 
     pub fn call_str(&mut self, cmd: &str) -> io::Result<String> {

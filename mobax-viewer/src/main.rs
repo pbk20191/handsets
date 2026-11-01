@@ -50,8 +50,12 @@ Options:
   --tile N            tile edge in px (tilejpeg only, default 128)
   --fps N             frame-rate hint
   --no-native         don't request max=1; use --size literally
-  --host H            default 127.0.0.1
-  --port P            default 9008
+  --device, -s S      the device (default: the one `mobax use` picked last,
+                      or the only one attached)
+  --host H            a remote daemon host; local devices go through the adb
+                      server, no port forward needed
+  --port P            daemon instance on the device (default 9008); with
+                      --host, the TCP port there
   -h, --help          show this message
 ";
 
@@ -115,6 +119,7 @@ fn parse_args() -> Result<Args, String> {
             "--fps" => a.fps = Some(it.next().ok_or("--fps needs a value")?.parse().map_err(|_| "bad --fps")?),
             "--tile" => a.tile = Some(it.next().ok_or("--tile needs a value")?.parse().map_err(|_| "bad --tile")?),
             "--no-native" => a.native = false,
+            "--device" | "-s" => mobax_core::device::set_target(Some(it.next().ok_or("--device needs a SERIAL")?)),
             "--host" => a.host = it.next().ok_or("--host needs a value")?,
             "--port" => a.port = it.next().ok_or("--port needs a value")?.parse().map_err(|_| "bad --port")?,
             other => return Err(format!("unknown arg: {other}")),
@@ -198,6 +203,9 @@ struct App {
     mapping: Arc<Mutex<Option<Mapping>>>,
     cursor_pos: PhysicalPosition<f64>,
     dragging: bool,
+    /// Where the finger last was on the device, for a release the frame
+    /// can't place (outside the picture, or the window lost focus).
+    last_xy: Option<(i32, i32)>,
     input_tx: Option<Sender<InputCmd>>,
     // Device's actual display dimensions in pixels (from `info`).
     device_size: Option<(u32, u32)>,
@@ -245,26 +253,26 @@ impl ApplicationHandler<UserEvent> for App {
                 self.cursor_pos = position;
                 if self.dragging {
                     if let Some((dx, dy)) = self.current_device_xy() {
+                        self.last_xy = Some((dx, dy));
                         self.send(InputCmd::PointerMove(dx, dy));
                     }
                 }
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                if let Some((dx, dy)) = self.current_device_xy() {
-                    match state {
-                        ElementState::Pressed => {
-                            self.dragging = true;
-                            self.send(InputCmd::PointerDown(dx, dy));
-                        }
-                        ElementState::Released => {
-                            if self.dragging {
-                                self.send(InputCmd::PointerUp(dx, dy));
-                                self.dragging = false;
-                            }
-                        }
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
+                ElementState::Pressed => {
+                    if let Some((dx, dy)) = self.current_device_xy() {
+                        self.dragging = true;
+                        self.last_xy = Some((dx, dy));
+                        self.send(InputCmd::PointerDown(dx, dy));
                     }
                 }
-            }
+                // Released outside the picture (the letterbox, past the
+                // window's edge) still lifts the finger, where it last was:
+                // otherwise it stays down on the device.
+                ElementState::Released => self.lift(),
+            },
+            // Alt-Tab mid-drag: the release goes to another window.
+            WindowEvent::Focused(false) => self.lift(),
             WindowEvent::MouseWheel { delta, .. } => {
                 if let Some((dx, dy)) = self.current_device_xy() {
                     let pixels = match delta {
@@ -361,6 +369,17 @@ impl App {
         r.device_xy(mapping, (size.width, size.height), self.cursor_pos.x, self.cursor_pos.y)
     }
 
+    /// Ends a drag: the finger comes up at the cursor, or where it last was.
+    fn lift(&mut self) {
+        if !self.dragging {
+            return;
+        }
+        self.dragging = false;
+        if let Some((dx, dy)) = self.current_device_xy().or(self.last_xy) {
+            self.send(InputCmd::PointerUp(dx, dy));
+        }
+    }
+
     /// Push an input command toward the input thread. Drops silently if the
     /// channel is closed (input thread died).
     fn send(&self, cmd: InputCmd) {
@@ -373,17 +392,9 @@ impl App {
 // ---------- input thread ----------
 
 fn input_thread(host: String, port: u16, rx: Receiver<InputCmd>) {
-    // Persistent socket; on error, drop the channel by exiting.
-    let sock = match TcpStream::connect((host.as_str(), port)) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("viewer: input socket connect failed: {e}");
-            return;
-        }
-    };
-    let _ = sock.set_nodelay(true);
-    let _ = sock.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut sock = sock;
+    // One socket for every input; a failure reconnects (see `deliver`)
+    // instead of ending the thread, which would drop every gesture after it.
+    let mut sock = None;
     let mut hdr = [0u8; 4];
     loop {
         let next = match rx.recv() {
@@ -399,12 +410,8 @@ fn input_thread(host: String, port: u16, rx: Receiver<InputCmd>) {
                     Ok(InputCmd::PointerMove(x, y)) => latest = InputCmd::PointerMove(x, y),
                     Ok(other) => {
                         // Send the pending move, then the new non-move event.
-                        if send_one_with_ack(&mut sock, &latest, &mut hdr).is_err() {
-                            return;
-                        }
-                        if send_one_with_ack(&mut sock, &other, &mut hdr).is_err() {
-                            return;
-                        }
+                        deliver(&host, port, &mut sock, &latest, &mut hdr);
+                        deliver(&host, port, &mut sock, &other, &mut hdr);
                         latest = match rx.recv() { Ok(c) => c, Err(_) => return };
                         break;
                     }
@@ -416,8 +423,34 @@ fn input_thread(host: String, port: u16, rx: Receiver<InputCmd>) {
         } else {
             next
         };
-        if send_one_with_ack(&mut sock, &cmd, &mut hdr).is_err() {
-            return;
+        deliver(&host, port, &mut sock, &cmd, &mut hdr);
+    }
+}
+
+/// Sends `cmd`, (re)connecting as needed: a slow reply or a dropped socket
+/// costs at most this one input, with the reason on stderr, not the rest.
+fn deliver(host: &str, port: u16, sock: &mut Option<TcpStream>, cmd: &InputCmd, hdr: &mut [u8; 4]) {
+    for attempt in 0..2 {
+        if sock.is_none() {
+            match open(host, port) {
+                Ok(s) => {
+                    let _ = s.set_nodelay(true);
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+                    *sock = Some(s);
+                }
+                Err(e) => {
+                    eprintln!("viewer: input socket: {e}");
+                    return;
+                }
+            }
+        }
+        let Some(s) = sock.as_mut() else { return };
+        match send_one_with_ack(s, cmd, hdr) {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("viewer: input {}: {e}; reconnecting", if attempt == 0 { "failed" } else { "failed again" });
+                *sock = None;
+            }
         }
     }
 }
@@ -431,8 +464,10 @@ fn send_one_with_ack(
         InputCmd::PointerDown(x, y) => format!("down x={x} y={y}"),
         InputCmd::PointerMove(x, y) => format!("move x={x} y={y}"),
         InputCmd::PointerUp(x, y) => format!("up x={x} y={y}"),
-        InputCmd::Scroll { x, y, dy } => format!("scroll x={x} y={y} dy={dy}"),
-        InputCmd::KeyName(name) => format!("key {name}"),
+        InputCmd::Scroll { x, y, dy } => format!("scroll x={x} y={y} dy={dy} wait=0"),
+        // wait=0: Back in Recents took 5 s to be handled; a live viewer
+        // must not wait for it (the stream's order is kept anyway).
+        InputCmd::KeyName(name) => format!("key {name} wait=0"),
         InputCmd::Text(s) => format!("text {s}"),
     };
     let bytes = wire.as_bytes();
@@ -466,7 +501,7 @@ fn network_thread_jpeg(
     latest: Arc<Mutex<Option<DecodedFrame>>>,
     proxy: EventLoopProxy<UserEvent>,
 ) {
-    let mut sock = match TcpStream::connect((args.host.as_str(), args.port)) {
+    let mut sock = match open(&args.host, args.port) {
         Ok(s) => s,
         Err(e) => {
             let _ = proxy.send_event(UserEvent::Disconnected(format!("connect failed: {e}")));
@@ -598,7 +633,7 @@ fn network_thread_h264(
         }
     };
 
-    let mut sock = match TcpStream::connect((args.host.as_str(), args.port)) {
+    let mut sock = match open(&args.host, args.port) {
         Ok(s) => s,
         Err(e) => {
             let _ = proxy.send_event(UserEvent::Disconnected(format!("connect failed: {e}")));
@@ -699,7 +734,7 @@ fn network_thread_tilejpeg(
     latest: Arc<Mutex<Option<DecodedFrame>>>,
     proxy: EventLoopProxy<UserEvent>,
 ) {
-    let mut sock = match TcpStream::connect((args.host.as_str(), args.port)) {
+    let mut sock = match open(&args.host, args.port) {
         Ok(s) => s,
         Err(e) => {
             let _ = proxy.send_event(UserEvent::Disconnected(format!("connect failed: {e}")));
@@ -843,9 +878,18 @@ fn write_cmd(sock: &mut TcpStream, cmd: &[u8]) -> std::io::Result<()> {
     sock.write_all(cmd)
 }
 
+/// A socket to the daemon: through the adb server for a device on this
+/// machine (no host port needed), else TCP on `host`. Frames can be far
+/// apart on a still screen, so reads don't time out.
+fn open(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    let s = mobax_core::wire::daemon_stream(host, port)?;
+    s.set_read_timeout(None)?;
+    Ok(s)
+}
+
 /// One-shot `info` request — returns the device display dimensions in pixels.
 fn fetch_device_size(host: &str, port: u16) -> std::io::Result<(u32, u32)> {
-    let mut s = TcpStream::connect((host, port))?;
+    let mut s = open(host, port)?;
     let _ = s.set_nodelay(true);
     let cmd = b"info";
     s.write_all(&(cmd.len() as u32).to_be_bytes())?;
@@ -884,9 +928,17 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // Where the frames come from: a device on this machine through the adb
+    // server (no host port), or a remote host's TCP port.
+    let mut source = mobax_core::wire::describe_daemon(&args.host, args.port);
+    if mobax_core::device::is_local(&args.host) {
+        if let Ok(adb) = mobax_core::adb_server::addr() {
+            source.push_str(&format!(" via adb server {adb}"));
+        }
+    }
     eprintln!(
-        "viewer: codec={:?} bitrate={} kbps native={} host={}:{}",
-        args.codec, args.bitrate_kbps, args.native, args.host, args.port
+        "viewer: codec={:?} bitrate={} kbps native={} {source}",
+        args.codec, args.bitrate_kbps, args.native
     );
 
     // Query device display size — required so input coordinates land in the
@@ -895,6 +947,12 @@ fn main() {
         Ok((w, h)) => {
             eprintln!("viewer: device display = {w}x{h}");
             Some((w, h))
+        }
+        // No such device, or no daemon on it: say so instead of opening a
+        // window that stays black.
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
+            eprintln!("viewer: {e}");
+            std::process::exit(1);
         }
         Err(e) => {
             eprintln!(
@@ -955,6 +1013,7 @@ fn main() {
         mapping,
         cursor_pos: PhysicalPosition::new(0.0, 0.0),
         dragging: false,
+        last_xy: None,
         input_tx: Some(input_tx),
         device_size,
     };

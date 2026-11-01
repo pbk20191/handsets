@@ -18,6 +18,8 @@ pub(crate) struct SeeOpts {
     pub(crate) secure_check: bool,
     /// .json / .xml: every window instead of the focused one (as `mobax ui --all`).
     pub(crate) all_windows: bool,
+    /// Bare `mobax see`: flags for the viewer (`--codec h264`, …).
+    pub(crate) viewer: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -385,7 +387,6 @@ pub(crate) fn suggest(old: &str) -> String {
         "screenshot"   => Some("mobax see <PATH.jpg|.png>"),
         "dump" | "dump-active" => Some("mobax see <PATH.xml|.json>"),
         "query"        => Some("mobax find <SELECTOR>"),
-        "mirror"       => Some("mobax see   (bare opens the viewer)"),
         "pull" | "push" => Some("mobax cp  (device:/path host:/path or reverse)"),
         "pm"           => Some("mobax apps / mobax install / mobax uninstall / mobax show <pkg>"),
         "am"           => Some("mobax open / mobax close / mobax events"),
@@ -466,6 +467,13 @@ pub(crate) fn parse_see(rest: &[&str]) -> Result<SeeOpts, String> {
             "--native" | "--max" => opts.native = true,
             "--secure-check" | "--secure" => opts.secure_check = true,
             "--all" => opts.all_windows = true,
+            // The viewer's own flags, for a bare `mobax see`.
+            "--no-native" => opts.viewer.push("--no-native".into()),
+            flag @ ("--codec" | "--quality" | "--bitrate-kbps" | "--tile" | "--fps") => {
+                i += 1;
+                let v = rest.get(i).ok_or_else(|| format!("{flag} needs a value"))?;
+                opts.viewer.extend([flag.to_string(), v.to_string()]);
+            }
             path if path.starts_with('-') => return Err(format!("unknown see arg: {path}")),
             path => {
                 if opts.path.is_some() {
@@ -479,8 +487,17 @@ pub(crate) fn parse_see(rest: &[&str]) -> Result<SeeOpts, String> {
     if opts.native && opts.size.is_some() {
         return Err("see: --native and --size are mutually exclusive".into());
     }
-    if opts.path.is_none() && (opts.size.is_some() || opts.native || opts.secure_check || opts.all_windows) {
-        return Err("see: capture flags need a PATH; bare `mobax see` opens the viewer".into());
+    if opts.path.is_some() && !opts.viewer.is_empty() {
+        return Err(format!("see: {} applies only to the viewer (bare `mobax see`)", opts.viewer[0]));
+    }
+    if opts.path.is_none() {
+        if opts.secure_check || opts.all_windows {
+            return Err("see: --secure-check and --all need a PATH; bare `mobax see` opens the viewer".into());
+        }
+        // The viewer streams at native size unless told a size.
+        if let Some(n) = opts.size {
+            opts.viewer.extend(["--size".to_string(), n.to_string()]);
+        }
     }
     Ok(opts)
 }
@@ -586,7 +603,8 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Opts, String> {
         }
 
         // ─── See — capture by extension, bare = viewer ───────────────
-        Some((&"see", rest)) => Cmd::See(parse_see(rest)?),
+        // `mirror`: what it was called before `see` took it over.
+        Some((&"see", rest)) | Some((&"mirror", rest)) => Cmd::See(parse_see(rest)?),
 
         // ─── TUI — keyboard-driven inspector ─────────────────────────
         Some((&"tui", rest)) => match rest {
@@ -1054,6 +1072,23 @@ mod parse_logs_tests {
         assert!(parse_logs(&["--pkg", "a.b", "--pid", "1"]).is_err());
         assert!(parse_logs(&["--", "two words"]).is_err());
         assert!(parse_logs(&["--grep", "two words"]).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod parse_see_tests {
+    use super::parse_see;
+
+    #[test]
+    fn a_bare_see_hands_the_viewer_its_flags() {
+        let o = parse_see(&["--codec", "h264", "--size", "720", "--fps", "15", "--no-native"]).unwrap();
+        assert!(o.path.is_none());
+        assert_eq!(o.viewer, ["--codec", "h264", "--fps", "15", "--no-native", "--size", "720"]);
+        assert!(parse_see(&["shot.jpg", "--codec", "h264"]).unwrap_err().contains("only to the viewer"));
+        assert!(parse_see(&["--codec"]).is_err());
+        // A capture keeps --size for itself.
+        let o = parse_see(&["shot.jpg", "--size", "480"]).unwrap();
+        assert_eq!((o.size, o.viewer.len()), (Some(480), 0));
     }
 }
 
