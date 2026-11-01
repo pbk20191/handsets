@@ -6,7 +6,7 @@
         font-size="132"
         font-weight="300"
         letter-spacing="2"
-        fill="#101010">handsets</text>
+        fill="#101010">mobileAX</text>
 
   <!-- Single hairline rule under the wordmark, the Reitz tell. -->
   <line x1="52" y1="158" x2="708" y2="158"

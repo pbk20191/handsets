@@ -2,22 +2,22 @@
 
 Measured on 2026-05-24 with `n=50` on the Android 15 emulator
 `Google sdk_gphone64_arm64` (`1440x3120`, SDK 35), host macOS/aarch64.
-Numbers are p50 with p95 in parentheses. `hs` uses one warm daemon socket;
+Numbers are p50 with p95 in parentheses. `mobax` uses one warm daemon socket;
 `adb` starts a fresh adb CLI process per sample.
 
-Reproduce the Handsets side with `hs bench -n 50` or machine-readable
-`hs bench -n 50 --json`. Reproduce raw ADB baselines with
+Reproduce the mobileAX side with `mobax bench -n 50` or machine-readable
+`mobax bench -n 50 --json`. Reproduce raw ADB baselines with
 `scripts/bench-adb.sh -n 50`; the script keeps the exact ADB commands
 inspectable.
 
-The default `hs bench` suite follows the hot path: 768px JPEG screenshots
+The default `mobax bench` suite follows the hot path: 768px JPEG screenshots
 for agents, with WebP as a lossy export comparison. PNG is intentionally
-left out of the headline `hs` suite because Android's PNG encoder is a
+left out of the headline `mobax` suite because Android's PNG encoder is a
 debug/export path, not an interaction loop path.
 
 ## Headline Comparisons
 
-| Command | hs | adb | Speedup |
+| Command | mobax | adb | Speedup |
 |---|---:|---:|---:|
 | `screenshot size=768` JPEG vs `adb exec-out screencap -p` PNG | **8.02 ms** (10.76) | 2105.61 ms (2308.38) | **263×** |
 | `screenshot max=1` JPEG vs `adb exec-out screencap -p` PNG | **52.60 ms** (71.23) | 2105.61 ms (2308.38) | **40×** |
@@ -25,7 +25,7 @@ debug/export path, not an interaction loop path.
 | `state top` vs `adb shell dumpsys window` | **2.54 ms** (5.09) | 71.28 ms (107.80) | **28×** |
 | `ping` vs `adb shell true` | **1.61 ms** (2.64) | 27.65 ms (36.33) | **17×** |
 
-## Handsets Warm-Socket Suite
+## mobileAX Warm-Socket Suite
 
 | Command | p50 | p95 | bytes |
 |---|---:|---:|---:|

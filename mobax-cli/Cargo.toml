@@ -1,0 +1,13 @@
+[package]
+name = "mobax"
+version.workspace = true
+edition.workspace = true
+description = "mobileAX — high-performance Android control CLI, built for agents and humans"
+
+[[bin]]
+name = "mobax"
+path = "src/main.rs"
+
+[dependencies]
+# No third-party deps — the CLI is pure std. The live screen mirror moved
+# to the mobax-viewer crate; `mobax mirror` just spawns that binary.

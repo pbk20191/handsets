@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Handsets installer — macOS and Linux.
+# mobileAX installer — macOS and Linux.
 #
-#   curl -fsSL https://raw.githubusercontent.com/pbk20191/handsets/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/pbk20191/mobileax/main/install.sh | bash
 #
 # Env overrides (all optional):
-#   HANDSETS_VERSION  vX.Y.Z   pin a release (default: latest)
-#   HANDSETS_DIR      PATH     where to extract (default: $HOME/.handsets)
-#   HANDSETS_PREFIX   PATH     where to symlink `hs` (default: first writable
+#   MOBILEAX_VERSION  vX.Y.Z   pin a release (default: latest)
+#   MOBILEAX_DIR      PATH     where to extract (default: $HOME/.mobileax)
+#   MOBILEAX_PREFIX   PATH     where to symlink `mobax` (default: first writable
 #                                of /usr/local/bin, /opt/homebrew/bin, ~/.local/bin)
-#   HANDSETS_REPO     OWNER/N  override repo (default: pbk20191/handsets)
+#   MOBILEAX_REPO     OWNER/N  override repo (default: pbk20191/mobileax)
 
 set -eu
 
-REPO="${HANDSETS_REPO:-pbk20191/handsets}"
-DIR="${HANDSETS_DIR:-$HOME/.handsets}"
+REPO="${MOBILEAX_REPO:-pbk20191/mobileax}"
+DIR="${MOBILEAX_DIR:-$HOME/.mobileax}"
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
-die()  { warn "handsets: $*"; exit 1; }
+die()  { warn "mobileax: $*"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---------- detect ----------
@@ -38,11 +38,11 @@ case "$uname_m" in
   *) die "unsupported arch: $uname_m" ;;
 esac
 
-ASSET="handsets-${OS}-${ARCH}.tar.gz"
+ASSET="mobileax-${OS}-${ARCH}.tar.gz"
 
 # ---------- resolve version ----------
 
-VERSION="${HANDSETS_VERSION:-}"
+VERSION="${MOBILEAX_VERSION:-}"
 if [ -z "$VERSION" ]; then
   have curl || die "curl is required"
   VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
@@ -53,7 +53,7 @@ fi
 URL="https://github.com/$REPO/releases/download/$VERSION/$ASSET"
 SUMS_URL="$URL.sha256"
 
-say "Installing handsets $VERSION ($OS/$ARCH) → $DIR"
+say "Installing mobileax $VERSION ($OS/$ARCH) → $DIR"
 
 # ---------- download ----------
 
@@ -80,25 +80,25 @@ fi
 mkdir -p "$DIR"
 # Preserve any user state files in $DIR (state-<port>.json etc.); only
 # remove the binaries we're about to overwrite.
-for f in hs handsets-viewer handsets-tui hs.jar LICENSE VERSION; do
+for f in mobax mobax-viewer mobax-tui mobax.jar LICENSE VERSION; do
   rm -f "$DIR/$f"
 done
 tar -xzf "$TMP/$ASSET" -C "$DIR" --strip-components=1
 printf '%s\n' "$VERSION" > "$DIR/VERSION"
-chmod +x "$DIR/hs" 2>/dev/null || true
-[ -f "$DIR/handsets-viewer" ] && chmod +x "$DIR/handsets-viewer" 2>/dev/null || true
-[ -f "$DIR/handsets-tui" ]    && chmod +x "$DIR/handsets-tui"    2>/dev/null || true
+chmod +x "$DIR/mobax" 2>/dev/null || true
+[ -f "$DIR/mobax-viewer" ] && chmod +x "$DIR/mobax-viewer" 2>/dev/null || true
+[ -f "$DIR/mobax-tui" ]    && chmod +x "$DIR/mobax-tui"    2>/dev/null || true
 
 # ---------- link into PATH ----------
 
 link_into() {
-  ln -sf "$DIR/hs" "$1/hs" 2>/dev/null
+  ln -sf "$DIR/mobax" "$1/mobax" 2>/dev/null
 }
 
 LINKED=""
-if [ -n "${HANDSETS_PREFIX:-}" ]; then
-  mkdir -p "$HANDSETS_PREFIX" 2>/dev/null || true
-  if link_into "$HANDSETS_PREFIX"; then LINKED="$HANDSETS_PREFIX"; fi
+if [ -n "${MOBILEAX_PREFIX:-}" ]; then
+  mkdir -p "$MOBILEAX_PREFIX" 2>/dev/null || true
+  if link_into "$MOBILEAX_PREFIX"; then LINKED="$MOBILEAX_PREFIX"; fi
 else
   for cand in /usr/local/bin /opt/homebrew/bin "$HOME/.local/bin"; do
     [ -d "$cand" ] || mkdir -p "$cand" 2>/dev/null || continue
@@ -112,7 +112,7 @@ fi
 if [ -z "$LINKED" ]; then
   if have sudo; then
     say "Need sudo to symlink into /usr/local/bin …"
-    if sudo ln -sf "$DIR/hs" /usr/local/bin/hs; then
+    if sudo ln -sf "$DIR/mobax" /usr/local/bin/mobax; then
       LINKED="/usr/local/bin"
     fi
   fi
@@ -121,13 +121,13 @@ fi
 # ---------- done ----------
 
 say ""
-say "  installed:  $DIR/hs"
-[ -f "$DIR/handsets-viewer" ] && say "  viewer:     $DIR/handsets-viewer"
-[ -f "$DIR/handsets-tui" ]    && say "  tui:        $DIR/handsets-tui"
-say "  daemon jar: $DIR/hs.jar"
+say "  installed:  $DIR/mobax"
+[ -f "$DIR/mobax-viewer" ] && say "  viewer:     $DIR/mobax-viewer"
+[ -f "$DIR/mobax-tui" ]    && say "  tui:        $DIR/mobax-tui"
+say "  daemon jar: $DIR/mobax.jar"
 
 if [ -n "$LINKED" ]; then
-  say "  symlinked:  $LINKED/hs"
+  say "  symlinked:  $LINKED/mobax"
   case ":$PATH:" in
     *":$LINKED:"*) ;;
     *) say ""; say "Note: $LINKED is not on \$PATH. Add this to your shell rc:"
@@ -135,10 +135,10 @@ if [ -n "$LINKED" ]; then
   esac
 else
   say ""
-  warn "Could not symlink \`hs\` into a bin directory."
+  warn "Could not symlink \`mobax\` into a bin directory."
   warn "Add this to your shell rc to use it directly:"
   warn "    export PATH=\"$DIR:\$PATH\""
 fi
 
 say ""
-say "Next:  hs use      # connect a device and start the daemon"
+say "Next:  mobax use      # connect a device and start the daemon"

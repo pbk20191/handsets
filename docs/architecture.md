@@ -3,7 +3,7 @@
 ```
 host                                  device (shell UID, app_process)
 ─────                                  ──────────────────────────────
-hs <verb> ──► adb forward ────►     HsServer → Dispatch (one coroutine per connection)
+mobax <verb> ──► adb forward ────►     MobaxServer → Dispatch (one coroutine per connection)
                                        ├─ Server.respond     sync verbs (Pm Am Wm Props Providers …)
                                        ├─ Gestures           input, wait_for_*, tap_and_*
                                        ├─ Transfers          push/pull, install, uninstall
@@ -14,12 +14,12 @@ hs <verb> ──► adb forward ────►     HsServer → Dispatch (one c
 ```
 
 The daemon runs as the shell UID via `app_process` with hidden-API
-restrictions lifted. It listens on the abstract Unix socket `@hsd_<port>`
-(host side: `adb forward tcp:<port> localabstract:hsd_<port>`) and refuses
+restrictions lifted. It listens on the abstract Unix socket `@mobaxd_<port>`
+(host side: `adb forward tcp:<port> localabstract:mobaxd_<port>`) and refuses
 any peer whose `SO_PEERCRED` uid isn't shell or root. The host runs a
 background `state-daemon` that subscribes to `state_watch` and atomically rewrites
-`~/.handsets/state-<port>.json` on every event-driven refresh. `hs info` /
-`hs info` / `hs show` all read straight out of that file.
+`~/.mobileax/state-<port>.json` on every event-driven refresh. `mobax info` /
+`mobax info` / `mobax show` all read straight out of that file.
 
 ## Threads
 
@@ -57,8 +57,8 @@ every verb so two daemon builds can be compared on a device.
 ## Layout
 
 ```
-src/dev/handsets/daemon/      on-device daemon (Kotlin → dex → jar)
-handsets-cli/                 host CLI — short-verb surface (`hs use`, `hs see`, …)
-handsets-viewer/              GUI mirror — winit + GPU decode (Metal/VideoToolbox, D3D11/MF, GLES/VA-API)
-build.gradle.kts              AGP: kotlinc → R8 → unsigned APK → build/hs.jar  (build.sh wraps it)
+src/dev/mobileax/daemon/      on-device daemon (Kotlin → dex → jar)
+mobax-cli/                 host CLI — short-verb surface (`mobax use`, `mobax see`, …)
+mobax-viewer/              GUI mirror — winit + GPU decode (Metal/VideoToolbox, D3D11/MF, GLES/VA-API)
+build.gradle.kts              AGP: kotlinc → R8 → unsigned APK → build/mobax.jar  (build.sh wraps it)
 ```

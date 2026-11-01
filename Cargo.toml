@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["handsets-cli", "handsets-tui", "handsets-viewer"]
+members = ["mobax-cli", "mobax-tui", "mobax-viewer"]
 # A bare `cargo build` skips the viewer: it is the heavy one (GPU and codec
-# bindings, libavcodec on Linux). Build it with `-p handsets-viewer` or
+# bindings, libavcodec on Linux). Build it with `-p mobax-viewer` or
 # `--workspace`.
-default-members = ["handsets-cli", "handsets-tui"]
+default-members = ["mobax-cli", "mobax-tui"]
 
 [workspace.package]
 version = "0.3.3"
@@ -21,5 +21,5 @@ overflow-checks = false
 
 # Speed first: the viewer's JPEG decoders are the hot path, and opt-level "z"
 # roughly doubles their decode time for ~26 KB less binary.
-[profile.release.package.handsets-viewer]
+[profile.release.package.mobileax-viewer]
 opt-level = 3

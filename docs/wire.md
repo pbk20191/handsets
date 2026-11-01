@@ -4,9 +4,9 @@ The on-device daemon speaks a length-prefixed binary protocol: each
 frame is `uint32 big-endian length` + payload (in both directions).
 Commands are ASCII text, `verb [k=v …]` style. This document lists
 every wire verb the daemon dispatches in
-`src/dev/handsets/daemon/Server.java`.
+`src/dev/mobileax/daemon/Server.java`.
 
-Use these directly via `hs do <wire>` or `hs shell` (one socket, many
+Use these directly via `mobax do <wire>` or `mobax shell` (one socket, many
 commands). `ERR:<msg>` is returned on failure.
 
 ## Lifecycle
@@ -95,7 +95,7 @@ state_watch                                            chunked JSON frames
 
 ## Node actions — AccessibilityNodeInfo
 
-`<selector>` uses the same CSS-like syntax as `hs find`:
+`<selector>` uses the same CSS-like syntax as `mobax find`:
 `Tag[attr=val][attr~=sub]:flag`, comma = OR.
 
 ```

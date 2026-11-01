@@ -684,36 +684,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "handsets-tui"
-version = "0.3.3"
-dependencies = [
- "crossterm",
- "ratatui",
-]
-
-[[package]]
-name = "handsets-viewer"
-version = "0.3.3"
-dependencies = [
- "ffmpeg-sys-next",
- "glow",
- "glutin",
- "objc2 0.6.5",
- "objc2-core-foundation",
- "objc2-core-media",
- "objc2-core-video",
- "objc2-io-surface",
- "objc2-metal 0.3.2",
- "objc2-quartz-core 0.3.2",
- "objc2-video-toolbox",
- "raw-window-handle",
- "softbuffer",
- "windows",
- "winit",
- "zune-jpeg",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -741,10 +711,6 @@ name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
-
-[[package]]
-name = "hs"
-version = "0.3.3"
 
 [[package]]
 name = "ident_case"
@@ -985,6 +951,40 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mobax"
+version = "0.3.3"
+
+[[package]]
+name = "mobax-tui"
+version = "0.3.3"
+dependencies = [
+ "crossterm",
+ "ratatui",
+]
+
+[[package]]
+name = "mobax-viewer"
+version = "0.3.3"
+dependencies = [
+ "ffmpeg-sys-next",
+ "glow",
+ "glutin",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-media",
+ "objc2-core-video",
+ "objc2-io-surface",
+ "objc2-metal 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "objc2-video-toolbox",
+ "raw-window-handle",
+ "softbuffer",
+ "windows",
+ "winit",
+ "zune-jpeg",
 ]
 
 [[package]]

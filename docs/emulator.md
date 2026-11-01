@@ -1,13 +1,13 @@
 # Emulators and the Android CLI
 
-Handsets drives any device `adb` can see, API 28 or later. For emulators the
+mobileAX drives any device `adb` can see, API 28 or later. For emulators the
 recommended setup is Google's Android CLI (`android`) plus an AVD that
 renders on the host GPU.
 
 ## Android CLI
 
 Install the `android` CLI (on Windows: `winget install Google.AndroidCLI`).
-`hs` uses it to find `adb`, so nothing has to be on `PATH`:
+`mobax` uses it to find `adb`, so nothing has to be on `PATH`:
 
 ```bash
 android info                  # sdk: <path>  — adb is <path>/platform-tools/adb
@@ -59,21 +59,21 @@ cores / 2 GB to 6 cores / 4 GB took a native-size `jpeg` stream from 25–28 to
 
 At native resolution the mirror's GPU readback (25–36 ms per 1080×2400 frame
 on that host) caps a JPEG stream near 30 fps. Asking for a smaller frame cuts
-the readback, the encode and the decode together: `handsets-viewer --size
+the readback, the encode and the decode together: `mobax-viewer --size
 1200` reaches about 56 fps, and the window rarely shows more pixels than that.
 `h264` avoids the readback entirely.
 
-## How `hs` finds adb
+## How `mobax` finds adb
 
 In order, resolved once per process:
 
-1. `$HANDSETS_ADB`, then `$ADB`
-2. `~/.handsets/adb-path` — the cached result of 3 (`android info` takes ~0.7 s)
+1. `$MOBILEAX_ADB`, then `$ADB`
+2. `~/.mobileax/adb-path` — the cached result of 3 (`android info` takes ~0.7 s)
 3. `android info` → `<sdk>/platform-tools/adb`
 4. `$ANDROID_HOME`, then `$ANDROID_SDK_ROOT`
 5. `adb` on `PATH`
 6. Android Studio's default SDK (`~/Library/Android/sdk`, `~/Android/Sdk`,
    `%LOCALAPPDATA%\Android\Sdk`)
 
-The last step is for MCP hosts and other GUI apps, which often start `hs`
+The last step is for MCP hosts and other GUI apps, which often start `mobax`
 without the shell's `PATH`. See also [Sharp edges](sharp-edges.md#adb-and-the-android-sdk).
