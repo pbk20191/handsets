@@ -203,6 +203,9 @@ struct App {
     mapping: Arc<Mutex<Option<Mapping>>>,
     cursor_pos: PhysicalPosition<f64>,
     dragging: bool,
+    /// Where the finger last was on the device, for a release the frame
+    /// can't place (outside the picture, or the window lost focus).
+    last_xy: Option<(i32, i32)>,
     input_tx: Option<Sender<InputCmd>>,
     // Device's actual display dimensions in pixels (from `info`).
     device_size: Option<(u32, u32)>,
@@ -250,26 +253,26 @@ impl ApplicationHandler<UserEvent> for App {
                 self.cursor_pos = position;
                 if self.dragging {
                     if let Some((dx, dy)) = self.current_device_xy() {
+                        self.last_xy = Some((dx, dy));
                         self.send(InputCmd::PointerMove(dx, dy));
                     }
                 }
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                if let Some((dx, dy)) = self.current_device_xy() {
-                    match state {
-                        ElementState::Pressed => {
-                            self.dragging = true;
-                            self.send(InputCmd::PointerDown(dx, dy));
-                        }
-                        ElementState::Released => {
-                            if self.dragging {
-                                self.send(InputCmd::PointerUp(dx, dy));
-                                self.dragging = false;
-                            }
-                        }
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
+                ElementState::Pressed => {
+                    if let Some((dx, dy)) = self.current_device_xy() {
+                        self.dragging = true;
+                        self.last_xy = Some((dx, dy));
+                        self.send(InputCmd::PointerDown(dx, dy));
                     }
                 }
-            }
+                // Released outside the picture (the letterbox, past the
+                // window's edge) still lifts the finger, where it last was:
+                // otherwise it stays down on the device.
+                ElementState::Released => self.lift(),
+            },
+            // Alt-Tab mid-drag: the release goes to another window.
+            WindowEvent::Focused(false) => self.lift(),
             WindowEvent::MouseWheel { delta, .. } => {
                 if let Some((dx, dy)) = self.current_device_xy() {
                     let pixels = match delta {
@@ -366,6 +369,17 @@ impl App {
         r.device_xy(mapping, (size.width, size.height), self.cursor_pos.x, self.cursor_pos.y)
     }
 
+    /// Ends a drag: the finger comes up at the cursor, or where it last was.
+    fn lift(&mut self) {
+        if !self.dragging {
+            return;
+        }
+        self.dragging = false;
+        if let Some((dx, dy)) = self.current_device_xy().or(self.last_xy) {
+            self.send(InputCmd::PointerUp(dx, dy));
+        }
+    }
+
     /// Push an input command toward the input thread. Drops silently if the
     /// channel is closed (input thread died).
     fn send(&self, cmd: InputCmd) {
@@ -378,17 +392,9 @@ impl App {
 // ---------- input thread ----------
 
 fn input_thread(host: String, port: u16, rx: Receiver<InputCmd>) {
-    // Persistent socket; on error, drop the channel by exiting.
-    let sock = match open(&host, port) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("viewer: input socket connect failed: {e}");
-            return;
-        }
-    };
-    let _ = sock.set_nodelay(true);
-    let _ = sock.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut sock = sock;
+    // One socket for every input; a failure reconnects (see `deliver`)
+    // instead of ending the thread, which would drop every gesture after it.
+    let mut sock = None;
     let mut hdr = [0u8; 4];
     loop {
         let next = match rx.recv() {
@@ -404,12 +410,8 @@ fn input_thread(host: String, port: u16, rx: Receiver<InputCmd>) {
                     Ok(InputCmd::PointerMove(x, y)) => latest = InputCmd::PointerMove(x, y),
                     Ok(other) => {
                         // Send the pending move, then the new non-move event.
-                        if send_one_with_ack(&mut sock, &latest, &mut hdr).is_err() {
-                            return;
-                        }
-                        if send_one_with_ack(&mut sock, &other, &mut hdr).is_err() {
-                            return;
-                        }
+                        deliver(&host, port, &mut sock, &latest, &mut hdr);
+                        deliver(&host, port, &mut sock, &other, &mut hdr);
                         latest = match rx.recv() { Ok(c) => c, Err(_) => return };
                         break;
                     }
@@ -421,8 +423,34 @@ fn input_thread(host: String, port: u16, rx: Receiver<InputCmd>) {
         } else {
             next
         };
-        if send_one_with_ack(&mut sock, &cmd, &mut hdr).is_err() {
-            return;
+        deliver(&host, port, &mut sock, &cmd, &mut hdr);
+    }
+}
+
+/// Sends `cmd`, (re)connecting as needed: a slow reply or a dropped socket
+/// costs at most this one input, with the reason on stderr, not the rest.
+fn deliver(host: &str, port: u16, sock: &mut Option<TcpStream>, cmd: &InputCmd, hdr: &mut [u8; 4]) {
+    for attempt in 0..2 {
+        if sock.is_none() {
+            match open(host, port) {
+                Ok(s) => {
+                    let _ = s.set_nodelay(true);
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+                    *sock = Some(s);
+                }
+                Err(e) => {
+                    eprintln!("viewer: input socket: {e}");
+                    return;
+                }
+            }
+        }
+        let Some(s) = sock.as_mut() else { return };
+        match send_one_with_ack(s, cmd, hdr) {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("viewer: input {}: {e}; reconnecting", if attempt == 0 { "failed" } else { "failed again" });
+                *sock = None;
+            }
         }
     }
 }
@@ -984,6 +1012,7 @@ fn main() {
         mapping,
         cursor_pos: PhysicalPosition::new(0.0, 0.0),
         dragging: false,
+        last_xy: None,
         input_tx: Some(input_tx),
         device_size,
     };

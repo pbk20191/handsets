@@ -55,7 +55,7 @@ internal class Input(private val ua: UiAutomation) {
             // A stray second DOWN — emit an UP first to keep the dispatcher happy.
             motion(
                 pointerDownTime, SystemClock.uptimeMillis(),
-                MotionEvent.ACTION_UP, pointerLastX, pointerLastY
+                MotionEvent.ACTION_UP, pointerLastX, pointerLastY, sync = false
             )
         }
         pointerActive = true
@@ -64,7 +64,7 @@ internal class Input(private val ua: UiAutomation) {
         pointerLastY = y
         motion(
             pointerDownTime, pointerDownTime,
-            MotionEvent.ACTION_DOWN, x, y
+            MotionEvent.ACTION_DOWN, x, y, sync = false
         )
     }
 
@@ -76,7 +76,7 @@ internal class Input(private val ua: UiAutomation) {
         pointerLastY = y
         motion(
             pointerDownTime, SystemClock.uptimeMillis(),
-            MotionEvent.ACTION_MOVE, x, y
+            MotionEvent.ACTION_MOVE, x, y, sync = false
         )
     }
 
@@ -88,7 +88,7 @@ internal class Input(private val ua: UiAutomation) {
         pointerLastY = y
         motion(
             pointerDownTime, SystemClock.uptimeMillis(),
-            MotionEvent.ACTION_UP, x, y
+            MotionEvent.ACTION_UP, x, y, sync = false
         )
         pointerActive = false
     }
@@ -196,7 +196,15 @@ internal class Input(private val ua: UiAutomation) {
     }
 
     // ---------- low-level helpers ----------
-    fun motion(downTime: Long, eventTime: Long, action: Int, x: Int, y: Int) {
+    /**
+     * Injects one touch event. [sync] waits until the window has handled it,
+     * so a `tap` or `swipe` returns after its effect has started. A streamed
+     * pointer (down/move/up from the viewer) passes false: the input queue
+     * keeps the order anyway, and a window slow to finish an event (the
+     * launcher just after Recents opens took 5 s) must not hold up the
+     * replies the stream paces itself by.
+     */
+    fun motion(downTime: Long, eventTime: Long, action: Int, x: Int, y: Int, sync: Boolean = true) {
         // Build a full-fidelity MotionEvent so gesture detectors that check
         // toolType + pressure (launcher swipes, ViewPager flings, AndroidX
         // GestureDetector) treat it as a real finger. The 6-arg
@@ -225,7 +233,7 @@ internal class Input(private val ua: UiAutomation) {
             0
         )
         try {
-            ua.injectInputEvent(ev, true)
+            ua.injectInputEvent(ev, sync)
         } finally {
             ev.recycle()
         }
