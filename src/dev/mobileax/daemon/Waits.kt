@@ -100,6 +100,31 @@ class Waits {
         }
     }
 
+    /** Accessibility events (and [touch]es) seen so far; a mark for [awaitSettle]. */
+    val seq: Long get() = eventSeq
+
+    /**
+     * Settle after an action taken once [sinceSeq] was read: wait up to
+     * [firstMs] for the first event after it (an action whose effect has not
+     * reached the tree yet looks quiet), then for [idleMs] of quiet.
+     *
+     * @return ms waited and whether any event arrived, or null on timeout.
+     */
+    suspend fun awaitSettle(sinceSeq: Long, firstMs: Long, idleMs: Long, timeoutMs: Long): Pair<Long, Boolean>? {
+        val start = System.currentTimeMillis()
+        val firstDeadline = start + minOf(firstMs, timeoutMs)
+        while (eventSeq == sinceSeq) {
+            val now = System.currentTimeMillis()
+            if (now >= firstDeadline) break
+            withTimeoutOrNull((firstDeadline - now).milliseconds) { nextEvent() }
+        }
+        val changed = eventSeq != sinceSeq
+        if (!changed) return (System.currentTimeMillis() - start) to false
+        val left = timeoutMs - (System.currentTimeMillis() - start)
+        if (left <= 0 || awaitIdle(idleMs, left) < 0) return null
+        return (System.currentTimeMillis() - start) to true
+    }
+
     /** @return ms until [check] first held, or -1 on timeout. */
     suspend fun awaitPredicate(timeoutMs: Long, check: suspend () -> Boolean): Long {
         val start = System.currentTimeMillis()

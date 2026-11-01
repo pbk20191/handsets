@@ -21,6 +21,7 @@ mod init;
 mod json;
 mod json_out;
 mod mcp;
+mod mcp_screen;
 mod mirror;
 mod output;
 mod provider;
@@ -49,7 +50,7 @@ fn main() -> ExitCode {
         return match mcp::serve(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("mobax mcp: {e}");
+                crate::errln!("mobax mcp: {e}");
                 ExitCode::from(1)
             }
         };
@@ -57,8 +58,8 @@ fn main() -> ExitCode {
     let opts = match parse_args(&args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("error: {e}\n");
-            eprintln!("{USAGE}");
+            crate::errln!("error: {e}\n");
+            crate::errln!("{USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -73,7 +74,7 @@ fn main() -> ExitCode {
             if let Some(code) = output::err_code_of(&e) {
                 ExitCode::from(code.exit_code())
             } else {
-                eprintln!("mobax: {e}");
+                crate::errln!("mobax: {e}");
                 ExitCode::from(1)
             }
         }
@@ -618,7 +619,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
             "--json" if positional.first() == Some(&"ui") => positional.push(a),
             "--json" => out_fmt = flags::OutFmt::Json,
             "-h" | "--help" => {
-                println!("{USAGE}");
+                crate::outln!("{USAGE}");
                 std::process::exit(0);
             }
             // Everything after `--` belongs to the verb (`mobax logs -- -s TAG`).
@@ -1062,7 +1063,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
 /// the device isn't attached or the daemon hasn't been brought up with
 /// `mobax use`. Keeps the global flag thin so it doesn't accidentally touch
 /// the daemon lifecycle.
-fn resolve_device_port(serial: &str) -> Result<u16, String> {
+pub(crate) fn resolve_device_port(serial: &str) -> Result<u16, String> {
     let rows = daemon::devices().map_err(|e| format!("adb devices: {e}"))?;
     let row = rows.iter().find(|r| r.serial == serial)
         .ok_or_else(|| format!("--device {serial}: not attached"))?;
@@ -1104,7 +1105,7 @@ fn run(opts: &Opts) -> io::Result<()> {
         Cmd::Adb(sub) => adb::run(&opts.host, opts.port, sub),
         Cmd::Connect(o) => {
             let port = daemon::connect(o)?;
-            eprintln!("daemon up on tcp:{port}");
+            crate::errln!("daemon up on tcp:{port}");
             Ok(())
         }
         Cmd::Disconnect(o) => daemon::disconnect(o),
@@ -1112,11 +1113,11 @@ fn run(opts: &Opts) -> io::Result<()> {
         Cmd::StateDaemon => state_cache::run_daemon(&opts.host, opts.port),
         Cmd::Shell => shell::run(&opts.host, opts.port),
         Cmd::Find { selector, flags } => {
-            run_find(&opts.host, opts.port, opts.out_fmt, selector, flags)
+            run_find(&mut Conn::connect(&opts.host, opts.port)?, opts.out_fmt, selector, flags)
         }
         Cmd::See(see) => run_see(&opts.host, opts.port, see),
         Cmd::Wait { spec, flags } => {
-            run_wait(&opts.host, opts.port, opts.out_fmt, spec, flags)
+            run_wait(&mut Conn::connect(&opts.host, opts.port)?, opts.out_fmt, spec, flags)
         }
         Cmd::Run { script, flags } => {
             run_script::run(&opts.host, opts.port, opts.out_fmt, script.as_deref(), flags.clone())
@@ -1133,7 +1134,7 @@ fn run(opts: &Opts) -> io::Result<()> {
             // Three Shell-passthrough calls glued client-side with header
             // lines — keeps the daemon's shell command simple (no quote
             // parsing needed) and gives a single readable dump.
-            let mut out = io::stdout().lock();
+            let mut out = crate::output::stdout();
             for ns in ["system", "secure", "global"] {
                 writeln!(out, "=== {ns} ===")?;
                 out.flush()?;
@@ -1149,7 +1150,7 @@ fn run(opts: &Opts) -> io::Result<()> {
             if body.starts_with(b"ERR:") {
                 return Err(io::Error::other(String::from_utf8_lossy(&body).into_owned()));
             }
-            let mut out = io::stdout().lock();
+            let mut out = crate::output::stdout();
             out.write_all(&body)?;
             if body.last() != Some(&b'\n') { out.write_all(b"\n")?; }
             out.flush()
@@ -1183,7 +1184,7 @@ fn run(opts: &Opts) -> io::Result<()> {
             if *watch {
                 let wire = format!("clip_watch interval_ms={interval_ms}");
                 conn.send_cmd(&wire)?;
-                let mut out = io::stdout().lock();
+                let mut out = crate::output::stdout();
                 loop {
                     let frame = conn.read_frame()?;
                     if frame.is_empty() { break; }
@@ -1209,7 +1210,7 @@ fn run(opts: &Opts) -> io::Result<()> {
                     return Err(io::Error::other(
                         String::from_utf8_lossy(&body).into_owned()));
                 }
-                let mut out = io::stdout().lock();
+                let mut out = crate::output::stdout();
                 out.write_all(&body)?;
                 if body.last() != Some(&b'\n') { out.write_all(b"\n")?; }
                 out.flush()
@@ -1375,7 +1376,7 @@ fn resolve_fill_selector(conn: &mut Conn, sel_in: &str, flags: &flags::ActionFla
 /// Build a daemon-grammar selector that uniquely names `node`. Prefers the
 /// full resource id when present (always unique); falls back to class + the
 /// node's own text when the widget is anonymous.
-fn node_to_daemon_selector(node: &json::Value) -> String {
+pub(crate) fn node_to_daemon_selector(node: &json::Value) -> String {
     let rid = selector::get_str(node, "rid").unwrap_or("");
     if !rid.is_empty() {
         return format!("id={rid}");
@@ -1621,7 +1622,7 @@ fn run_ui(host: &str, port: u16, format: UiFormat, windows: UiWindows) -> io::Re
     };
     let mut conn = Conn::connect(host, port)?;
     let body = conn.call(wire)?;
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     match format {
         UiFormat::Json => {
             out.write_all(&body)?;
@@ -1704,7 +1705,7 @@ fn run_see(host: &str, port: u16, opts: &SeeOpts) -> io::Result<()> {
         return Err(io::Error::other(String::from_utf8_lossy(&bytes).into_owned()));
     }
     std::fs::write(path, &bytes)?;
-    eprintln!("saved {} bytes to {path}", bytes.len());
+    crate::errln!("saved {} bytes to {path}", bytes.len());
     Ok(())
 }
 
@@ -1727,9 +1728,8 @@ fn see_screenshot_wire(opts: &SeeOpts, fmt: &str) -> String {
 /// `mobax wait <spec>` — smart-dispatch on `spec` shape. `flags` lets RPA
 /// scripts override the daemon-side default (10 s) so long-running things
 /// like cold app launches don't silently hit the timeout.
-fn run_wait(
-    host: &str,
-    port: u16,
+pub(crate) fn run_wait(
+    conn: &mut Conn,
     out_fmt: flags::OutFmt,
     spec: &str,
     f: &flags::ActionFlags,
@@ -1742,10 +1742,9 @@ fn run_wait(
         return reporter.ok("wait", "ok",
             json_out::Obj::new().n("slept_ms", ms as i64));
     }
-    let mut conn = Conn::connect(host, port)?;
     let timeout_ms = f.timeout_ms.unwrap_or(10_000);
     if let Some(sels) = css_selector(spec) {
-        return run_wait_selector(&mut conn, &reporter, spec, &sels, f, timeout_ms);
+        return run_wait_selector(conn, &reporter, spec, &sels, f, timeout_ms);
     }
     let wire: String = if let Some(rest) = spec.strip_prefix("idle") {
         let rest = rest.trim();
@@ -1832,9 +1831,8 @@ fn run_wait_selector(
 /// `mobax find SELECTOR` — match a CSS-like selector against the current
 /// dump_active tree and print one node summary per match. Honours
 /// --visible/--clickable/--enabled/--unique/--nth.
-fn run_find(
-    host: &str,
-    port: u16,
+pub(crate) fn run_find(
+    conn: &mut Conn,
     out_fmt: flags::OutFmt,
     sel: &str,
     f: &flags::ActionFlags,
@@ -1845,7 +1843,6 @@ fn run_find(
         Err(e) => return Err(reporter.fail("find",
             errors::ErrInfo::new(errors::ErrCode::BadArg, e))),
     };
-    let mut conn = Conn::connect(host, port)?;
     let body = conn.call(f.dump_wire())?;
     if let Some(e) = errors::parse_err(&body) {
         return Err(reporter.fail("find", e));
@@ -1884,14 +1881,14 @@ fn run_find(
     // (so machine consumers can read with --json | jq -c).
     match f.out(out_fmt) {
         flags::OutFmt::Human => {
-            let mut out = io::stdout().lock();
+            let mut out = crate::output::stdout();
             for n in &matches {
                 write_find_row(&mut out, n)?;
             }
             out.flush()?;
         }
         flags::OutFmt::Json => {
-            let mut out = io::stdout().lock();
+            let mut out = crate::output::stdout();
             for n in &matches {
                 let row = find_row_obj(n).finish();
                 let line = json_out::Obj::new()
@@ -1907,7 +1904,7 @@ fn run_find(
     Ok(())
 }
 
-fn write_find_row(out: &mut io::StdoutLock<'_>, n: &json::Value) -> io::Result<()> {
+fn write_find_row(out: &mut impl Write, n: &json::Value) -> io::Result<()> {
     let cls = selector::get_str(n, "cls").unwrap_or("");
     let id  = selector::get_str(n, "rid").unwrap_or("");
     let t   = selector::get_str(n, "text").unwrap_or("");
@@ -1978,13 +1975,11 @@ pub(crate) fn dispatch_session_verb(
         }
         Cmd::Wait { spec, mut flags } => {
             merge_session_defaults(&mut flags, sess);
-            run_wait(&sess.peer_host(), sess.peer_port(),
-                sess.default_out, &spec, &flags)
+            run_wait(&mut sess.conn, sess.default_out, &spec, &flags)
         }
         Cmd::Find { selector: sel, mut flags } => {
             merge_session_defaults(&mut flags, sess);
-            run_find(&sess.peer_host(), sess.peer_port(),
-                sess.default_out, &sel, &flags)
+            run_find(&mut sess.conn, sess.default_out, &sel, &flags)
         }
         Cmd::Submit { sel, mut flags } => {
             merge_session_defaults(&mut flags, sess);
@@ -2035,7 +2030,7 @@ pub(crate) fn dispatch_session_verb(
                 let reporter = output::Reporter::new(sess.default_out);
                 return Err(reporter.fail("do", e));
             }
-            let mut out = io::stdout().lock();
+            let mut out = crate::output::stdout();
             out.write_all(&body)?;
             if body.last() != Some(&b'\n') { out.write_all(b"\n")?; }
             out.flush()
@@ -2272,7 +2267,7 @@ fn run_info(host: &str, port: u16) -> io::Result<()> {
     header.extend(rows);
     let rows = header;
 
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     let n = rows.len().max(logo.len());
     for i in 0..n {
         let logo_line = logo.get(i).copied().unwrap_or("                ");
@@ -2291,7 +2286,7 @@ fn run_show_pkg(host: &str, port: u16, pkg: &str) -> io::Result<()> {
     let mut conn = Conn::connect(host, port)?;
     let path = conn.call(&format!("pm_path {pkg}"))?;
     let path_s = std::str::from_utf8(&path).unwrap_or("").trim();
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     if path_s.starts_with("ERR:") {
         return Err(io::Error::other(path_s.to_string()));
     }
@@ -2308,7 +2303,7 @@ fn run_show_pkg(host: &str, port: u16, pkg: &str) -> io::Result<()> {
 }
 
 fn write_response(cmd: &Cmd, body: &[u8]) -> io::Result<()> {
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     out.write_all(body)?;
     // Trailing newline only for text commands on a terminal — never for binary.
     let is_text = matches!(
@@ -2348,6 +2343,25 @@ impl Conn {
         sock.set_read_timeout(Some(Duration::from_secs(30)))?;
         sock.set_write_timeout(Some(Duration::from_secs(10)))?;
         Ok(Self { sock })
+    }
+
+    /// The daemon on device `serial` (instance `port`) through the adb
+    /// server, without a host port forward.
+    pub(crate) fn connect_device(serial: &str, port: u16) -> io::Result<Self> {
+        let sock = daemon::device_stream(serial, port)?;
+        sock.set_nodelay(true)?;
+        sock.set_read_timeout(Some(Duration::from_secs(30)))?;
+        sock.set_write_timeout(Some(Duration::from_secs(10)))?;
+        Ok(Self { sock })
+    }
+
+    /// False once the peer has closed (or sent bytes nobody asked for): a
+    /// pooled socket idle across a daemon restart.
+    pub(crate) fn is_alive(&self) -> bool {
+        if self.sock.set_nonblocking(true).is_err() { return false; }
+        let mut b = [0u8; 1];
+        let alive = matches!(self.sock.peek(&mut b), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock);
+        self.sock.set_nonblocking(false).is_ok() && alive
     }
 
     pub(crate) fn call(&mut self, cmd: &str) -> io::Result<Vec<u8>> {
@@ -2490,8 +2504,8 @@ fn bench(host: &str, port: u16, n: u32, json_output: bool) -> io::Result<()> {
 
     let mut results = Vec::with_capacity(cases.len());
     if !json_output {
-        eprintln!("warm-socket benchmark, n={n} per command");
-        eprintln!(
+        crate::errln!("warm-socket benchmark, n={n} per command");
+        crate::errln!(
             "device: {}{}{}  host: {}/{}  mobax {}",
             meta.device_label(),
             meta.display_label(),
@@ -2500,7 +2514,7 @@ fn bench(host: &str, port: u16, n: u32, json_output: bool) -> io::Result<()> {
             std::env::consts::ARCH,
             env!("CARGO_PKG_VERSION"),
         );
-        eprintln!(
+        crate::errln!(
             "{:<30}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>12}  {:>6}",
             "command", "min ms", "p50 ms", "p95 ms", "p99 ms", "mean ms", "bytes", "errors"
         );
@@ -2545,7 +2559,7 @@ fn bench(host: &str, port: u16, n: u32, json_output: bool) -> io::Result<()> {
                 last_error,
             };
             if !json_output {
-                eprintln!(
+                crate::errln!(
                     "{:<30}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>12}  {:>6}",
                     case.label, "-", "-", "-", "-", "-", last_len, errors,
                 );
@@ -2581,7 +2595,7 @@ fn bench(host: &str, port: u16, n: u32, json_output: bool) -> io::Result<()> {
             last_error,
         };
         if !json_output {
-            eprintln!(
+            crate::errln!(
                 "{:<30}  {:>9.3}  {:>9.3}  {:>9.3}  {:>9.3}  {:>9.3}  {:>12}  {:>6}",
                 result.label,
                 result.min_ms,
@@ -2596,7 +2610,7 @@ fn bench(host: &str, port: u16, n: u32, json_output: bool) -> io::Result<()> {
         results.push(result);
     }
     if json_output {
-        println!("{}", bench_json(n, &meta, &results));
+        crate::outln!("{}", bench_json(n, &meta, &results));
     }
     Ok(())
 }
@@ -2745,7 +2759,7 @@ fn bench_result_json(r: &BenchResult) -> String {
 fn print_devices() -> io::Result<()> {
     let mut rows = daemon::devices()?;
     if rows.is_empty() {
-        println!("no devices attached");
+        crate::outln!("no devices attached");
         return Ok(());
     }
     // If exactly one device is attached and no daemon is running for it
@@ -2756,16 +2770,16 @@ fn print_devices() -> io::Result<()> {
             port: None,
         };
         if let Ok(port) = daemon::connect(&opts) {
-            eprintln!("daemon up on tcp:{port} (auto)");
+            crate::errln!("daemon up on tcp:{port} (auto)");
             rows = daemon::devices()?;
         }
     }
-    println!(
+    crate::outln!(
         "{:<24} {:<10} {:<7} {:<8} {:<10} {:<16} model",
         "serial", "state", "jar", "running", "host_port", "sdk"
     );
     for r in rows {
-        println!(
+        crate::outln!(
             "{:<24} {:<10} {:<7} {:<8} {:<10} {:<16} {}",
             r.serial,
             r.state,
@@ -2779,7 +2793,7 @@ fn print_devices() -> io::Result<()> {
     Ok(())
 }
 
-fn is_local(host: &str) -> bool {
+pub(crate) fn is_local(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
@@ -2798,7 +2812,7 @@ fn try_auto_use(port: u16) -> Result<(), String> {
             };
             let p = daemon::connect(&opts)
                 .map_err(|e| format!("daemon::connect failed: {e}"))?;
-            eprintln!("daemon up on tcp:{p} (auto)");
+            crate::errln!("daemon up on tcp:{p} (auto)");
             Ok(())
         }
         n => Err(format!(

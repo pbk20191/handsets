@@ -144,7 +144,7 @@ pub(crate) fn run(host: &str, port: u16, cmd: &Cmd) -> io::Result<()> {
 /// Print a single field extracted from a cached snapshot. For "device" we
 /// just dump the whole JSON. For other fields we scan-and-extract.
 fn print_state_field(snap: &[u8], field: &str) -> io::Result<()> {
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     if field == "device" {
         out.write_all(snap)?;
     } else {
@@ -167,7 +167,7 @@ fn text_call(conn: &mut Conn, wire: &str) -> io::Result<()> {
     if body.starts_with(b"ERR:") {
         return Err(io::Error::other(String::from_utf8_lossy(&body).into_owned()));
     }
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     out.write_all(&body)?;
     // Always end on a newline so chained CLI calls don't run together.
     let needs_newline = !body.is_empty() && body[body.len() - 1] != b'\n';
@@ -180,7 +180,7 @@ fn text_call(conn: &mut Conn, wire: &str) -> io::Result<()> {
 /// Non-zero exit codes surface as an io::Error.
 fn shell_stream(conn: &mut Conn, wire: &str) -> io::Result<()> {
     conn.send_cmd(wire)?;
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     let mut first = true;
     loop {
         let frame = conn.read_frame()?;
@@ -235,7 +235,7 @@ fn run_logcat(conn: &mut Conn, q: &LogcatQuery) -> io::Result<()> {
     for a in &q.args { wire.push(' '); wire.push_str(a); }
     conn.send_cmd(&wire)?;
     let Some(n) = q.tail else {
-        let mut out = LineFilter { q, out: io::stdout().lock(), partial: Vec::new() };
+        let mut out = LineFilter { q, out: crate::output::stdout(), partial: Vec::new() };
         conn.recv_chunks_to(&mut out)?;
         return out.finish();
     };
@@ -243,7 +243,7 @@ fn run_logcat(conn: &mut Conn, q: &LogcatQuery) -> io::Result<()> {
     conn.recv_chunks_to(&mut all)?;
     let text = String::from_utf8_lossy(&all);
     let lines: Vec<&str> = text.lines().filter(|l| q.keeps(l)).collect();
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     for l in &lines[lines.len().saturating_sub(n)..] {
         writeln!(out, "{l}")?;
     }
@@ -313,7 +313,7 @@ fn shell_capture(conn: &mut Conn, wire: &str) -> io::Result<String> {
 
 fn stream_call(conn: &mut Conn, wire: &str) -> io::Result<()> {
     conn.send_cmd(wire)?;
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     conn.recv_chunks_to(&mut out)?;
     out.flush()
 }
@@ -337,7 +337,7 @@ fn do_install_multi(conn: &mut Conn, apks: &[String], reinstall: bool, grant: bo
     if reply.starts_with(b"ERR:") {
         return Err(io::Error::other(String::from_utf8_lossy(&reply).into_owned()));
     }
-    let mut out = io::stderr().lock();
+    let mut out = crate::output::stderr();
     out.write_all(&reply)?;
     out.write_all(b"\n")?;
     Ok(())
@@ -353,12 +353,12 @@ fn do_pull(conn: &mut Conn, device: &str, host: Option<&str>) -> io::Result<()> 
             n
         }
         None => {
-            let mut out = io::stdout().lock();
+            let mut out = crate::output::stdout();
             conn.recv_chunks_to(&mut out)?
         }
     };
     if host.is_some() {
-        eprintln!("pulled {written} bytes from {device}");
+        crate::errln!("pulled {written} bytes from {device}");
     }
     Ok(())
 }
@@ -374,7 +374,7 @@ fn do_push(conn: &mut Conn, host: &str, device: &str, mode: Option<u32>) -> io::
     if reply.starts_with(b"ERR:") {
         return Err(io::Error::other(String::from_utf8_lossy(&reply).into_owned()));
     }
-    eprintln!("pushed {written} bytes to {device}");
+    crate::errln!("pushed {written} bytes to {device}");
     Ok(())
 }
 
@@ -390,7 +390,7 @@ fn do_install(conn: &mut Conn, apk: &str, reinstall: bool, grant: bool) -> io::R
     if reply.starts_with(b"ERR:") {
         return Err(io::Error::other(String::from_utf8_lossy(&reply).into_owned()));
     }
-    let mut out = io::stderr().lock();
+    let mut out = crate::output::stderr();
     out.write_all(&reply)?;
     out.write_all(b"\n")?;
     Ok(())

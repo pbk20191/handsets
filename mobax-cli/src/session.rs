@@ -57,6 +57,22 @@ impl Session {
         })
     }
 
+    /// A session on a connection the caller already holds (the MCP server's
+    /// pooled sockets).
+    pub fn with_conn(conn: Conn, host: &str, port: u16) -> Self {
+        Self {
+            conn,
+            defaults: ActionFlags::default(),
+            default_out: OutFmt::Human,
+            cached_dump: None,
+            cached_tree: None,
+            dump_ttl_ms: 150,
+            continue_on_error: false,
+            peer_host: host.to_string(),
+            peer_port: port,
+        }
+    }
+
     pub fn peer_host(&self) -> String { self.peer_host.clone() }
     pub fn peer_port(&self) -> u16    { self.peer_port }
 
