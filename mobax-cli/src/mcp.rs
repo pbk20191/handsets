@@ -532,7 +532,7 @@ impl Engine {
         self.checkin(&t, sess);
         let mut screens = lock(&self.screens);
         let screen = Screen::from_dump(&dump, screens.get(&t));
-        let text = format!("{} · {} rows\n{}", screen.pkg, screen.len(), screen.table().trim_end());
+        let text = format!("{} · {} rows\n{}", screen.title(), screen.len(), screen.table().trim_end());
         screens.insert(t, screen);
         (true, text)
     }
@@ -553,7 +553,7 @@ impl Engine {
         let now = Screen::from_dump(&dump, Some(prev));
         let same_screen = matches!(now.change_from(Some(prev)), Change::Same | Change::Rows(_));
         let found = now.get(n).map(|r| (r.x, r.y, r.sel.clone()));
-        let reply = format!("{} · {} rows\n{}", now.pkg, now.len(), now.table().trim_end());
+        let reply = format!("{} · {} rows\n{}", now.title(), now.len(), now.table().trim_end());
         screens.insert(t, now);
         match found {
             Some(r) if had && same_screen => Ok(r),

@@ -1,4 +1,4 @@
-// `mobax watch [--json]` — follow the screen as it changes, pushed by the
+// `mobax watch [--json] [--min-ms N] [--moves]` — follow the screen as it changes, pushed by the
 // daemon (`ui_watch`), until interrupted. For code that reacts to the
 // screen without asking (a test harness, a reflex loop, a dashboard).
 //
@@ -17,14 +17,18 @@ use crate::json_out::Obj;
 use crate::mcp_screen::{Change, Screen};
 use crate::Conn;
 
-pub(crate) fn run(host: &str, port: u16, json_out: bool, min_ms: Option<u64>) -> io::Result<()> {
+pub(crate) fn run(host: &str, port: u16, json_out: bool, min_ms: Option<u64>, moves: bool) -> io::Result<()> {
     let mut conn = Conn::connect(host, port)?;
     // A frame may be far apart from the next on a still screen.
     conn.set_read_timeout(None)?;
-    conn.send_cmd(&match min_ms {
-        Some(ms) => format!("ui_watch min_ms={ms}"),
-        None => "ui_watch".to_string(),
-    })?;
+    let mut cmd = "ui_watch".to_string();
+    if let Some(ms) = min_ms {
+        cmd.push_str(&format!(" min_ms={ms}"));
+    }
+    if moves {
+        cmd.push_str(" moves=1");
+    }
+    conn.send_cmd(&cmd)?;
     let mut prev: Option<Screen> = None;
     let mut out = crate::output::stdout();
     loop {
@@ -36,7 +40,7 @@ pub(crate) fn run(host: &str, port: u16, json_out: bool, min_ms: Option<u64>) ->
         let screen = Screen::from_dump(&dump, prev.as_ref());
         let change = screen.change_from(prev.as_ref());
         if json_out {
-            let head = Obj::new().n("seq", seq).n("ev", ev).s("pkg", &screen.pkg);
+            let head = Obj::new().n("seq", seq).n("ev", ev).s("pkg", &screen.pkg).b("keyboard", screen.keyboard);
             let line = match change {
                 Change::Same => None,
                 Change::New => Some(head.s("change", "new").raw("rows", &screen.rows_json()).finish()),
@@ -48,8 +52,8 @@ pub(crate) fn run(host: &str, port: u16, json_out: bool, min_ms: Option<u64>) ->
         } else {
             match change {
                 Change::Same => {}
-                Change::New => writeln!(out, "#{seq} {} · new screen, {} rows\n{}", screen.pkg, screen.len(), screen.table().trim_end())?,
-                Change::Rows(lines) => writeln!(out, "#{seq} {}\n{}", screen.pkg, lines.join("\n"))?,
+                Change::New => writeln!(out, "#{seq} {} · new screen, {} rows\n{}", screen.title(), screen.len(), screen.table().trim_end())?,
+                Change::Rows(lines) => writeln!(out, "#{seq} {}\n{}", screen.title(), lines.join("\n"))?,
             }
         }
         out.flush()?;

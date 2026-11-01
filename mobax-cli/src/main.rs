@@ -112,7 +112,7 @@ enum Cmd {
     Snapshot,
     Screen,
     /// `mobax watch [--json] [--min-ms N]`: follow the screen.
-    Watch { json: bool, min_ms: Option<u64> },
+    Watch { json: bool, min_ms: Option<u64>, moves: bool },
     Quit,
     Bench { n: u32, json: bool },
     Adb(adb::Cmd),
@@ -1046,16 +1046,18 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         Some((&"watch", rest)) => {
             let mut json = out_fmt == flags::OutFmt::Json;
             let mut min_ms = None;
+            let mut moves = false;
             let mut it = rest.iter();
             while let Some(a) = it.next() {
                 match *a {
                     "--json" => json = true,
+                    "--moves" => moves = true,
                     "--min-ms" => min_ms = Some(it.next().and_then(|v| v.parse().ok())
                         .ok_or("--min-ms needs a number of milliseconds")?),
                     other => return Err(format!("watch: unknown argument {other:?}")),
                 }
             }
-            Cmd::Watch { json, min_ms }
+            Cmd::Watch { json, min_ms, moves }
         }
         Some((&"ping", _))      => Cmd::Ping,
         Some((&"snapshot", _))  => Cmd::Snapshot,
@@ -1104,7 +1106,7 @@ fn run(opts: &Opts) -> io::Result<()> {
             let mut conn = Conn::connect(&opts.host, opts.port)?;
             snapshot::run(&mut conn)
         }
-        Cmd::Watch { json, min_ms } => watch::run(&opts.host, opts.port, *json, *min_ms),
+        Cmd::Watch { json, min_ms, moves } => watch::run(&opts.host, opts.port, *json, *min_ms, *moves),
         Cmd::Screen => {
             let mut conn = Conn::connect(&opts.host, opts.port)?;
             screen::run(&mut conn)

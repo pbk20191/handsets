@@ -91,11 +91,15 @@ tap_and_settle x=NUM y=NUM [idle_ms=200] [timeout_ms=2000]   → ok elapsed=N id
 
 ## State — push-mirrored snapshot
 
-`ui_watch [min_ms=250]` keeps the socket and pushes the window tree (the
-`dump` payload) each time it changes: `{"seq":N,"ev":EVENTS,"dump":{…}}`.
-Driven by accessibility events, not polling; a dump equal to the last one is
-not sent, frames are at least `min_ms` apart (floor 50), the last change is
-always sent, and a slow reader gets only the newest frame. Hang up to stop.
+`ui_watch [min_ms=250] [moves=0|1]` keeps the socket and pushes the window
+tree (the `dump` payload) each time it changes:
+`{"seq":N,"ev":EVENTS,"dump":{…}}`. Driven by accessibility events, not
+polling; a dump equal to the last one is not sent, frames are at least
+`min_ms` apart (floor 50), the last change is always sent, and a slow reader
+gets only the newest frame. Changes in position only (an animation, a
+scroll in flight) are held until events have been quiet for 300 ms, then
+sent once with the resting positions; `moves=1` sends them as they happen.
+Hang up to stop.
 
 `state` reads a single field from the cached snapshot the daemon
 maintains via accessibility / lifecycle hooks. `state_watch` keeps the
