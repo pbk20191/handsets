@@ -49,6 +49,7 @@
     { "name": "fill", "description": "Set the text of an edit field in one step." },
     { "name": "swipe", "description": "Swipe up, down, left or right." },
     { "name": "go", "description": "Press back, home, recents, enter or another key." },
+    { "name": "batch", "description": "Run several steps (tap, fill, go, wait, …) in one call and reply with what changed." },
     { "name": "wait", "description": "Wait until text or a selector appears." },
     { "name": "watch", "description": "Wait until the screen changes (or some text shows) and reply with what changed." },
     { "name": "open", "description": "Launch an app by package, activity or label." },

@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use crate::json::{self, Value};
 use crate::ui_dump;
 
+#[derive(Clone)]
 pub struct Screen {
     /// App windows, bottom first, as `id:package`; a different set is a new screen.
     key: String,
@@ -24,6 +25,7 @@ pub struct Screen {
     next: u32,
 }
 
+#[derive(Clone)]
 pub struct Ref {
     pub n: u32,
     ident: String,
