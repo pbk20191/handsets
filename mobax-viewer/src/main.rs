@@ -901,7 +901,7 @@ fn main() {
     // Where the frames come from: a device on this machine through the adb
     // server (no host port), or a remote host's TCP port.
     let source = if mobax_core::device::is_local(&args.host) {
-        let device = mobax_core::device::target_serial().map_or_else(|e| format!("? ({e})"), |s| s);
+        let device = mobax_core::device::target_serial().unwrap_or_else(|e| format!("? ({e})"));
         let adb = mobax_core::adb_server::addr().map_or_else(|_| "?".to_string(), |a| a.to_string());
         format!("device={device} daemon=mobaxd_{} via adb server {adb}", args.port)
     } else {
