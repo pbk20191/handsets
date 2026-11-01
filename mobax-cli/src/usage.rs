@@ -69,6 +69,8 @@ More verbs:
                       [--tag T[:L]]… [--grep RE]… [--exclude TEXT]… [-i]
                       [--since 5m] [--format brief] [--crash | --buffer B]
                       [--clear] [-- LOGCAT ARGS…]  | mobax events
+  Follow      mobax watch [--json] [--min-ms N]  the screen as it changes (pushed,
+                                       not polled): new screens and +/~/- rows
   Scripting   mobax shell                 interactive REPL (also batch via stdin)
               mobax run [SCRIPT|-]        batch CLI verbs over one warm socket
               mobax init [PATH]           scaffold a starter script

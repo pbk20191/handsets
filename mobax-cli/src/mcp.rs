@@ -57,8 +57,10 @@ reply with what changed: + added, ~ changed and - removed rows, or the whole new
 screen. You rarely need `ui` after an action. A ref stays valid until a reply \
 shows a new screen.\n\
 \n\
-Use `wait` for something that takes time instead of calling `ui` repeatedly, and \
-`screenshot` only when the rows don't tell you enough (an image costs far more). \
+To wait for the screen, use `watch` (any change, or `until` some text shows) or \
+`wait` (a selector) instead of calling `ui` repeatedly; the device pushes \
+changes, so waiting is free. Use `screenshot` only when the rows don't tell \
+you enough (an image costs far more). \
 An error starts with ERR:CODE and says what to do next. If `use` finds no device, \
 an emulator can be started on the host with `android emulator start NAME` (give \
 the AVD hw.gpu.mode=host).";
@@ -421,20 +423,74 @@ impl Engine {
         let mut screens = lock(&self.screens);
         let prev = screens.get(t);
         let screen = Screen::from_dump(&dump, prev);
-        let mut out = format!("\n{note} · {}", screen.pkg);
-        match screen.change_from(prev) {
-            Change::Same => out.push_str(" · no visible change"),
-            Change::Rows(lines) => {
-                out.push('\n');
-                out.push_str(&lines.join("\n"));
-            }
-            Change::New => {
-                out.push_str(&format!(" · new screen, {} rows\n", screen.len()));
-                out.push_str(screen.table().trim_end());
-            }
-        }
+        let out = format!("\n{}", screen.describe(&note, screen.change_from(prev)));
         screens.insert(t.clone(), screen);
         Ok(out)
+    }
+
+    /// `watch`: waits, without polling, until the screen differs from the
+    /// one this server last showed the agent, or until a row shows `until`.
+    /// A dedicated socket carries the daemon's `ui_watch` push stream.
+    fn watch(&self, device: Option<&str>, until: Option<&str>, timeout_ms: u64) -> Reply {
+        let t = match self.target(device) {
+            Ok(t) => t,
+            Err(e) => return (false, e),
+        };
+        // Taken from the pool but never given back: the stream owns it.
+        let mut sess = match self.checkout(&t) {
+            Ok(s) => s,
+            Err(e) => return (false, e),
+        };
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(timeout_ms);
+        if let Err(e) = sess.conn.send_cmd("ui_watch min_ms=100") {
+            return (false, format!("ERR:DAEMON_ERROR:{e}"));
+        }
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let _ = sess.conn.set_read_timeout(Some(left));
+            let frame = match sess.conn.read_frame() {
+                Ok(f) => f,
+                Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => break,
+                Err(e) => return (false, format!("ERR:DAEMON_ERROR:{e}")),
+            };
+            if frame.starts_with(b"ERR:") {
+                return (false, String::from_utf8_lossy(&frame).into_owned());
+            }
+            let dump = match crate::watch::parse_frame(&frame) {
+                Ok((_, _, d)) => d,
+                Err(e) => return (false, format!("ERR:DAEMON_ERROR:{e}")),
+            };
+            let mut screens = lock(&self.screens);
+            let prev = screens.get(&t);
+            // Skip mid-transition frames (a starting window, rows that all
+            // vanished while the next activity draws); the next frame follows.
+            let had_rows = prev.is_some_and(|s| s.len() > 0);
+            if Screen::is_starting(&dump) || (had_rows && Screen::row_count(&dump) == 0) {
+                continue;
+            }
+            let screen = Screen::from_dump(&dump, prev);
+            let change = screen.change_from(prev);
+            let hit = match until {
+                Some(text) => screen.shows(text),
+                None => !matches!(change, Change::Same),
+            };
+            if hit {
+                let note = format!("after {} ms", started.elapsed().as_millis());
+                let text = screen.describe(&note, change);
+                screens.insert(t, screen);
+                return (true, text);
+            }
+        }
+        let ms = started.elapsed().as_millis();
+        match until {
+            Some(text) => (false, format!(
+                "ERR:TIMEOUT:{text:?} did not appear within {ms} ms\nCall `ui` to see where the screen is.")),
+            None => (true, format!("no change on screen in {ms} ms")),
+        }
     }
 
     /// The screen now, skipping mid-transition reads: a starting window, or
@@ -688,6 +744,15 @@ fn tools() -> Vec<Tool> {
             schema: obj(&[r#""target":{"type":"string"}"#, TIMEOUT, DEVICE], &["target"]),
         },
         Tool {
+            name: "watch",
+            description: "Wait until the screen differs from what you last saw, or until some text shows, then reply with what changed. The device pushes changes, so this costs nothing while waiting. Use it instead of calling `ui` again and again (a download finishing, a reply arriving, an animation ending).",
+            schema: obj(&[
+                r#""until":{"type":"string","description":"Wait for a row showing this text (case-insensitive) instead of any change"}"#,
+                r#""timeout_ms":{"type":"integer","description":"How long to wait (default 10000)"}"#,
+                DEVICE,
+            ], &[]),
+        },
+        Tool {
             name: "open",
             description: "Launch an app by package name (com.android.settings), PKG/.Activity, or app label. Replies with the screen it opens.",
             schema: obj(&[r#""app":{"type":"string"}"#, OBSERVE, DEVICE], &["app"]),
@@ -858,6 +923,13 @@ fn tools_call(params: Option<&Value>, engine: &Engine) -> Result<String, (i32, S
             argv.extend(["wait".into(), need("target")?]);
             timeout(&mut argv);
             Via::Run
+        }
+        "watch" => {
+            if !engine.in_process() {
+                return Ok(text_result("ERR:PRECONDITION:watch needs the daemon reachable through the local adb server", true));
+            }
+            let timeout = n("timeout_ms").filter(|t| *t > 0).unwrap_or(10_000) as u64;
+            return Ok(reply(engine.watch(dev, s("until").as_deref(), timeout)));
         }
         "open" => {
             argv.extend(["open".into(), need("app")?]);
