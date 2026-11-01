@@ -143,6 +143,17 @@ pub fn daemon_stream(host: &str, port: u16) -> io::Result<TcpStream> {
     })
 }
 
+/// What [`daemon_stream`] reaches, for a title or a log line: `SERIAL ·
+/// mobaxd_PORT` for a device here (the daemon's socket on it, not a host
+/// port), `HOST:PORT` for a remote one.
+pub fn describe_daemon(host: &str, port: u16) -> String {
+    if !crate::device::is_local(host) {
+        return format!("{host}:{port}");
+    }
+    let device = crate::device::target_serial().unwrap_or_else(|_| "?".to_string());
+    format!("{device} · mobaxd_{port}")
+}
+
 /// A `ui_watch` frame, `{"seq":N,"ev":E,"dump":{…}}` → (N, E, dump).
 pub fn parse_watch_frame(frame: &[u8]) -> io::Result<(i64, i64, Value)> {
     let text = std::str::from_utf8(frame).map_err(|e| io::Error::other(format!("ui_watch frame not utf-8: {e}")))?;
@@ -179,6 +190,14 @@ mod tests {
         let mut c = super::Conn::tcp("127.0.0.1", port).unwrap();
         assert_eq!(c.call("ping").unwrap(), b"pong");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn a_daemon_is_named_by_device_here_and_by_address_elsewhere() {
+        assert_eq!(super::describe_daemon("10.0.0.9", 9008), "10.0.0.9:9008");
+        crate::device::with_target("emulator-5554", || {
+            assert_eq!(super::describe_daemon("127.0.0.1", 9009), "emulator-5554 · mobaxd_9009");
+        });
     }
 
     #[test]
