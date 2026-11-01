@@ -67,6 +67,12 @@ pub fn is_set(v: &std::ffi::OsStr) -> bool {
     !s.is_empty() && !(s.starts_with("${") && s.ends_with('}'))
 }
 
+/// A daemon on this machine is reached through the adb server; any other
+/// host through a TCP port there.
+pub fn is_local(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
 /// $HOME, else %USERPROFILE%.
 pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")

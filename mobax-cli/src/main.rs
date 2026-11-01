@@ -15,6 +15,7 @@ mod act;
 pub(crate) use mobax_core::{errors, json, json_out, selector, ui_dump, xml_dump};
 pub(crate) use mobax_core::screen as mcp_screen;
 pub(crate) use mobax_core::selector::node_to_daemon_selector;
+pub(crate) use mobax_core::device::is_local;
 mod adb;
 mod daemon;
 mod fan;
@@ -2684,9 +2685,6 @@ fn print_devices() -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn is_local(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
-}
 
 /// Run the equivalent of `mobax use` against `serial` so daemon-needing
 /// verbs work without an explicit `mobax use` first. Returns a short human

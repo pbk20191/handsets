@@ -969,6 +969,7 @@ name = "mobax-tui"
 version = "0.4.0"
 dependencies = [
  "crossterm",
+ "mobax-core",
  "ratatui",
 ]
 

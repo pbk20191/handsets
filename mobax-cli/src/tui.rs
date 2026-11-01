@@ -16,24 +16,15 @@ pub(crate) fn run(host: &str, port: u16, active: bool) -> io::Result<()> {
          Then ensure it's on PATH, or run mobax from the workspace root.",
     ))?;
 
-    // The TUI speaks plain TCP: give it a host port to this device's
-    // daemon for as long as it runs.
-    let local = crate::is_local(host);
-    let (serial, port) = if local {
-        let serial = daemon::target_serial()?;
-        let hp = daemon::temporary_forward(&serial, port)?;
-        (Some(serial), hp)
-    } else {
-        (None, port)
-    };
+    // The TUI reaches the device through the adb server itself (mobax-core),
+    // so it only needs to know which device.
     let mut cmd = Command::new(bin);
     cmd.args(["--host", host, "--port", &port.to_string()]);
-    if active { cmd.arg("--active"); }
-    let status = cmd.status();
-    if let Some(s) = &serial {
-        daemon::remove_forward(s, port);
+    if crate::is_local(host) {
+        cmd.args(["--device", &daemon::target_serial()?]);
     }
-    let status = status?;
+    if active { cmd.arg("--active"); }
+    let status = cmd.status()?;
 
     if !status.success() {
         return Err(io::Error::other(format!("mobax-tui exited with status {status}")));

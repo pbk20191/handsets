@@ -26,8 +26,11 @@ const USAGE: &str = "\
 Usage: mobax-tui [options]
 
 Options:
-  --host H     daemon host (default 127.0.0.1)
-  --port P     daemon port (default 9008)
+  --device S   the device (default: the one `mobax use` picked last, or the
+               only one attached)
+  --host H     a remote daemon host; local devices go through the adb server
+  --port P     daemon instance on the device (default 9008); with --host,
+               the TCP port there
   --active     list only the focused window (default: every app window,
                including popups and bottom sheets in their own window)
   -h, --help   show this message
@@ -53,6 +56,7 @@ fn parse_args() -> Result<Args, String> {
             "--port" => a.port = it.next().ok_or("--port needs a value")?
                 .parse().map_err(|_| "bad --port".to_string())?,
             "--active" => a.active = true,
+            "--device" | "-s" => mobax_core::device::set_target(Some(it.next().ok_or("--device needs a SERIAL")?)),
             other => return Err(format!("unknown arg: {other}")),
         }
     }
