@@ -721,7 +721,12 @@ pub(crate) fn device_stream(serial: &str, port: u16) -> io::Result<TcpStream> {
     let addr = adb_server_addr()?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(500))?;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
-    for req in [format!("host:transport:{serial}"), device_socket(port)] {
+    // A refused transport means no such device (NotFound); a refused socket
+    // means the device is there but no daemon listens (ConnectionRefused).
+    for (req, kind) in [
+        (format!("host:transport:{serial}"), io::ErrorKind::NotFound),
+        (device_socket(port), io::ErrorKind::ConnectionRefused),
+    ] {
         s.write_all(format!("{:04x}{req}", req.len()).as_bytes())?;
         let mut status = [0u8; 4];
         s.read_exact(&mut status)?;
@@ -732,7 +737,7 @@ pub(crate) fn device_stream(serial: &str, port: u16) -> io::Result<TcpStream> {
                 .unwrap_or(0);
             let mut why = vec![0u8; n.min(512)];
             let _ = s.read_exact(&mut why);
-            return Err(io::Error::new(io::ErrorKind::ConnectionRefused, format!(
+            return Err(io::Error::new(kind, format!(
                 "{serial}: {req}: {}", String::from_utf8_lossy(&why).trim())));
         }
     }

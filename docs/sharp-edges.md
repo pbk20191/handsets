@@ -23,6 +23,13 @@
   path; `mobax` drops empty `ANDROID_HOME` / `ANDROID_SDK_ROOT` before asking it.
 - `android emulator start` has no `-gpu` flag; host GPU rendering has to come
   from `hw.gpu.mode=host` in the AVD's `config.ini` ([Emulators](emulator.md)).
+- Running one AVD more than once needs `-read-only` on every instance, and a
+  read-only emulator refuses snapshot save and load ("Snapshot save is
+  disabled because "-read-only" was specified"). Keep the emulator you reset
+  with snapshots as a single writable instance.
+- After a snapshot load or a reboot done by another tool, the daemon on the
+  device may be gone. `mobax` and the MCP server start it again on the next
+  call; `@N` refs from before are refused and the current screen comes back.
 - `logcat -t N` takes the last N lines *before* its priority, tag and regex
   filters, so `logcat -t 50 *:E` is often empty. `mobax logs --level / --tag /
   --grep / --exclude` reads the buffer and keeps the last N matching lines
