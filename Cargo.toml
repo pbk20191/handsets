@@ -7,7 +7,7 @@ members = ["mobax-core", "mobax-cli", "mobax-tui", "mobax-viewer"]
 default-members = ["mobax-cli", "mobax-tui"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 
 [profile.release]
