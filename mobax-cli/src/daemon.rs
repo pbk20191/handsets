@@ -15,7 +15,7 @@ use crate::state_cache;
 
 const DEVICE_JAR: &str = "/data/local/tmp/mobax.jar";
 const DEVICE_LOG: &str = "/data/local/tmp/mobax.log";
-const DEFAULT_PORT: u16 = 9008;
+pub(crate) const DEFAULT_PORT: u16 = 9008;
 
 /// Locate the on-device jar on the host. Probes (in order):
 ///   1. $MOBILEAX_JAR
@@ -722,6 +722,42 @@ fn adb_server_shell(serial: &str, cmd: &str) -> io::Result<String> {
     let mut out = Vec::with_capacity(256);
     s.read_to_end(&mut out)?;
     String::from_utf8(out).map_err(|_| io::Error::other("shell: non-utf8 output"))
+}
+
+/// A stream to the daemon on `serial` through the adb server itself
+/// (`host:transport:SERIAL`, then `localabstract:mobaxd_PORT`), so no host
+/// port is bound. After the two OKAYs the socket is a plain byte pipe to
+/// the daemon. Same data path as a forward (adb opens a forward's device
+/// stream on its first byte), so a request costs the same once connected.
+pub(crate) fn device_stream(serial: &str, port: u16) -> io::Result<TcpStream> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], ADB_SERVER_PORT));
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(500))?;
+    s.set_read_timeout(Some(Duration::from_secs(5)))?;
+    for req in [format!("host:transport:{serial}"), device_socket(port)] {
+        s.write_all(format!("{:04x}{req}", req.len()).as_bytes())?;
+        let mut status = [0u8; 4];
+        s.read_exact(&mut status)?;
+        if &status != b"OKAY" {
+            let mut len = [0u8; 4];
+            let n = s.read_exact(&mut len).ok()
+                .and_then(|_| usize::from_str_radix(std::str::from_utf8(&len).ok()?, 16).ok())
+                .unwrap_or(0);
+            let mut why = vec![0u8; n.min(512)];
+            let _ = s.read_exact(&mut why);
+            return Err(io::Error::new(io::ErrorKind::ConnectionRefused, format!(
+                "{serial}: {req}: {}", String::from_utf8_lossy(&why).trim())));
+        }
+    }
+    Ok(s)
+}
+
+/// The device `mobax use` bound to host `port`, else the only attached one.
+pub(crate) fn serial_for_port(port: u16) -> io::Result<String> {
+    let want = format!("tcp:{port}");
+    if let Some(f) = adb_server_list_forwards()?.into_iter().find(|f| f.host_spec == want) {
+        return Ok(f.serial);
+    }
+    adb_server_resolve_serial(None)
 }
 
 fn adb_server_list_forwards() -> io::Result<Vec<ForwardEntry>> {

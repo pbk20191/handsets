@@ -67,6 +67,13 @@ text        STRING                                       KeyEvents to the focuse
 wait_for_idle      [idle_ms=200] [timeout_ms=5000]     → ok elapsed=N idle=M | ERR:timeout
                                                          elapsed: ms waited; idle: ms the
                                                          screen had been quiet by then
+event_seq                                              → seq=N  (events seen so far)
+settle             since=N [first_ms=200] [idle_ms=120] [timeout_ms=1500]
+                                                       → ok elapsed=N changed=0|1 | ERR:TIMEOUT
+                                                         read event_seq before an action, then
+                                                         settle: waits up to first_ms for the
+                                                         action's first event, then idle_ms of
+                                                         quiet; changed=0 when nothing happened
 wait_for_text      text="…" [match=sub|exact] [scope=all|app|active] [timeout_ms=5000]
                                                        → ok x=… y=… w=… h=… elapsed=…
 wait_for_activity  n=COMPONENT [timeout_ms=5000]       prefix-matches the package

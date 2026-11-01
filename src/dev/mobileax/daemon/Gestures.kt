@@ -23,6 +23,8 @@ internal class Gestures(private val h: Server.Handlers) {
         "tap", "swipe", "down", "move", "up", "scroll", "key", "text" -> input(head, cmd)
         "swipe_dir" -> swipeDir(cmd)
         "wait_for_idle" -> waitForIdle(cmd)
+        "event_seq" -> utf8("seq=${waits.seq}")
+        "settle" -> settle(cmd)
         "wait_for_text" -> waitForText(cmd)
         "wait_for_activity" -> waitForActivity(cmd)
         "tap_and_dump" -> tapAnd(cmd, dump = true)
@@ -139,6 +141,18 @@ internal class Gestures(private val h: Server.Handlers) {
         // elapsed is the time spent waiting, as for the other waits; idle is
         // how long the screen had been quiet (often far longer than idle_ms).
         return utf8("ok elapsed=${System.currentTimeMillis() - start} idle=$quiet")
+    }
+
+    /** `settle since=SEQ`: see [Waits.awaitSettle]. */
+    private suspend fun settle(cmd: String): ByteArray {
+        val since = Server.longArg(cmd, "since", -1)
+        if (since < 0) return Server.errBytes("BAD_ARG:settle-needs-since")
+        val first = Server.longArg(cmd, "first_ms", 200)
+        val idle = Server.longArg(cmd, "idle_ms", 120)
+        val timeout = Server.longArg(cmd, "timeout_ms", 1500)
+        val r = waits.awaitSettle(since, first, idle, timeout)
+            ?: return Server.errBytes("TIMEOUT:settle:idle_ms=$idle timeout_ms=$timeout")
+        return utf8("ok elapsed=${r.first} changed=${if (r.second) 1 else 0}")
     }
 
     private suspend fun waitForText(cmd: String): ByteArray {

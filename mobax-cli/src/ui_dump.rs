@@ -17,6 +17,23 @@ struct Row {
     coords: String,   // bare "cx,cy" — no @, no parens
     flags:  String,   // space-joined metadata: long / scroll / check / checked / password,
                       // then role= / state= / … (the action flag `click` is implicit in `verb`)
+    x: i64,
+    y: i64,
+    sel: String,      // daemon-grammar selector for the node (`id=…` / `class=… text=…`)
+}
+
+/// One row of the `ui` table with what a caller needs to act on it.
+pub(crate) struct UiRow {
+    /// The rendered table line, without a trailing newline.
+    pub line: String,
+    /// What identifies the row across observations: verb, class and the
+    /// resource id (or the label when there is none), but not position or
+    /// state.
+    pub ident: String,
+    pub x: i64,
+    pub y: i64,
+    /// Daemon-grammar selector for the node.
+    pub sel: String,
 }
 
 /// Flat list of "interactive or content-bearing" nodes — skips pure
@@ -32,6 +49,16 @@ struct Row {
 /// only (TextView labels, headings) so the layout still aligns and the
 /// agent sees the context without picking a non-actionable target.
 pub(crate) fn render_interactive(roots: &[&Value]) -> String {
+    let mut out = String::with_capacity(8 * 1024);
+    for r in interactive_rows(roots) {
+        out.push_str(&r.line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The rows of [`render_interactive`], one per node, in table order.
+pub(crate) fn interactive_rows(roots: &[&Value]) -> Vec<UiRow> {
     let mut rows: Vec<Row> = Vec::new();
     for root in roots {
         collect_interactive(root, None, &mut rows);
@@ -44,26 +71,33 @@ pub(crate) fn render_interactive(roots: &[&Value]) -> String {
     let verb_w  = rows.iter().map(|r| r.verb.len()).max().unwrap_or(0);
     let class_w = rows.iter().map(|r| r.class.len()).max().unwrap_or(0);
 
-    let mut out = String::with_capacity(8 * 1024);
+    let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        out.push_str(&format!(
+        let mut line = format!(
             "{verb:<verb_w$}  {class:<class_w$}  {label}",
             verb  = r.verb,
             class = r.class,
             label = r.label,
-        ));
+        );
         if !r.id.is_empty() {
-            out.push_str("  ");
-            out.push_str(&r.id);
+            line.push_str("  ");
+            line.push_str(&r.id);
         }
-        out.push_str("  ");
-        out.push_str(&r.coords);
+        line.push_str("  ");
+        line.push_str(&r.coords);
         if !r.flags.is_empty() {
-            out.push_str("  [");
-            out.push_str(&r.flags);
-            out.push(']');
+            line.push_str("  [");
+            line.push_str(&r.flags);
+            line.push(']');
         }
-        out.push('\n');
+        // A resource id names the node even as its text changes (a field
+        // being typed into); without one the label is all there is.
+        let ident = if r.id.is_empty() {
+            format!("{}|{}|{}", r.verb, r.class, r.label)
+        } else {
+            format!("{}|{}|{}", r.verb, r.class, r.id)
+        };
+        out.push(UiRow { line, ident, x: r.x, y: r.y, sel: r.sel });
     }
     out
 }
@@ -123,10 +157,11 @@ fn collect_interactive(node: &Value, slot: Option<(&str, usize)>, rows: &mut Vec
     // still walk children: a parent with degenerate bounds can wrap a
     // child whose own bounds are valid.
     if is_interactive(node) && has_visible_bounds(node) {
-        let coords = match selector::bounds(node) {
-            Some((x1, y1, x2, y2)) => format!("{},{}", (x1+x2)/2, (y1+y2)/2),
-            None => "?,?".to_string(),
+        let (x, y) = match selector::bounds(node) {
+            Some((x1, y1, x2, y2)) => ((x1 + x2) / 2, (y1 + y2) / 2),
+            None => (-1, -1),
         };
+        let coords = if x < 0 { "?,?".to_string() } else { format!("{x},{y}") };
         let flags = selector::get_str(node, "flags").unwrap_or("");
         let text  = selector::get_str(node, "text").unwrap_or("");
         let desc  = selector::get_str(node, "desc").unwrap_or("");
@@ -192,6 +227,9 @@ fn collect_interactive(node: &Value, slot: Option<(&str, usize)>, rows: &mut Vec
             id:     id_field,
             coords,
             flags:  tags,
+            x,
+            y,
+            sel:    crate::node_to_daemon_selector(node),
         });
     }
 

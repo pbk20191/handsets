@@ -93,7 +93,7 @@ pub fn run(conn: &mut Conn) -> io::Result<()> {
 
     draw_bezel(&mut grid);
 
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     for row in &grid {
         let s: String = row.iter().filter(|&&c| c != SENTINEL).collect();
         let trimmed = s.trim_end();

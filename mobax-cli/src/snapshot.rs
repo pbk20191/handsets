@@ -37,7 +37,7 @@ pub fn run(conn: &mut Conn) -> io::Result<()> {
     // which rarely straddle row boundaries.
     regions.sort_by_key(|r| (r.bounds.1, r.bounds.0));
 
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     for r in &regions {
         writeln!(out, "{}", sanitize_label(&r.label))?;
     }

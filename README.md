@@ -125,6 +125,8 @@ Needs `adb`: `mobax` finds it through Google's Android CLI (`android info`), the
 
 MCP: each release ships `mobileax-<platform>.mcpb`, a one-click bundle for MCP hosts such as Claude Desktop (it carries `mobax` and the daemon). Or point any MCP client at `mobax mcp` (stdio), which serves the agent loop as tools: `use`, `ui`, `screenshot`, `tap`, `type`, `fill`, `swipe`, `go`, `wait`, `find`, `open`, `close`, `logcat` (filter by app, level, tag or regex), `info`, `drop`, plus `mobax` for any other verb.
 
+Over MCP, `ui` numbers the rows (`@1`, `@2`, …) and `tap` / `fill` take a row's `@N`; a ref from a screen that has since gone is refused rather than tapped. Actions (`tap`, `fill`, `type`, `swipe`, `go`, `open`) wait for the screen to settle and reply with what changed (`+` added, `~` changed, `-` removed rows, or the new screen), so the agent rarely needs a separate `ui`. The server keeps warm connections per device, opened through the adb server, and runs calls in parallel, so a long `wait` doesn't hold up other calls.
+
 Python bindings: `pip install ./bindings/python` (not on PyPI yet).
 
 ```python

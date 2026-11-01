@@ -45,6 +45,6 @@ pub fn run(path: Option<&str>) -> io::Result<()> {
         )));
     }
     fs::write(dest, TEMPLATE)?;
-    eprintln!("wrote {dest} ({} bytes). Run with: mobax run {dest}", TEMPLATE.len());
+    crate::errln!("wrote {dest} ({} bytes). Run with: mobax run {dest}", TEMPLATE.len());
     Ok(())
 }

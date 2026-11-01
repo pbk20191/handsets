@@ -69,7 +69,7 @@ fn parse_string_array(s: &str) -> io::Result<Vec<String>> {
 // ---------- JSON output ----------
 
 fn write_json(header: &[String], rows: &[Vec<json::Value>]) -> io::Result<()> {
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     out.write_all(b"[")?;
     for (ri, row) in rows.iter().enumerate() {
         if ri > 0 { out.write_all(b",")?; }
@@ -149,7 +149,7 @@ fn write_table(
         }
     }
 
-    let mut out = io::stdout().lock();
+    let mut out = crate::output::stdout();
     for row in &grid {
         for (i, cell) in row.iter().enumerate() {
             let s = truncate_chars(cell, widths[i]);
