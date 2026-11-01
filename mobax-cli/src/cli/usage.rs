@@ -51,7 +51,7 @@ More verbs:
                                        (--active: focused window only)
               mobax info | mobax show [top|PKG]
   Input       mobax tap X Y | mobax swipe DIR | mobax go back|home|recents|…
-              mobax type TEXT                  keystrokes to focused field
+              mobax type TEXT                  into the focused field, any script
               mobax fill SELECTOR TEXT         atomic ACTION_SET_TEXT
                                             SELECTOR is CSS-like (`#email`,
                                             `EditText[hint~=Mail]`), daemon

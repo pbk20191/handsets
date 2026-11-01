@@ -749,7 +749,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "type",
-            description: "Type text into the focused field (keystrokes). Replies with what changed on screen.",
+            description: "Type text into the focused field at the cursor, in any language (Korean, emoji, …). Replies with what changed on screen.",
             schema: obj(&[r#""text":{"type":"string"}"#, OBSERVE, DEVICE], &["text"]),
         },
         Tool {

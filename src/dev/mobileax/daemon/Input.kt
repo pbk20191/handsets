@@ -1,11 +1,13 @@
 package dev.mobileax.daemon
 
 import android.app.UiAutomation
+import android.os.Bundle
 import android.os.SystemClock
 import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -106,11 +108,63 @@ internal class Input(private val ua: UiAutomation) {
         keyEvent(t, t + 1, KeyEvent.ACTION_UP, code)
     }
 
+    /**
+     * Types `s` into the focused field. An editable field gets it inserted
+     * at the cursor in one piece, the way an IME commits text: key presses
+     * pass through the IME, which in a Korean layout turns "abc" into "뮻",
+     * and Hangul, CJK or emoji have no keys at all. A password field (its
+     * text reads back masked) or a view that only takes keys gets key
+     * presses.
+     */
     fun text(s: String?) {
-        checkNotNull(virtualKeyMap) { "no virtual key map" }
         if (s.isNullOrEmpty()) return
-        val events = virtualKeyMap.getEvents(s.toCharArray())
-        requireNotNull(events) { "char(s) unsupported by virtual keymap" }
+        // A tap on a search bar can open the search screen and settle before
+        // its field takes focus, or while it still slides in and turns text
+        // away. Give it a second. Runs on Work, so the wait blocks no looper.
+        val until = SystemClock.uptimeMillis() + 1000
+        var field: AccessibilityNodeInfo?
+        while (true) {
+            field = inputFocus(ua)?.also { it.refresh() }
+            if (field != null && (field.isPassword || commit(field, s))) break
+            if (SystemClock.uptimeMillis() >= until) {
+                check(field == null) { "the field refused the text" }
+                break
+            }
+            Thread.sleep(50)
+        }
+        if (field != null && !field.isPassword) return
+        val keymap = checkNotNull(virtualKeyMap) { "no virtual key map" }
+        checkNotNull(keymap.getEvents(s.toCharArray())) {
+            if (field == null) "no focused field, and the text has characters with no key" else "a password field takes only keyboard characters"
+        }
+        keys(s)
+    }
+
+    /** Inserts `run` at `node`'s cursor (replacing a selection); false if the field refused it. */
+    private fun commit(node: AccessibilityNodeInfo, run: String): Boolean {
+        val cur = if (node.isShowingHintText) "" else node.text?.toString().orEmpty()
+        var a = node.textSelectionStart
+        var b = node.textSelectionEnd
+        if (a !in 0..cur.length || b !in 0..cur.length) {
+            a = cur.length
+            b = cur.length
+        }
+        val lo = minOf(a, b)
+        val hi = maxOf(a, b)
+        val set = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, cur.substring(0, lo) + run + cur.substring(hi))
+        }
+        if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, set)) return false
+        val at = lo + run.length
+        node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, at)
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, at)
+        })
+        return true
+    }
+
+    private fun keys(s: String) {
+        val events = checkNotNull(virtualKeyMap?.getEvents(s.toCharArray())) { "char(s) unsupported by virtual keymap" }
         val base = SystemClock.uptimeMillis()
         for (i in events.indices) {
             val src = events[i]
