@@ -371,10 +371,17 @@ impl Engine {
             Err(e) => return (false, e),
         };
         let seq = if observe { event_seq(&mut sess.conn) } else { None };
+        let verb_started = Instant::now();
         let mut r = run_verb(&t.serial, &mut sess, argv);
+        let verb_ms = verb_started.elapsed().as_millis();
         if r.ok && observe {
-            let budget = settle_budget(argv.first().map(String::as_str).unwrap_or(""));
-            match self.observe_change(&t, &mut sess.conn, seq, budget) {
+            let mut budget = settle_budget(argv.first().map(String::as_str).unwrap_or(""));
+            // START_DELIVERED_TO_TOP: the app was already in front; nothing
+            // is coming, so don't wait seconds for it.
+            if argv.first().map(String::as_str) == Some("open") && r.text.contains("result=3") {
+                budget.first_ms = 300;
+            }
+            match self.observe_change(&t, &mut sess.conn, seq, budget, verb_ms) {
                 Ok((note, _)) if brief => r.text.push_str(&format!("\n{note}")),
                 Ok((_, change)) => r.text.push_str(&format!("\n{change}")),
                 Err(e) => {
@@ -392,7 +399,7 @@ impl Engine {
     /// Waits for the action that followed `seq` to settle, reads the screen,
     /// and describes it against the last one this server saw: (how it
     /// settled, that plus what changed).
-    fn observe_change(&self, t: &Target, conn: &mut Conn, seq: Option<u64>, b: Settle) -> io::Result<(String, String)> {
+    fn observe_change(&self, t: &Target, conn: &mut Conn, seq: Option<u64>, b: Settle, verb_ms: u128) -> io::Result<(String, String)> {
         let started = Instant::now();
         let deadline = started + Duration::from_millis(b.timeout_ms as u64);
         let settle = |conn: &mut Conn, since: Option<u64>, first_ms: u32| -> io::Result<Vec<u8>> {
@@ -403,20 +410,44 @@ impl Engine {
                 None => conn.call(&format!("wait_for_idle idle_ms={} timeout_ms={}", b.idle_ms, b.timeout_ms)),
             }
         };
+        // MOBAX_TIMING=1: where the time went, appended to the note.
+        let mut parts = vec![format!("verb {verb_ms}")];
+        let mut lap = Instant::now();
+        let mut mark = |what: &str, parts: &mut Vec<String>| {
+            parts.push(format!("{what} {}", lap.elapsed().as_millis()));
+            lap = Instant::now();
+        };
         let first = settle(conn, seq, b.first_ms)?;
+        mark("settle", &mut parts);
         let mut reacted = !String::from_utf8_lossy(&first).contains("changed=0");
         let still_moving = first.starts_with(b"ERR:");
         let had_rows = lock(&self.screens).get(t).is_some_and(|s| !s.is_empty());
         let mut dump = self.read_settled(conn, had_rows, deadline)?;
+        mark("dump", &mut parts);
         // A tap that starts another activity can go quiet before the new
         // screen draws (another process starting). If nothing visible changed,
         // give it one more short window to show up.
         if b.second_look_ms > 0 && self.unchanged(t, &dump) {
             let since = event_seq(conn);
             let again = settle(conn, since, b.second_look_ms)?;
+            mark("second look", &mut parts);
             if since.is_some() && String::from_utf8_lossy(&again).contains("changed=1") {
                 reacted = true;
                 dump = self.read_settled(conn, had_rows, deadline)?;
+                mark("dump", &mut parts);
+            }
+        }
+        if reacted {
+            dump = self.read_still(conn, dump, deadline)?;
+            mark("still", &mut parts);
+            // Mid-slide positions hold still until the slide ends; its end
+            // is the next event.
+            if Screen::is_sliding(&dump) {
+                let since = event_seq(conn);
+                settle(conn, since, 700)?;
+                let fresh = self.read_settled(conn, had_rows, deadline)?;
+                dump = self.read_still(conn, fresh, deadline)?;
+                mark("slide", &mut parts);
             }
         }
         let ms = started.elapsed().as_millis();
@@ -426,6 +457,11 @@ impl Engine {
             format!("settled in {ms} ms")
         } else {
             "no reaction on screen".to_string()
+        };
+        let note = if std::env::var_os("MOBAX_TIMING").is_some() {
+            format!("{note} [{}]", parts.join(" · "))
+        } else {
+            note
         };
         let mut screens = lock(&self.screens);
         let prev = screens.get(t);
@@ -513,6 +549,23 @@ impl Engine {
             }
             std::thread::sleep(Duration::from_millis(150));
         }
+    }
+
+    /// Window animations send no accessibility events, so a screen can be
+    /// quiet and still sliding in, its rows at coordinates about to change.
+    /// Reads again until two reads agree on the rows and where they are.
+    fn read_still(&self, conn: &mut Conn, mut dump: Value, deadline: Instant) -> io::Result<Value> {
+        let mut rows = Screen::from_dump(&dump, None).table();
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(60));
+            dump = parse_dump(&conn.call("dump")?)?;
+            let now = Screen::from_dump(&dump, None).table();
+            if now == rows {
+                break;
+            }
+            rows = now;
+        }
+        Ok(dump)
     }
 
     /// `dump` shows nothing new against the last screen seen on `t`.
