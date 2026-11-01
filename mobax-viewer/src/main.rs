@@ -898,9 +898,18 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // Where the frames come from: a device on this machine through the adb
+    // server (no host port), or a remote host's TCP port.
+    let source = if mobax_core::device::is_local(&args.host) {
+        let device = mobax_core::device::target_serial().map_or_else(|e| format!("? ({e})"), |s| s);
+        let adb = mobax_core::adb_server::addr().map_or_else(|_| "?".to_string(), |a| a.to_string());
+        format!("device={device} daemon=mobaxd_{} via adb server {adb}", args.port)
+    } else {
+        format!("host={}:{}", args.host, args.port)
+    };
     eprintln!(
-        "viewer: codec={:?} bitrate={} kbps native={} host={}:{}",
-        args.codec, args.bitrate_kbps, args.native, args.host, args.port
+        "viewer: codec={:?} bitrate={} kbps native={} {source}",
+        args.codec, args.bitrate_kbps, args.native
     );
 
     // Query device display size — required so input coordinates land in the
