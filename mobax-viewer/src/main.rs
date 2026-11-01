@@ -919,6 +919,12 @@ fn main() {
             eprintln!("viewer: device display = {w}x{h}");
             Some((w, h))
         }
+        // No such device, or no daemon on it: say so instead of opening a
+        // window that stays black.
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
+            eprintln!("viewer: {e}");
+            std::process::exit(1);
+        }
         Err(e) => {
             eprintln!(
                 "viewer: WARN failed to query device size ({e}); clicks may land in the wrong place"

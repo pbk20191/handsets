@@ -12,10 +12,8 @@ use std::process::Command;
 
 use crate::daemon;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Args;
-
-pub(crate) fn run(host: &str, port: u16, _args: Args) -> io::Result<()> {
+/// `extra`: the viewer's own flags (`--codec h264`, `--fps 30`, …).
+pub(crate) fn run(host: &str, port: u16, extra: &[String]) -> io::Result<()> {
     let viewer = daemon::locate_viewer().ok_or_else(|| io::Error::new(
         io::ErrorKind::NotFound,
         "mobax-viewer binary not found. Build it with:\n  \
@@ -30,6 +28,7 @@ pub(crate) fn run(host: &str, port: u16, _args: Args) -> io::Result<()> {
     if crate::is_local(host) {
         cmd.args(["--device", &daemon::target_serial()?]);
     }
+    cmd.args(extra);
     let status = cmd.status()?;
 
     if !status.success() {
