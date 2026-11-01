@@ -4,10 +4,10 @@
  * Not a launchable app: Main is started by app_process with the APK on
  * CLASSPATH (app_process only needs classes.dex inside a zip). AGP handles
  * the SDK (platform + build-tools, downloaded if missing), Kotlin, and R8;
- * hsJar copies the release APK to build/hs.jar, the path the CLI, installer
+ * mobaxJar copies the release APK to build/mobax.jar, the path the CLI, installer
  * and release workflow expect.
  *
- *   ./gradlew hsJar                       build build/hs.jar
+ *   ./gradlew mobaxJar                       build build/mobax.jar
  */
 plugins {
     id("com.android.application")
@@ -17,7 +17,7 @@ plugins {
 layout.buildDirectory = layout.projectDirectory.dir("build-gradle")
 
 android {
-    namespace = "dev.handsets.daemon"
+    namespace = "dev.mobileax.daemon"
     compileSdk = 36
 
     defaultConfig {
@@ -47,7 +47,7 @@ android {
     }
 
     packaging {
-        // Compress classes.dex: hs.jar is pushed over adb and shipped in release
+        // Compress classes.dex: mobax.jar is pushed over adb and shipped in release
         // tarballs, and nothing gains from mapping it uncompressed.
         dex.useLegacyPackaging = true
         resources {
@@ -83,14 +83,14 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 }
 
-val hsJar = tasks.register<Copy>("hsJar") {
+val mobaxJar = tasks.register<Copy>("mobaxJar") {
     group = "build"
-    description = "Builds build/hs.jar (the release APK) for app_process."
+    description = "Builds build/mobax.jar (the release APK) for app_process."
     from(tasks.named("assembleRelease").map { layout.buildDirectory.dir("outputs/apk/release") }) {
         include("*.apk")
-        rename { "hs.jar" }
+        rename { "mobax.jar" }
     }
     into(layout.projectDirectory.dir("build"))
 }
 
-tasks.named("assemble") { dependsOn(hsJar) }
+tasks.named("assemble") { dependsOn(mobaxJar) }

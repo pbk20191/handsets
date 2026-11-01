@@ -1,0 +1,2979 @@
+// mobax CLI.
+//
+// Talks to the on-device daemon over a TCP socket using a length-prefixed
+// binary protocol (uint32 big-endian length + payload, both directions).
+//
+// One-shot calls open a fresh socket each invocation. The `bench` subcommand
+// reuses a persistent socket to measure true wire-level latency.
+
+use std::io::{self, Read, Write};
+use std::net::TcpStream;
+use std::process::ExitCode;
+use std::time::{Duration, Instant};
+
+mod act;
+mod adb;
+mod daemon;
+mod errors;
+mod fan;
+mod flags;
+mod init;
+mod json;
+mod json_out;
+mod mcp;
+mod mirror;
+mod output;
+mod provider;
+mod run_script;
+mod screen;
+mod selector;
+mod session;
+mod shell;
+mod snapshot;
+mod state_cache;
+mod tap_text;
+mod term;
+mod tui;
+mod ui_dump;
+mod usage;
+mod xml_dump;
+
+const DEFAULT_HOST: &str = "127.0.0.1";
+const DEFAULT_PORT: u16 = 9008;
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `mobax mcp [GLOBAL OPTIONS]`: stdio MCP server; the options ride along on
+    // every tool call.
+    if args.first().map(String::as_str) == Some("mcp") {
+        return match mcp::serve(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("mobax mcp: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    let opts = match parse_args(&args) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("error: {e}\n");
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+
+    match run(&opts) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            // If the verb funnelled its failure through `output::Reporter`,
+            // the structured ErrCode rides in the error payload so we can
+            // surface a distinct exit status. Otherwise this is a generic
+            // I/O / setup failure and we fall back to 1.
+            if let Some(code) = output::err_code_of(&e) {
+                ExitCode::from(code.exit_code())
+            } else {
+                eprintln!("mobax: {e}");
+                ExitCode::from(1)
+            }
+        }
+    }
+}
+
+use usage::USAGE;
+
+#[derive(Debug)]
+struct Opts {
+    host: String,
+    port: u16,
+    out_fmt: flags::OutFmt,
+    cmd: Cmd,
+}
+
+#[derive(Debug, Default)]
+struct SeeOpts {
+    path: Option<String>,
+    size: Option<u32>,
+    native: bool,
+    secure_check: bool,
+    /// .json / .xml: every window instead of the focused one (as `mobax ui --all`).
+    all_windows: bool,
+}
+
+#[derive(Debug)]
+enum Cmd {
+    Ping,
+    Find { selector: String, flags: flags::ActionFlags },
+    Input(String),       // pre-built wire command, e.g. "tap x=720 y=1500"
+    TapText { query: String, flags: flags::ActionFlags },
+    TapXY { x: i32, y: i32, flags: flags::ActionFlags },
+    Snapshot,
+    Screen,
+    Quit,
+    Bench { n: u32, json: bool },
+    Adb(adb::Cmd),
+    Connect(daemon::ConnectOpts),
+    Disconnect(daemon::DisconnectOpts),
+    See(SeeOpts),
+    Wait { spec: String, flags: flags::ActionFlags },
+    Cp { src: String, dst: String },
+    ShowPkg(String),
+    Info,
+    TypeFocused { text: String, flags: flags::ActionFlags },
+    TypeInto { selector: String, text: String, flags: flags::ActionFlags },
+    SettingsListAll,
+    Ui { format: UiFormat, windows: UiWindows },
+    Devices,
+    StateDaemon,
+    Shell,
+    Run { script: Option<String>, flags: flags::ActionFlags },  // mobax run [SCRIPT|-]
+    Act(act::ActOpts),                                          // mobax act --tap … --until …
+    Fan { serials: Vec<String>, argv: Vec<String> },            // mobax fan SERIALS -- VERB ARGS
+    Init { path: Option<String> },                              // mobax init [PATH]
+    Submit { sel: Option<String>, flags: flags::ActionFlags },
+    Paste { sel: Option<String>, flags: flags::ActionFlags },
+    Links(String),
+    Sms { kind: String, limit: u32, json: bool },
+    Calls { kind: String, limit: u32, json: bool },
+    Contacts { limit: u32, json: bool },
+    Calendar { from_ms: Option<i64>, to_ms: Option<i64>, days: Option<i64>, limit: u32, json: bool },
+    Location { json: bool },
+    Notif { pkg: Option<String>, history: bool, limit: u32, json: bool },
+    Clip { text: Option<String>, watch: bool, interval_ms: u64 },
+    Tui { active: bool },
+}
+
+/// `mobax logs`: logcat with filters. Default `logcat -d -t 100` (last 100
+/// lines, exit); `--follow` streams instead.
+///   --tail N            lines to print (default 100)
+///   --pkg PKG           only PKG's running process (logcat --pid)
+///   --level V|D|I|W|E|F minimum priority
+///   --tag TAG[:L]       only these tags (repeatable); others are silenced
+///   --grep REGEX        lines matching REGEX (logcat -e; no spaces)
+///   --buffer B / --crash   main, system, crash, events, radio, all
+///   --clear             clear the buffers and exit
+fn parse_logs(rest: &[&str]) -> Result<Cmd, String> {
+    let mut follow = false;
+    let mut tail: u32 = 100;
+    let (mut pkg, mut pid, mut level) = (None::<String>, None::<u32>, None::<char>);
+    let mut tags: Vec<String> = Vec::new();
+    let mut greps: Vec<String> = Vec::new();
+    let mut buffers: Vec<String> = Vec::new();
+    let mut formats: Vec<String> = Vec::new();
+    let mut raw: Vec<String> = Vec::new();
+    let mut q = adb::LogcatQuery::default();
+    let mut clear = false;
+    let mut i = 0;
+    // The daemon splits logcat's argv on whitespace.
+    let no_space = |flag: &str, v: &str| -> Result<String, String> {
+        if v.is_empty() || v.chars().any(char::is_whitespace) {
+            Err(format!("{flag} takes one word (no spaces): {v:?}"))
+        } else {
+            Ok(v.to_string())
+        }
+    };
+    while i < rest.len() {
+        let flag = rest[i];
+        let mut value = || -> Result<&str, String> {
+            i += 1;
+            rest.get(i).copied().ok_or_else(|| format!("{flag} needs a value"))
+        };
+        match flag {
+            "-f" | "--follow" => follow = true,
+            "-t" | "--tail" => {
+                let v = value()?;
+                tail = v.parse().map_err(|_| format!("bad --tail {v}"))?;
+            }
+            "-p" | "--pkg" | "--package" => pkg = Some(no_space(flag, value()?)?),
+            "--pid" => {
+                let v = value()?;
+                pid = Some(v.parse().map_err(|_| format!("bad --pid {v}"))?);
+            }
+            "-l" | "--level" => {
+                let v = value()?;
+                level = match v.to_ascii_uppercase().as_str() {
+                    l @ ("V" | "D" | "I" | "W" | "E" | "F") => l.chars().next(),
+                    "VERBOSE" => Some('V'),
+                    "DEBUG" => Some('D'),
+                    "INFO" => Some('I'),
+                    "WARN" | "WARNING" => Some('W'),
+                    "ERROR" => Some('E'),
+                    "FATAL" => Some('F'),
+                    _ => return Err(format!("bad --level {v} (V D I W E F)")),
+                };
+            }
+            "--tag" => tags.push(no_space(flag, value()?)?),
+            "-e" | "--grep" => {
+                let v = value()?;
+                if v.is_empty() {
+                    return Err(format!("{flag} needs a pattern"));
+                }
+                greps.push(v.to_string());
+            }
+            "-x" | "--exclude" => {
+                let v = value()?;
+                if v.is_empty() {
+                    return Err(format!("{flag} needs text"));
+                }
+                q.exclude.push(v.to_string());
+            }
+            "-i" | "--ignore-case" => q.ignore_case = true,
+            "--since" => {
+                let v = value()?;
+                q.since_secs = Some(parse_since(v)
+                    .ok_or_else(|| format!("bad --since {v} (e.g. 90, 30s, 5m, 2h)"))?);
+            }
+            "-v" | "--format" => {
+                let v = value()?;
+                if !LOGCAT_FORMATS.contains(&v) {
+                    return Err(format!("bad --format {v} ({})", LOGCAT_FORMATS.join(" ")));
+                }
+                formats.push(v.to_string());
+            }
+            "-b" | "--buffer" => buffers.push(no_space(flag, value()?)?),
+            "--crash" => buffers.push("crash".into()),
+            "-c" | "--clear" => clear = true,
+            "--" => {
+                for a in &rest[i + 1..] {
+                    raw.push(no_space("logcat argument", a)?);
+                }
+                break;
+            }
+            other => return Err(format!("unknown logs arg: {other}")),
+        }
+        i += 1;
+    }
+    if pkg.is_some() && pid.is_some() {
+        return Err("--pkg and --pid are exclusive".into());
+    }
+    let mut args: Vec<String> = Vec::new();
+    for b in &buffers {
+        args.extend(["-b".to_string(), b.clone()]);
+    }
+    if clear {
+        args.push("-c".into());
+        q.args = args;
+        return Ok(Cmd::Adb(adb::Cmd::Logcat(q)));
+    }
+    if let Some(p) = pid {
+        args.push(format!("--pid={p}"));
+    }
+    for f in &formats {
+        args.extend(["-v".to_string(), f.clone()]);
+    }
+    // logcat's -t counts before its priority / tag / regex filters (and
+    // before --exclude), so with any of those only the host's tail applies.
+    let filtered = level.is_some() || !tags.is_empty() || !greps.is_empty()
+        || !q.exclude.is_empty() || !raw.is_empty();
+    if !follow {
+        args.push("-d".into());
+        if !filtered && q.since_secs.is_none() {
+            args.extend(["-t".to_string(), tail.to_string()]);
+        }
+        q.tail = Some(tail as usize);
+    }
+    if !greps.is_empty() {
+        args.extend(["-e".to_string(), logcat_regex(&greps, q.ignore_case)]);
+    }
+    args.extend(raw);
+    // Filter specs go last: TAG:LEVEL … *:S, or *:LEVEL alone.
+    let lvl = level.unwrap_or('V');
+    if !tags.is_empty() {
+        for t in tags {
+            args.push(if t.contains(':') { t } else { format!("{t}:{lvl}") });
+        }
+        args.push("*:S".into());
+    } else if let Some(l) = level {
+        args.push(format!("*:{l}"));
+    }
+    q.args = args;
+    q.pkg = pkg;
+    Ok(Cmd::Adb(adb::Cmd::Logcat(q)))
+}
+
+/// logcat's `-v` formats and format modifiers.
+const LOGCAT_FORMATS: &[&str] = &[
+    "brief", "long", "process", "raw", "tag", "thread", "threadtime", "time",
+    "color", "descriptive", "epoch", "monotonic", "printable", "uid", "usec", "UTC", "year", "zone",
+];
+
+/// `90`, `30s`, `5m`, `2h` → seconds.
+fn parse_since(v: &str) -> Option<u64> {
+    let v = v.trim();
+    let (num, mult) = match v.chars().last()? {
+        's' => (&v[..v.len() - 1], 1),
+        'm' => (&v[..v.len() - 1], 60),
+        'h' => (&v[..v.len() - 1], 3600),
+        _ => (v, 1),
+    };
+    num.parse::<u64>().ok().filter(|&n| n > 0).map(|n| n * mult)
+}
+
+/// One `-e` regex for logcat (ECMAScript, matched on the device) from
+/// several patterns, OR'd. Whitespace becomes `\xHH` because the daemon
+/// splits logcat's argv on it; `ignore_case` spells each letter both ways,
+/// since logcat's regex has no case-insensitive flag. Letters at either end
+/// of a class range (`[a-z]`) stay as written.
+fn logcat_regex(patterns: &[String], ignore_case: bool) -> String {
+    let one = |p: &str| -> String {
+        let chars: Vec<char> = p.chars().collect();
+        let mut out = String::with_capacity(p.len() * 2);
+        let mut in_class = false;
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '\\' {
+                // Copy the escape whole: \xhh and \uhhhh carry hex letters.
+                let n = match chars.get(i + 1) { Some('x') => 4, Some('u') => 6, Some(_) => 2, None => 1 };
+                out.extend(&chars[i..(i + n).min(chars.len())]);
+                i += n;
+                continue;
+            }
+            if c.is_whitespace() {
+                out.push_str(&format!("\\x{:02x}", c as u32 & 0xff));
+            } else if c == '[' && !in_class {
+                in_class = true;
+                out.push(c);
+            } else if c == ']' && in_class {
+                in_class = false;
+                out.push(c);
+            } else if ignore_case && c.is_ascii_alphabetic() {
+                let other = if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() };
+                if !in_class {
+                    out.push_str(&format!("[{c}{other}]"));
+                } else if chars.get(i + 1) == Some(&'-') || (i > 0 && chars[i - 1] == '-') {
+                    out.push(c);
+                } else {
+                    out.push(c);
+                    out.push(other);
+                }
+            } else {
+                out.push(c);
+            }
+            i += 1;
+        }
+        out
+    };
+    match patterns {
+        [p] => one(p),
+        _ => patterns.iter().map(|p| format!("(?:{})", one(p))).collect::<Vec<_>>().join("|"),
+    }
+}
+
+// SMS type codes — Android Telephony.TextBasedSmsColumns.
+const SMS_TYPES: &[(i64, &str)] = &[
+    (1, "inbox"), (2, "sent"), (3, "draft"),
+    (4, "outbox"), (5, "failed"), (6, "queued"),
+];
+// Call log type codes — Android CallLog.Calls.TYPE.
+const CALL_TYPES: &[(i64, &str)] = &[
+    (1, "in"), (2, "out"), (3, "missed"), (4, "voicemail"),
+    (5, "rejected"), (6, "blocked"), (7, "external"),
+];
+// Phone-number type codes — Android ContactsContract.CommonDataKinds.Phone.
+const PHONE_TYPES: &[(i64, &str)] = &[
+    (1, "home"),     (2, "mobile"),     (3, "work"),
+    (4, "fax-work"), (5, "fax-home"),   (6, "pager"),
+    (7, "other"),    (9, "car"),        (10, "company"),
+    (12, "main"),    (17, "work-mob"),
+];
+
+#[derive(Debug, Clone, Copy)]
+enum UiFormat { Human, Interactive, Json, Xml }
+
+/// Which windows `mobax ui` reads: the app's own (activity plus its dialogs
+/// and popups, the default), only the focused one, or every window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum UiWindows { App, Active, All }
+
+fn parse_use(rest: &[&str]) -> Result<daemon::ConnectOpts, String> {
+    let mut opts = daemon::ConnectOpts { serial: None, port: None };
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "-s" | "--device" => {
+                i += 1;
+                opts.serial = Some(rest.get(i).ok_or("--device needs a SERIAL")?.to_string());
+            }
+            "--port" => {
+                i += 1;
+                opts.port = Some(rest.get(i).ok_or("--port needs a value")?
+                    .parse().map_err(|_| "invalid --port".to_string())?);
+            }
+            serial if !serial.starts_with('-') && opts.serial.is_none() => {
+                opts.serial = Some(serial.to_string());
+            }
+            other => return Err(format!("unknown connect arg: {other}")),
+        }
+        i += 1;
+    }
+    Ok(opts)
+}
+
+fn parse_drop(rest: &[&str]) -> Result<daemon::DisconnectOpts, String> {
+    let mut opts = daemon::DisconnectOpts { serial: None, keep_jar: false };
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "-s" | "--device" => {
+                i += 1;
+                opts.serial = Some(rest.get(i).ok_or("--device needs a SERIAL")?.to_string());
+            }
+            "--keep-jar" => opts.keep_jar = true,
+            other => return Err(format!("unknown disconnect arg: {other}")),
+        }
+        i += 1;
+    }
+    Ok(opts)
+}
+
+/// `mobax tap` — text-lookup when arg isn't a pair of integers, raw coords
+/// when it is. Strips the shared ActionFlags surface first so RPA scripts
+/// can `mobax tap "Login" --visible --unique --timeout 5s --retries 3`.
+fn parse_tap(rest: &[&str]) -> Result<Cmd, String> {
+    let mut flags = flags::ActionFlags::default();
+    let positional = flags.take(rest)?;
+    if positional.is_empty() {
+        return Err("tap needs either TEXT or X Y coords".into());
+    }
+    if positional.len() == 2 {
+        let (x, y) = (positional[0].parse::<i32>(), positional[1].parse::<i32>());
+        if let (Ok(x), Ok(y)) = (x, y) {
+            return Ok(Cmd::TapXY { x, y, flags });
+        }
+    }
+    if positional.len() == 1 && positional[0].parse::<i32>().is_ok() {
+        return Err("tap with a single number is ambiguous — pass two ints for coords, or quote text".into());
+    }
+    Ok(Cmd::TapText { query: positional.join(" "), flags })
+}
+
+/// True if `s` looks like a package name: dot-separated, no slash.
+fn is_pkg(s: &str) -> bool {
+    !s.contains('/') && s.contains('.') &&
+        s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+}
+
+/// Friendly "did you mean" for retired verbs.
+fn suggest(old: &str) -> String {
+    let hint = match old {
+        "devices"      => Some("mobax"),
+        "connect"      => Some("mobax use"),
+        "disconnect"   => Some("mobax drop"),
+        "screenshot"   => Some("mobax see <PATH.jpg|.png>"),
+        "dump" | "dump-active" => Some("mobax see <PATH.xml|.json>"),
+        "query"        => Some("mobax find <SELECTOR>"),
+        "mirror"       => Some("mobax see   (bare opens the viewer)"),
+        "pull" | "push" => Some("mobax cp  (device:/path host:/path or reverse)"),
+        "pm"           => Some("mobax apps / mobax install / mobax uninstall / mobax show <pkg>"),
+        "am"           => Some("mobax open / mobax close / mobax watch events"),
+        "getprop" | "setprop" => Some("mobax prop KEY [VAL]"),
+        "logcat"       => Some("mobax logs"),
+        "monitor"      => Some("mobax events"),
+        "watch"        => Some("mobax logs | mobax events | mobax do state_watch"),
+        "dumpsys"      => Some("mobax do dumpsys <svc>"),
+        "state"        => Some("mobax show  /  mobax watch"),
+        "input"        => Some("mobax tap / mobax type / mobax go / mobax swipe"),
+        _              => None,
+    };
+    match hint {
+        Some(h) => format!("unknown command: {old}  — try `{h}`"),
+        None    => format!("unknown command: {old}"),
+    }
+}
+
+/// `mobax dev <sub>` — explicit namespace for the daemon-debugging verbs.
+/// Bare `mobax dev` prints what's available; `mobax dev ping` etc. dispatch the
+/// same `Cmd` variants the top-level aliases produce.
+fn parse_dev(rest: &[&str]) -> Result<Cmd, String> {
+    const HELP: &str = "\
+mobax dev <sub>:
+  ping              round-trip the daemon socket
+  snapshot          print the cached state JSON
+  screen            print one screenshot frame to stdout
+  bench [-n N] [--json]  timed wire-call benchmark (default 50 iterations)
+  quit              ask the daemon to exit (`mobax drop` is friendlier)
+  state-daemon      run the host-side state mirror (used by `mobax use`)";
+    match rest.split_first() {
+        None => Err(HELP.to_string()),
+        Some((&"ping",         _))   => Ok(Cmd::Ping),
+        Some((&"snapshot",     _))   => Ok(Cmd::Snapshot),
+        Some((&"screen",       _))   => Ok(Cmd::Screen),
+        Some((&"quit",         _))   => Ok(Cmd::Quit),
+        Some((&"state-daemon", _))   => Ok(Cmd::StateDaemon),
+        Some((&"bench",        more)) => parse_bench(more),
+        Some((other, _)) => Err(format!("mobax dev: unknown sub-verb '{other}'\n{HELP}")),
+    }
+}
+
+fn parse_bench(rest: &[&str]) -> Result<Cmd, String> {
+    let mut n: u32 = 50;
+    let mut json = false;
+    let mut j = 0;
+    while j < rest.len() {
+        match rest[j] {
+            "-n" => {
+                j += 1;
+                n = rest.get(j).ok_or("-n needs a value")?.parse()
+                    .map_err(|_| "invalid -n value")?;
+            }
+            "--json" => json = true,
+            other => return Err(format!("unknown bench arg: {other}")),
+        }
+        j += 1;
+    }
+    if n == 0 {
+        return Err("-n must be greater than 0".into());
+    }
+    Ok(Cmd::Bench { n, json })
+}
+
+fn parse_see(rest: &[&str]) -> Result<SeeOpts, String> {
+    let mut opts = SeeOpts::default();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--size" => {
+                i += 1;
+                let n: u32 = rest.get(i).ok_or("--size needs N")?.parse()
+                    .map_err(|_| "invalid --size value")?;
+                if n == 0 {
+                    return Err("--size must be greater than 0".into());
+                }
+                opts.size = Some(n);
+            }
+            "--native" | "--max" => opts.native = true,
+            "--secure-check" | "--secure" => opts.secure_check = true,
+            "--all" => opts.all_windows = true,
+            path if path.starts_with('-') => return Err(format!("unknown see arg: {path}")),
+            path => {
+                if opts.path.is_some() {
+                    return Err("see takes at most one PATH (extension picks format)".into());
+                }
+                opts.path = Some(path.to_string());
+            }
+        }
+        i += 1;
+    }
+    if opts.native && opts.size.is_some() {
+        return Err("see: --native and --size are mutually exclusive".into());
+    }
+    if opts.path.is_none() && (opts.size.is_some() || opts.native || opts.secure_check || opts.all_windows) {
+        return Err("see: capture flags need a PATH; bare `mobax see` opens the viewer".into());
+    }
+    Ok(opts)
+}
+
+/// Shared arg parser for the simple provider verbs (`sms`, `calls`,
+/// `contacts`): consumes `--limit N` and `--json`, collects anything
+/// else as positional tokens.
+fn parse_provider_common<'a>(rest: &[&'a str]) -> Result<(u32, bool, Vec<&'a str>), String> {
+    let mut limit = 50_u32;
+    let mut json = false;
+    let mut positional: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--limit" => {
+                i += 1;
+                limit = rest.get(i).ok_or("--limit needs N")?.parse()
+                    .map_err(|_| "bad --limit".to_string())?;
+            }
+            "--json" => json = true,
+            other => positional.push(other),
+        }
+        i += 1;
+    }
+    Ok((limit, json, positional))
+}
+
+fn parse_args(args: &[String]) -> Result<Opts, String> {
+    let mut host = DEFAULT_HOST.to_string();
+    let mut port = DEFAULT_PORT;
+    let mut out_fmt = flags::OutFmt::from_env();
+    let mut device_serial: Option<String> = None;
+    let mut positional: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "--host" => {
+                i += 1;
+                host = args.get(i).ok_or("--host needs a value")?.clone();
+            }
+            "--port" => {
+                i += 1;
+                port = args
+                    .get(i)
+                    .ok_or("--port needs a value")?
+                    .parse()
+                    .map_err(|_| "invalid --port".to_string())?;
+            }
+            "-s" | "--device" => {
+                i += 1;
+                device_serial = Some(args.get(i)
+                    .ok_or("--device needs a SERIAL")?.clone());
+            }
+            // `mobax ui --json` is the raw dump, not JSON result records.
+            "--json" if positional.first() == Some(&"ui") => positional.push(a),
+            "--json" => out_fmt = flags::OutFmt::Json,
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
+            // Everything after `--` belongs to the verb (`mobax logs -- -s TAG`).
+            "--" => {
+                positional.extend(args[i..].iter().map(String::as_str));
+                break;
+            }
+            _ => positional.push(a),
+        }
+        i += 1;
+    }
+
+    // During `use` and `drop`, `--device SERIAL` selects the ADB device to
+    // bootstrap or tear down. Other verbs use it to route to a daemon that
+    // `mobax use` already started.
+    let selects_device = matches!(positional.first(), Some(&"use") | Some(&"drop"));
+    if !selects_device {
+        if let Some(serial) = device_serial.as_deref() {
+            {
+                let p = resolve_device_port(serial)?;
+                port = p
+            }
+        }
+    }
+
+    let cmd = match positional.split_first() {
+        // Bare `mobax` lists devices — Reitz-style: the noun is implicit.
+        None => Cmd::Devices,
+
+        // ─── Lifecycle ────────────────────────────────────────────────
+        Some((&"use", rest)) => {
+            let mut connect = parse_use(rest)?;
+            if let Some(serial) = device_serial.as_deref() {
+                if let Some(selected) = connect.serial.as_deref() {
+                    if selected != serial {
+                        return Err("conflicting device selectors for `mobax use`".into());
+                    }
+                }
+                connect.serial = Some(serial.to_string());
+            }
+            Cmd::Connect(connect)
+        }
+        Some((&"drop", rest)) => {
+            let mut drop = parse_drop(rest)?;
+            if device_serial.is_some() {
+                drop.serial = device_serial;
+            }
+            Cmd::Disconnect(drop)
+        }
+
+        // ─── See — capture by extension, bare = viewer ───────────────
+        Some((&"see", rest)) => Cmd::See(parse_see(rest)?),
+
+        // ─── TUI — keyboard-driven inspector ─────────────────────────
+        Some((&"tui", rest)) => match rest {
+            [] => Cmd::Tui { active: false },
+            ["--active"] => Cmd::Tui { active: true },
+            _ => return Err(format!("tui takes only --active (got: {})", rest.join(" "))),
+        },
+
+        // ─── Apps ─────────────────────────────────────────────────────
+        Some((&"apps", rest)) => {
+            let mut third = false;
+            for tok in rest {
+                match *tok {
+                    "--3" | "--3rd" | "--third-party" => third = true,
+                    "--plain" => { /* placeholder for future formatting flag */ }
+                    other => return Err(format!("unknown apps arg: {other}")),
+                }
+            }
+            Cmd::Adb(adb::Cmd::PmList { third, system: false })
+        }
+        Some((&"open", rest)) => {
+            let c = rest.first().ok_or("open needs COMPONENT (pkg or pkg/.Class)")?;
+            Cmd::Adb(adb::Cmd::AmStart {
+                component: c.to_string(),
+                action: None, data: None, flag: None,
+            })
+        }
+        Some((&"close", rest)) => {
+            let p = rest.first().ok_or("close needs PKG")?;
+            Cmd::Adb(adb::Cmd::AmForceStop(p.to_string()))
+        }
+        Some((&"install", rest)) => Cmd::Adb(adb::parse_install(rest)?),
+        Some((&"uninstall", rest)) => {
+            let p = rest.first().ok_or("uninstall needs PKG")?;
+            Cmd::Adb(adb::Cmd::PmUninstall(p.to_string()))
+        }
+
+        // ─── Query / state ───────────────────────────────────────────
+        Some((&"find", rest)) => {
+            let mut flags = flags::ActionFlags::default();
+            let positional = flags.take(rest)?;
+            if positional.is_empty() { return Err("find needs a CSS-like SELECTOR".into()); }
+            Cmd::Find { selector: positional.join(" "), flags }
+        }
+        Some((&"ui", rest)) => {
+            // `mobax ui` defaults to the flat, agent-friendly interactive
+            // table — that's the 99% caller in an LLM loop and what the
+            // README sells. The indented outline is still available via
+            // `--tree`; `-i` / `--interactive` remain accepted no-ops so
+            // older scripts keep working.
+            let mut fmt = UiFormat::Interactive;
+            let mut windows = UiWindows::App;
+            for tok in rest {
+                match *tok {
+                    "--json"            => fmt = UiFormat::Json,
+                    "--xml"             => fmt = UiFormat::Xml,
+                    "--tree"            => fmt = UiFormat::Human,
+                    "-i" | "--interactive" => fmt = UiFormat::Interactive,
+                    "--all"             => windows = UiWindows::All,
+                    "--active"          => windows = UiWindows::Active,
+                    other               => return Err(format!("unknown ui arg: {other}")),
+                }
+            }
+            Cmd::Ui { format: fmt, windows }
+        }
+        Some((&"show", rest)) => match rest.first() {
+            None => Cmd::Adb(adb::Cmd::State("device".into())),
+            Some(&"top") => Cmd::Adb(adb::Cmd::State("top".into())),
+            Some(arg) if is_pkg(arg) => Cmd::ShowPkg(arg.to_string()),
+            Some(other) => return Err(format!("show: unknown target '{other}'")),
+        }
+
+        // ─── Wait — smart-dispatched at runtime ──────────────────────
+        Some((&"wait", rest)) => {
+            let mut flags = flags::ActionFlags::default();
+            let positional = flags.take(rest)?;
+            if positional.is_empty() { return Err("wait needs SPEC (idle | TEXT | PKG | Nms)".into()); }
+            Cmd::Wait { spec: positional.join(" "), flags }
+        }
+
+        // ─── Input ───────────────────────────────────────────────────
+        Some((&"tap", rest)) => parse_tap(rest)?,
+        Some((&"type", rest)) => {
+            // `type TEXT` types into the focused field via KeyEvents.
+            // For atomic set-text on a specific node, use `mobax fill SELECTOR TEXT`
+            // (Playwright vocabulary; ACTION_SET_TEXT, bypasses the IME).
+            let mut tflags = flags::ActionFlags::default();
+            let positional = tflags.take(rest)?;
+            match positional.len() {
+                0 => return Err("type needs TEXT".into()),
+                1 => Cmd::TypeFocused { text: positional[0].into(), flags: tflags },
+                _ => return Err(
+                    "type takes one TEXT argument; use `mobax fill SELECTOR TEXT` to target a node".into()
+                ),
+            }
+        }
+        Some((&"fill", rest)) => {
+            // ACTION_SET_TEXT against the matching node. Atomic, bypasses the
+            // IME — matches Playwright's `page.fill(selector, value)`.
+            let mut tflags = flags::ActionFlags::default();
+            let positional = tflags.take(rest)?;
+            match positional.len() {
+                0 | 1 => return Err("fill needs SELECTOR TEXT".into()),
+                2 => Cmd::TypeInto {
+                    selector: positional[0].into(),
+                    text:     positional[1].into(),
+                    flags:    tflags,
+                },
+                _ => return Err(
+                    "fill takes SELECTOR TEXT — quote multi-word arguments".into()
+                ),
+            }
+        }
+        Some((&"go", rest)) => {
+            let k = rest.first().ok_or("go needs KEY (back|home|recents|enter|…)")?;
+            Cmd::Input(format!("key {}", k.to_uppercase()))
+        }
+        Some((&"swipe", rest)) => {
+            // Direction shortcut: `mobax swipe left|right|up|down [DUR_MS]`.
+            // Daemon resolves the coordinates from the live display size.
+            if let Some(&first) = rest.first() {
+                let d = first.to_lowercase();
+                if matches!(d.as_str(), "left" | "right" | "up" | "down") {
+                    if rest.len() > 2 {
+                        return Err("swipe DIR takes at most one extra arg (DUR_MS)".into());
+                    }
+                    // Only pass `dur=` if the user gave one; let the daemon's
+                    // 500ms default win otherwise (reads as a drag, not a fling).
+                    let wire = match rest.get(1) {
+                        Some(s) => {
+                            let dur: i32 = s.parse().map_err(|_| "bad swipe DUR_MS")?;
+                            format!("swipe_dir {d} dur={dur}")
+                        }
+                        None => format!("swipe_dir {d}"),
+                    };
+                    return Ok(Opts { host, port, out_fmt, cmd: Cmd::Input(wire) });
+                }
+            }
+            if rest.len() < 4 || rest.len() > 5 {
+                return Err("swipe needs DIR [DUR_MS] or X1 Y1 X2 Y2 [DUR_MS]".into());
+            }
+            let x1: i32 = rest[0].parse().map_err(|_| "bad swipe X1")?;
+            let y1: i32 = rest[1].parse().map_err(|_| "bad swipe Y1")?;
+            let x2: i32 = rest[2].parse().map_err(|_| "bad swipe X2")?;
+            let y2: i32 = rest[3].parse().map_err(|_| "bad swipe Y2")?;
+            let dur: i32 = if rest.len() == 5 {
+                rest[4].parse().map_err(|_| "bad swipe DUR_MS")?
+            } else { 300 };
+            Cmd::Input(format!("swipe x1={x1} y1={y1} x2={x2} y2={y2} dur={dur}"))
+        }
+
+        // ─── Files ───────────────────────────────────────────────────
+        Some((&"cp", rest)) => {
+            if rest.len() != 2 { return Err("cp needs SRC DST (one side starts with `device:`)".into()); }
+            Cmd::Cp { src: rest[0].into(), dst: rest[1].into() }
+        }
+
+        // ─── Properties + settings (arity-dispatched) ────────────────
+        Some((&"prop", rest)) => match rest.len() {
+            // Bare `mobax prop` → dump every property via the on-device getprop tool.
+            0 => Cmd::Adb(adb::Cmd::Shell(vec![
+                "/system/bin/getprop".into(),
+            ])),
+            1 => Cmd::Adb(adb::Cmd::GetProp(rest[0].into())),
+            2 => Cmd::Adb(adb::Cmd::SetProp(rest[0].into(), rest[1].into())),
+            _ => return Err("prop needs nothing (list all), KEY (get) or KEY VALUE (set)".into()),
+        }
+        Some((&"settings", rest)) => match rest.len() {
+            // `mobax settings` → composite of all three namespaces. The bulk
+            // listing is a Settings variant handled by run() below; we use
+            // a marker constant so the existing dispatcher routes correctly.
+            0 => Cmd::SettingsListAll,
+            1 => {
+                let ns = rest[0];
+                if !matches!(ns, "system" | "secure" | "global") {
+                    return Err("settings NS must be system|secure|global".into());
+                }
+                Cmd::Adb(adb::Cmd::Shell(vec![
+                    "/system/bin/settings".into(), "list".into(), ns.into(),
+                ]))
+            }
+            2 => Cmd::Adb(adb::Cmd::SettingsGet { namespace: rest[0].into(), key: rest[1].into() }),
+            n if n >= 3 => Cmd::Adb(adb::Cmd::SettingsPut {
+                namespace: rest[0].into(),
+                key: rest[1].into(),
+                value: rest[2..].join(" "),
+            }),
+            _ => unreachable!(),
+        }
+
+        // ─── Logs / events (first-class) ─────────────────────────────
+        Some((&"logs", rest)) => parse_logs(rest)?,
+        Some((&"events", _)) => Cmd::Adb(adb::Cmd::Monitor),
+        Some((&"info", _))   => Cmd::Info,
+
+        // ─── Submit (IME action button) ──────────────────────────────
+        Some((&"submit", rest)) => {
+            let mut flags = flags::ActionFlags::default();
+            let positional = flags.take(rest)?;
+            let sel = if positional.is_empty() { None } else { Some(positional.join(" ")) };
+            Cmd::Submit { sel, flags }
+        }
+
+        // ─── Paste (ACTION_PASTE on focused/selected field) ──────────
+        Some((&"paste", rest)) => {
+            let mut flags = flags::ActionFlags::default();
+            let positional = flags.take(rest)?;
+            let sel = if positional.is_empty() { None } else { Some(positional.join(" ")) };
+            Cmd::Paste { sel, flags }
+        }
+
+        // ─── Batch / session execution ───────────────────────────────
+        Some((&"run", rest)) => {
+            let mut flags = flags::ActionFlags::default();
+            let positional = flags.take(rest)?;
+            let script = positional.first().map(|s| s.to_string());
+            Cmd::Run { script, flags }
+        }
+
+        // ─── mobax act — one-shot tap-then-assert composite ─────────────
+        Some((&"act", rest)) => Cmd::Act(act::parse(rest)?),
+
+        // ─── mobax fan — multi-device fan-out ───────────────────────────
+        Some((&"fan", rest)) => {
+            // Form: `mobax fan SERIAL,SERIAL[,...] -- VERB ARGS`
+            let idx = rest.iter().position(|t| *t == "--")
+                .ok_or("fan: expected `--` between serial list and verb")?;
+            let serials_blob = rest[..idx].join(" ");
+            let serials: Vec<String> = serials_blob.split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+            if serials.is_empty() { return Err("fan: serial list is empty".into()); }
+            let argv: Vec<String> = rest[idx + 1..].iter().map(|s| s.to_string()).collect();
+            if argv.is_empty() { return Err("fan: nothing to run after `--`".into()); }
+            Cmd::Fan { serials, argv }
+        }
+
+        // ─── mobax init — scaffold a starter script ─────────────────────
+        Some((&"init", rest)) => Cmd::Init {
+            path: rest.first().map(|s| s.to_string()),
+        },
+
+        // ─── Deeplinks (parsed straight from the APK's AndroidManifest) ─
+        Some((&"links", rest)) => {
+            let pkg = rest.first().ok_or("links needs PKG")?;
+            Cmd::Links(pkg.to_string())
+        }
+
+        // ─── ContentProvider readers ─────────────────────────────────
+        Some((&"sms", rest)) => {
+            let (limit, json, positional) = parse_provider_common(rest)?;
+            let kind = positional.first().copied().unwrap_or("inbox").to_string();
+            Cmd::Sms { kind, limit, json }
+        }
+        Some((&"calls", rest)) => {
+            let (limit, json, positional) = parse_provider_common(rest)?;
+            let kind = positional.first().copied().unwrap_or("all").to_string();
+            Cmd::Calls { kind, limit, json }
+        }
+        Some((&"contacts", rest)) => {
+            let (limit, json, positional) = parse_provider_common(rest)?;
+            if let Some(other) = positional.first() {
+                return Err(format!("contacts takes no positional: {other}"));
+            }
+            Cmd::Contacts { limit, json }
+        }
+        Some((&"location" | &"gps", rest)) => {
+            let mut json = false;
+            for tok in rest {
+                match *tok {
+                    "--json" => json = true,
+                    other => return Err(format!("unknown location arg: {other}")),
+                }
+            }
+            Cmd::Location { json }
+        }
+        // ─── Clipboard ────────────────────────────────────────────────
+        Some((&"clip", rest)) => {
+            let mut watch = false;
+            let mut interval_ms = 500_u64;
+            let mut positional: Vec<&str> = Vec::new();
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--watch" => watch = true,
+                    "--interval" => {
+                        i += 1;
+                        interval_ms = rest.get(i).ok_or("--interval needs MS")?
+                            .parse().map_err(|_| "bad --interval".to_string())?;
+                    }
+                    other => positional.push(other),
+                }
+                i += 1;
+            }
+            let text = if positional.is_empty() { None } else { Some(positional.join(" ")) };
+            if watch && text.is_some() {
+                return Err("clip --watch is read-only; can't combine with TEXT".into());
+            }
+            Cmd::Clip { text, watch, interval_ms }
+        }
+
+        Some((&"notif", rest)) => {
+            let mut limit = 50_u32;
+            let mut json = false;
+            let mut history = false;
+            let mut pkg: Option<String> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--limit" => {
+                        i += 1;
+                        limit = rest.get(i).ok_or("--limit needs N")?.parse()
+                            .map_err(|_| "bad --limit".to_string())?;
+                    }
+                    "--json"    => json = true,
+                    "--history" => history = true,
+                    other if pkg.is_none() && !other.starts_with("--") => {
+                        pkg = Some(other.to_string());
+                    }
+                    other => return Err(format!("unknown notif arg: {other}")),
+                }
+                i += 1;
+            }
+            Cmd::Notif { pkg, history, limit, json }
+        }
+        Some((&"calendar", rest)) => {
+            let mut limit = 50_u32;
+            let mut json = false;
+            let mut from_ms: Option<i64> = None;
+            let mut to_ms: Option<i64> = None;
+            let mut days: Option<i64> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--limit" => {
+                        i += 1;
+                        limit = rest.get(i).ok_or("--limit needs N")?.parse()
+                            .map_err(|_| "bad --limit".to_string())?;
+                    }
+                    "--json" => json = true,
+                    "--days" => {
+                        i += 1;
+                        days = Some(rest.get(i).ok_or("--days needs N")?.parse()
+                            .map_err(|_| "bad --days".to_string())?);
+                    }
+                    "--from" => {
+                        i += 1;
+                        from_ms = Some(rest.get(i).ok_or("--from needs MS")?.parse()
+                            .map_err(|_| "bad --from".to_string())?);
+                    }
+                    "--to" => {
+                        i += 1;
+                        to_ms = Some(rest.get(i).ok_or("--to needs MS")?.parse()
+                            .map_err(|_| "bad --to".to_string())?);
+                    }
+                    other => return Err(format!("unknown calendar arg: {other}")),
+                }
+                i += 1;
+            }
+            Cmd::Calendar { from_ms, to_ms, days, limit, json }
+        }
+
+        // ─── Shell + raw wire ────────────────────────────────────────
+        // `shell` and `do` are synonyms: shell is the natural REPL verb,
+        // do <wire> is a one-shot raw call.
+        Some((&"shell", _)) => Cmd::Shell,
+        Some((&"do", rest)) => {
+            if rest.is_empty() { Cmd::Shell } else { Cmd::Input(rest.join(" ")) }
+        }
+
+        // ─── Low-level / debugging ───────────────────────────────────
+        // `mobax dev <sub>` is the documented namespace; the bare verbs
+        // (`mobax ping`, `mobax snapshot`, …) stay as undocumented aliases so
+        // older scripts and the test harness don't break.
+        Some((&"dev", rest)) => parse_dev(rest)?,
+        Some((&"ping", _))      => Cmd::Ping,
+        Some((&"snapshot", _))  => Cmd::Snapshot,
+        Some((&"screen", _))    => Cmd::Screen,
+        Some((&"quit", _))      => Cmd::Quit,
+        Some((&"state-daemon", _)) => Cmd::StateDaemon,
+        Some((&"bench", rest)) => parse_bench(rest)?,
+
+        Some((other, _)) => return Err(suggest(other)),
+    };
+
+    Ok(Opts { host, port, out_fmt, cmd })
+}
+
+/// `--device SERIAL` → host-side forwarded port for that device. Errors if
+/// the device isn't attached or the daemon hasn't been brought up with
+/// `mobax use`. Keeps the global flag thin so it doesn't accidentally touch
+/// the daemon lifecycle.
+fn resolve_device_port(serial: &str) -> Result<u16, String> {
+    let rows = daemon::devices().map_err(|e| format!("adb devices: {e}"))?;
+    let row = rows.iter().find(|r| r.serial == serial)
+        .ok_or_else(|| format!("--device {serial}: not attached"))?;
+    row.host_port.ok_or_else(|| format!(
+        "--device {serial}: no forwarded daemon — run `mobax use {serial}` first"))
+}
+
+fn run(opts: &Opts) -> io::Result<()> {
+    match &opts.cmd {
+        Cmd::Bench { n, json } => {
+            bench(&opts.host, opts.port, *n, *json || opts.out_fmt == flags::OutFmt::Json)
+        }
+        Cmd::TapText { query, flags } => {
+            let reporter = output::Reporter::new(flags.out(opts.out_fmt));
+            let mut sess = session::Session::connect(
+                &opts.host, opts.port, flags.clone(), opts.out_fmt)?;
+            // One-shot: zero TTL so the dump never lingers between runs.
+            sess.dump_ttl_ms = 0;
+            tap_text::run_session(&mut sess, query, &reporter, "tap")
+        }
+        Cmd::TapXY { x, y, flags } => {
+            let reporter = output::Reporter::new(flags.out(opts.out_fmt));
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            let body = conn.call(&format!("tap x={x} y={y}"))?;
+            if let Some(e) = errors::parse_err(&body) {
+                return Err(reporter.fail("tap", e));
+            }
+            reporter.ok("tap", &String::from_utf8_lossy(&body),
+                json_out::Obj::new().n("x", *x as i64).n("y", *y as i64))
+        }
+        Cmd::Snapshot => {
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            snapshot::run(&mut conn)
+        }
+        Cmd::Screen => {
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            screen::run(&mut conn)
+        }
+        Cmd::Adb(sub) => adb::run(&opts.host, opts.port, sub),
+        Cmd::Connect(o) => {
+            let port = daemon::connect(o)?;
+            eprintln!("daemon up on tcp:{port}");
+            Ok(())
+        }
+        Cmd::Disconnect(o) => daemon::disconnect(o),
+        Cmd::Devices => print_devices(),
+        Cmd::StateDaemon => state_cache::run_daemon(&opts.host, opts.port),
+        Cmd::Shell => shell::run(&opts.host, opts.port),
+        Cmd::Find { selector, flags } => {
+            run_find(&opts.host, opts.port, opts.out_fmt, selector, flags)
+        }
+        Cmd::See(see) => run_see(&opts.host, opts.port, see),
+        Cmd::Wait { spec, flags } => {
+            run_wait(&opts.host, opts.port, opts.out_fmt, spec, flags)
+        }
+        Cmd::Run { script, flags } => {
+            run_script::run(&opts.host, opts.port, opts.out_fmt, script.as_deref(), flags.clone())
+        }
+        Cmd::Act(a) => act::run(&opts.host, opts.port, opts.out_fmt, a),
+        Cmd::Fan { serials, argv } => fan::run(opts.out_fmt, serials, argv),
+        Cmd::Init { path } => init::run(path.as_deref()),
+        Cmd::Cp { src, dst } => run_cp(&opts.host, opts.port, src, dst),
+        Cmd::ShowPkg(pkg) => run_show_pkg(&opts.host, opts.port, pkg),
+        Cmd::Info => run_info(&opts.host, opts.port),
+        Cmd::Ui { format, windows } => run_ui(&opts.host, opts.port, *format, *windows),
+        Cmd::Tui { active } => tui::run(&opts.host, opts.port, *active),
+        Cmd::SettingsListAll => {
+            // Three Shell-passthrough calls glued client-side with header
+            // lines — keeps the daemon's shell command simple (no quote
+            // parsing needed) and gives a single readable dump.
+            let mut out = io::stdout().lock();
+            for ns in ["system", "secure", "global"] {
+                writeln!(out, "=== {ns} ===")?;
+                out.flush()?;
+                adb::run(&opts.host, opts.port, &adb::Cmd::Shell(vec![
+                    "/system/bin/settings".into(), "list".into(), ns.into(),
+                ]))?;
+            }
+            Ok(())
+        }
+        Cmd::Links(pkg) => {
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            let body = conn.call(&format!("deeplinks {pkg}"))?;
+            if body.starts_with(b"ERR:") {
+                return Err(io::Error::other(String::from_utf8_lossy(&body).into_owned()));
+            }
+            let mut out = io::stdout().lock();
+            out.write_all(&body)?;
+            if body.last() != Some(&b'\n') { out.write_all(b"\n")?; }
+            out.flush()
+        }
+        Cmd::Sms { kind, limit, json } => {
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            let wire = format!("sms type={kind} limit={limit}");
+            provider::run(&mut conn, &wire, *json || opts.out_fmt == flags::OutFmt::Json,
+                &[provider::TypeMap { column: "type", map: SMS_TYPES }],
+                &[])
+        }
+        Cmd::Calls { kind, limit, json } => {
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            let wire = format!("calls type={kind} limit={limit}");
+            provider::run(&mut conn, &wire, *json || opts.out_fmt == flags::OutFmt::Json,
+                &[provider::TypeMap { column: "type", map: CALL_TYPES }],
+                &[])
+        }
+        Cmd::Contacts { limit, json } => {
+            // Daemon emits raw Phone columns (data1/data2/data3) since
+            // ContactsContract rejects SQL AS aliases. Rename them to
+            // friendly labels for display + JSON.
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            let wire = format!("contacts limit={limit}");
+            provider::run(&mut conn, &wire, *json || opts.out_fmt == flags::OutFmt::Json,
+                &[provider::TypeMap { column: "type", map: PHONE_TYPES }],
+                &[("data1", "number"), ("data2", "type"), ("data3", "label")])
+        }
+        Cmd::Clip { text, watch, interval_ms } => {
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            if *watch {
+                let wire = format!("clip_watch interval_ms={interval_ms}");
+                conn.send_cmd(&wire)?;
+                let mut out = io::stdout().lock();
+                loop {
+                    let frame = conn.read_frame()?;
+                    if frame.is_empty() { break; }
+                    if frame.starts_with(b"ERR:") {
+                        return Err(io::Error::other(
+                            String::from_utf8_lossy(&frame).into_owned()));
+                    }
+                    out.write_all(&frame)?;
+                    out.write_all(b"\n")?;
+                    out.flush()?;
+                }
+                Ok(())
+            } else if let Some(t) = text {
+                let body = conn.call(&format!("clip_set {t}"))?;
+                if body.starts_with(b"ERR:") {
+                    return Err(io::Error::other(
+                        String::from_utf8_lossy(&body).into_owned()));
+                }
+                Ok(())
+            } else {
+                let body = conn.call("clip_get")?;
+                if body.starts_with(b"ERR:") {
+                    return Err(io::Error::other(
+                        String::from_utf8_lossy(&body).into_owned()));
+                }
+                let mut out = io::stdout().lock();
+                out.write_all(&body)?;
+                if body.last() != Some(&b'\n') { out.write_all(b"\n")?; }
+                out.flush()
+            }
+        }
+        Cmd::Notif { pkg, history, limit, json } => {
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            let mut wire = format!("notifications limit={limit}");
+            if *history { wire.push_str(" history=1"); }
+            if let Some(p) = pkg { wire.push_str(&format!(" pkg={p}")); }
+            provider::run(&mut conn, &wire, *json || opts.out_fmt == flags::OutFmt::Json, &[], &[])
+        }
+        Cmd::Location { json } => {
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            provider::run(&mut conn, "location", *json || opts.out_fmt == flags::OutFmt::Json, &[], &[])
+        }
+        Cmd::Calendar { from_ms, to_ms, days, limit, json } => {
+            // Resolve window. --days N takes precedence over --from/--to if
+            // both are given; default = now → now + 7 days.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let (from, to) = if let Some(d) = days {
+                (now, now + d * 24 * 60 * 60 * 1000)
+            } else {
+                (from_ms.unwrap_or(now),
+                 to_ms.unwrap_or(now + 7 * 24 * 60 * 60 * 1000))
+            };
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            let wire = format!("calendar from={from} to={to} limit={limit}");
+            provider::run(&mut conn, &wire, *json || opts.out_fmt == flags::OutFmt::Json, &[], &[])
+        }
+        Cmd::Submit { sel, flags } => run_submit(opts, sel.as_deref(), flags),
+        Cmd::Paste  { sel, flags } => run_paste (opts, sel.as_deref(), flags),
+        Cmd::TypeFocused { text, flags } => run_type_focused(opts, text, flags),
+        Cmd::TypeInto { selector, text, flags } => run_type_into(opts, selector, text, flags),
+        Cmd::Ping => {
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            let body = conn.call("ping")?;
+            write_response(&opts.cmd, &body)
+        }
+        Cmd::Quit => {
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            let body = conn.call("quit")?;
+            write_response(&opts.cmd, &body)
+        }
+        Cmd::Input(wire) => {
+            let mut conn = Conn::connect(&opts.host, opts.port)?;
+            let body = conn.call(wire)?;
+            write_response(&opts.cmd, &body)
+        }
+    }
+}
+
+fn run_submit(opts: &Opts, sel: Option<&str>, flags: &flags::ActionFlags) -> io::Result<()> {
+    let reporter = output::Reporter::new(flags.out(opts.out_fmt));
+    let mut conn = Conn::connect(&opts.host, opts.port)?;
+    let mut attempts = flags.total_attempts();
+    loop {
+        let wire = match sel {
+            Some(s) => format!("submit {s}"),
+            None => "submit".into(),
+        };
+        let body = conn.call(&wire)?;
+        if let Some(e) = errors::parse_err(&body) {
+            attempts = attempts.saturating_sub(1);
+            if attempts > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(flags.retry_delay_ms));
+                continue;
+            }
+            return Err(reporter.fail("submit", e));
+        }
+        return reporter.ok("submit", String::from_utf8_lossy(&body).trim_end(),
+            json_out::Obj::new().opt_s("selector", sel));
+    }
+}
+
+fn run_paste(opts: &Opts, sel: Option<&str>, flags: &flags::ActionFlags) -> io::Result<()> {
+    let reporter = output::Reporter::new(flags.out(opts.out_fmt));
+    let mut conn = Conn::connect(&opts.host, opts.port)?;
+    let mut attempts = flags.total_attempts();
+    loop {
+        let wire = match sel {
+            Some(s) => format!("paste {s}"),
+            None => "paste".into(),
+        };
+        let body = conn.call(&wire)?;
+        if let Some(e) = errors::parse_err(&body) {
+            attempts = attempts.saturating_sub(1);
+            if attempts > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(flags.retry_delay_ms));
+                continue;
+            }
+            return Err(reporter.fail("paste", e));
+        }
+        return reporter.ok("paste", String::from_utf8_lossy(&body).trim_end(),
+            json_out::Obj::new().opt_s("selector", sel));
+    }
+}
+
+fn run_type_focused(opts: &Opts, text: &str, flags: &flags::ActionFlags) -> io::Result<()> {
+    let reporter = output::Reporter::new(flags.out(opts.out_fmt));
+    let mut conn = Conn::connect(&opts.host, opts.port)?;
+    let body = conn.call(&format!("text {text}"))?;
+    if let Some(e) = errors::parse_err(&body) {
+        return Err(reporter.fail("type", e));
+    }
+    reporter.ok("type", String::from_utf8_lossy(&body).trim_end(),
+        json_out::Obj::new().s("text", text))
+}
+
+/// `mobax fill` accepts both grammars. Any selector containing `=` is treated
+/// as daemon-grammar (`id=…`, `class=EditText text~=…`) and passed through
+/// unchanged. Bare strings are free-text queries: dump the app's windows
+/// (the focused one with `--active`), find the best-matching input widget, then rebuild a daemon selector
+/// (preferring `id=<full-rid>`, falling back to class + exact text) so the
+/// daemon's narrower parser can still resolve it.
+fn resolve_fill_selector(conn: &mut Conn, sel_in: &str, flags: &flags::ActionFlags) -> io::Result<String> {
+    let css = css_selector(sel_in);
+    if css.is_none() && sel_in.contains('=') {
+        return Ok(sel_in.to_string());
+    }
+    // The field may still be on its way in (a search view opening), so
+    // look until the wait budget runs out, as `tap` and `wait` do.
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(flags.timeout_ms.unwrap_or(10_000));
+    loop {
+        let body = conn.call(flags.dump_wire())?;
+        if errors::parse_err(&body).is_some() {
+            // Couldn't read the tree — fall through and let the daemon error.
+            return Ok(sel_in.to_string());
+        }
+        let text = std::str::from_utf8(&body)
+            .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
+        let dump = json::parse(text)
+            .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
+        let roots: Vec<&json::Value> = json::app_roots(&dump).into_iter().rev().collect();
+        let found = match &css {
+            Some(sels) => {
+                let ctx = selector::MatchCtx::from_roots(roots.clone());
+                let mut matches = selector::find_all_with(&ctx, sels);
+                selector::apply_filters(&mut matches, flags);
+                // An input widget among the matches wins; else the first match.
+                matches.iter().find(|n| is_input_widget(n)).or(matches.first()).map(|n| node_to_daemon_selector(n))
+            }
+            None => find_fill_target(&roots, sel_in).map(node_to_daemon_selector),
+        };
+        if let Some(sel) = found {
+            return Ok(sel);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::other(if css.is_some() {
+                format!("fill: no node matched {sel_in:?}")
+            } else {
+                format!("fill: no input widget matched {sel_in:?} — pass a selector                          (`#id`, `EditText[hint~=...]`) or daemon grammar (`id=...`)")
+            }));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+}
+
+/// Build a daemon-grammar selector that uniquely names `node`. Prefers the
+/// full resource id when present (always unique); falls back to class + the
+/// node's own text when the widget is anonymous.
+fn node_to_daemon_selector(node: &json::Value) -> String {
+    let rid = selector::get_str(node, "rid").unwrap_or("");
+    if !rid.is_empty() {
+        return format!("id={rid}");
+    }
+    let cls_full = selector::get_str(node, "cls").unwrap_or("EditText");
+    let simple = cls_full.rsplit('.').next().unwrap_or(cls_full);
+    let txt = selector::get_str(node, "text").unwrap_or("");
+    if !txt.is_empty() {
+        return format!("class={simple} text={txt:?}");
+    }
+    format!("class={simple}")
+}
+
+fn is_input_widget(node: &json::Value) -> bool {
+    let cls = selector::get_str(node, "cls").unwrap_or("");
+    let simple = cls.rsplit('.').next().unwrap_or(cls);
+    matches!(simple,
+        "EditText" | "AutoCompleteTextView" | "MultiAutoCompleteTextView")
+}
+
+/// Score how well an input widget matches the free-text query. Mirrors the
+/// priority ladder in `tap_text::classify` so `mobax fill` and `mobax tap` rank
+/// candidates the same way.
+fn fill_priority(q: &str, q_low: &str, text: &str, desc: &str, hint: &str) -> Option<u8> {
+    if text == q || desc == q || hint == q { return Some(0); }
+    let t = text.to_lowercase();
+    let d = desc.to_lowercase();
+    let h = hint.to_lowercase();
+    if t == q_low || d == q_low || h == q_low { return Some(1); }
+    if !q_low.is_empty() && (t.contains(q_low) || d.contains(q_low) || h.contains(q_low)) {
+        return Some(2);
+    }
+    None
+}
+
+/// `roots` are window roots, topmost first; on equal rank the upper
+/// window's input wins.
+fn find_fill_target<'a>(roots: &[&'a json::Value], query: &str) -> Option<&'a json::Value> {
+    let q_low = query.to_lowercase();
+
+    // Phase 1: prefer an input widget whose own text/desc/hint matches.
+    // Empty EditTexts surface their hint as `text` in the dump, so this
+    // catches the common "fill the field whose placeholder mentions X" case.
+    let mut best: Option<(u8, &json::Value)> = None;
+    for root in roots { find_input_match(root, query, &q_low, &mut best); }
+    if let Some((_, n)) = best { return Some(n); }
+
+    // Phase 1b: a label inside the field. Compose's TextField puts its
+    // `label` and `placeholder` under the EditText as their own nodes, and
+    // the field's hint stays empty.
+    for root in roots {
+        if let Some(n) = find_input_holding_label(root, &q_low, None) { return Some(n); }
+    }
+
+    // Phase 2: label-anchored — find any node matching the query, then
+    // take the nearest input widget below or right-of it. Mirrors how a
+    // human reads a form: label on the left or above, field next to it.
+    // The field is looked for in the label's own window.
+    for root in roots {
+        let mut labels: Vec<&json::Value> = Vec::new();
+        collect_labels(root, &q_low, &mut labels);
+        for label in labels {
+            let Some(lb) = selector::bounds(label) else { continue; };
+            let mut nearest: Option<(i64, &json::Value)> = None;
+            find_nearest_input(root, lb, &mut nearest);
+            if let Some((_, n)) = nearest { return Some(n); }
+        }
+    }
+    None
+}
+
+fn find_input_match<'a>(
+    node: &'a json::Value,
+    q: &str,
+    q_low: &str,
+    best: &mut Option<(u8, &'a json::Value)>,
+) {
+    if is_input_widget(node) {
+        let text = selector::get_str(node, "text").unwrap_or("");
+        let desc = selector::get_str(node, "desc").unwrap_or("");
+        let hint = selector::get_str(node, "hint").unwrap_or("");
+        if let Some(p) = fill_priority(q, q_low, text, desc, hint) {
+            let beat = match *best { None => true, Some((bp, _)) => p < bp };
+            if beat { *best = Some((p, node)); }
+        }
+    }
+    if let Some(kids) = selector::children(node) {
+        for c in kids { find_input_match(c, q, q_low, best); }
+    }
+}
+
+/// The input widget enclosing the first node whose text or desc contains `q_low`.
+fn find_input_holding_label<'a>(
+    node: &'a json::Value,
+    q_low: &str,
+    input: Option<&'a json::Value>,
+) -> Option<&'a json::Value> {
+    let input = if is_input_widget(node) { Some(node) } else { input };
+    if let Some(field) = input.filter(|f| !std::ptr::eq(*f, node)) {
+        let text = selector::get_str(node, "text").unwrap_or("").to_lowercase();
+        let desc = selector::get_str(node, "desc").unwrap_or("").to_lowercase();
+        if !q_low.is_empty() && (text.contains(q_low) || desc.contains(q_low)) {
+            return Some(field);
+        }
+    }
+    selector::children(node)?.iter().find_map(|c| find_input_holding_label(c, q_low, input))
+}
+
+fn collect_labels<'a>(node: &'a json::Value, q_low: &str, out: &mut Vec<&'a json::Value>) {
+    let text = selector::get_str(node, "text").unwrap_or("").to_lowercase();
+    let desc = selector::get_str(node, "desc").unwrap_or("").to_lowercase();
+    if !q_low.is_empty()
+        && ((!text.is_empty() && text.contains(q_low))
+            || (!desc.is_empty() && desc.contains(q_low)))
+    {
+        out.push(node);
+    }
+    if let Some(kids) = selector::children(node) {
+        for c in kids { collect_labels(c, q_low, out); }
+    }
+}
+
+fn find_nearest_input<'a>(
+    node: &'a json::Value,
+    lb: (i64, i64, i64, i64),
+    best: &mut Option<(i64, &'a json::Value)>,
+) {
+    if is_input_widget(node) {
+        if let Some(eb) = selector::bounds(node) {
+            // 8px slack so a label whose bottom exactly meets the field
+            // top still counts as "above" rather than "overlapping".
+            let below = eb.1 >= lb.3 - 8;
+            let right = eb.0 >= lb.2 - 8;
+            if below || right {
+                let lcx = (lb.0 + lb.2) / 2;
+                let lcy = (lb.1 + lb.3) / 2;
+                let ecx = (eb.0 + eb.2) / 2;
+                let ecy = (eb.1 + eb.3) / 2;
+                let dx = ecx - lcx;
+                let dy = ecy - lcy;
+                let dist = dx * dx + dy * dy;
+                let beat = match *best { None => true, Some((bd, _)) => dist < bd };
+                if beat { *best = Some((dist, node)); }
+            }
+        }
+    }
+    if let Some(kids) = selector::children(node) {
+        for c in kids { find_nearest_input(c, lb, best); }
+    }
+}
+
+fn run_type_into(
+    opts: &Opts, selector: &str, text: &str, flags: &flags::ActionFlags,
+) -> io::Result<()> {
+    let reporter = output::Reporter::new(flags.out(opts.out_fmt));
+    let mut conn = Conn::connect(&opts.host, opts.port)?;
+    fill_into(&mut conn, &reporter, selector, text, flags)
+}
+
+/// `mobax fill SELECTOR TEXT`: ACTION_SET_TEXT on the matched field. Some
+/// fields refuse it (a SearchView's EditText, say); then the field is
+/// clicked to focus it and the text goes in as keystrokes instead.
+fn fill_into(
+    conn: &mut Conn, reporter: &output::Reporter, selector: &str, text: &str, flags: &flags::ActionFlags,
+) -> io::Result<()> {
+    // Free-text and CSS-like selectors are resolved against the live dump
+    // into a daemon-grammar selector. Mirrors `mobax tap "TEXT"`.
+    let resolved = resolve_fill_selector(conn, selector, flags)?;
+    let mut attempts = flags.total_attempts();
+    loop {
+        // Daemon wire command: node_set_text <selector> value="..."
+        let body = conn.call(&format!("node_set_text {resolved} value={text:?}"))?;
+        let mut method = "set_text";
+        let body = match errors::parse_err(&body) {
+            None => body,
+            Some(e) if e.detail.contains("set_text-rejected") => {
+                // Usually the field isn't focused or ready yet (a search view
+                // still opening): focus it, let it settle, and set it again.
+                let _ = conn.call(&format!("node_click {resolved}"))?;
+                conn.call("wait_for_idle idle_ms=300 timeout_ms=2000")?;
+                let mut again = None;
+                for _ in 0..10 {
+                    let r = conn.call(&format!("node_set_text {resolved} value={text:?}"))?;
+                    if errors::parse_err(&r).is_none() {
+                        again = Some(r);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                if let Some(r) = again {
+                    method = "set_text after click";
+                    r
+                } else if text.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+                    method = "keys";
+                    conn.call(&format!("text {text}"))?
+                } else {
+                    // The virtual key map has no keys for Hangul, CJK, emoji, …
+                    method = "paste";
+                    let set = conn.call(&format!("clip_set {text}"))?;
+                    if errors::parse_err(&set).is_some() {
+                        return Err(reporter.fail("fill", e));
+                    }
+                    conn.call("paste")?
+                }
+            }
+            Some(_) => body,
+        };
+        if let Some(e) = errors::parse_err(&body) {
+            attempts = attempts.saturating_sub(1);
+            if attempts > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(flags.retry_delay_ms));
+                continue;
+            }
+            return Err(reporter.fail("fill", e));
+        }
+        let human = String::from_utf8_lossy(&body);
+        let human = match method {
+            "set_text after click" => format!("{} (after focusing the field)", human.trim_end()),
+            "keys" => format!("{} (set_text refused; typed after a click)", human.trim_end()),
+            "paste" => format!("{} (set_text refused; pasted after a click)", human.trim_end()),
+            _ => human.trim_end().to_string(),
+        };
+        return reporter.ok("fill", &human,
+            json_out::Obj::new()
+                .s("selector", &resolved)
+                .s("query", selector)
+                .s("text", text)
+                .s("method", method));
+    }
+}
+
+/// `mobax ui [--tree|--json|--xml] [--active|--all]` — UI tree dump in the
+/// chosen format. The table and `--tree` cover the app's windows, so
+/// popups and bottom sheets show up; `--active` limits them to the focused
+/// window. `--json` / `--xml` are the raw dump: the focused window, or
+/// every window with `--all`.
+fn run_ui(host: &str, port: u16, format: UiFormat, windows: UiWindows) -> io::Result<()> {
+    let raw = matches!(format, UiFormat::Json | UiFormat::Xml);
+    let wire = match windows {
+        UiWindows::All => "dump",
+        UiWindows::App if !raw => "dump",
+        _ => "dump_active",
+    };
+    let mut conn = Conn::connect(host, port)?;
+    let body = conn.call(wire)?;
+    let mut out = io::stdout().lock();
+    match format {
+        UiFormat::Json => {
+            out.write_all(&body)?;
+            if body.last() != Some(&b'\n') { out.write_all(b"\n")?; }
+        }
+        UiFormat::Xml => {
+            let text = std::str::from_utf8(&body)
+                .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
+            let json = json::parse(text)
+                .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
+            out.write_all(xml_dump::render(&json, 0).as_bytes())?;
+        }
+        UiFormat::Human => {
+            let text = std::str::from_utf8(&body)
+                .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
+            let json = json::parse(text)
+                .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
+            out.write_all(ui_dump::render_human(&ui_roots(&json, windows)).as_bytes())?;
+        }
+        UiFormat::Interactive => {
+            let text = std::str::from_utf8(&body)
+                .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
+            let json = json::parse(text)
+                .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
+            out.write_all(ui_dump::render_interactive(&ui_roots(&json, windows)).as_bytes())?;
+        }
+    }
+    out.flush()
+}
+
+fn ui_roots(dump: &json::Value, windows: UiWindows) -> Vec<&json::Value> {
+    if windows == UiWindows::All { json::all_roots(dump) } else { json::app_roots(dump) }
+}
+
+/// `mobax see [PATH]` — bare opens the viewer; otherwise extension picks
+/// the format (jpg/webp/png screenshot, xml/json UI hierarchy).
+fn run_see(host: &str, port: u16, opts: &SeeOpts) -> io::Result<()> {
+    let Some(path) = opts.path.as_deref() else {
+        return mirror::run(host, port, mirror::Args);
+    };
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_tree = matches!(ext.as_str(), "json" | "xml");
+    if opts.all_windows && !is_tree {
+        return Err(io::Error::other("see: --all only applies to .json/.xml"));
+    }
+    let dump_wire = if opts.all_windows { "dump" } else { "dump_active" };
+    let mut conn = Conn::connect(host, port)?;
+    let bytes: Vec<u8> = match ext.as_str() {
+        "jpg" | "jpeg" => conn.call(&see_screenshot_wire(opts, "jpeg"))?,
+        "webp"         => conn.call(&see_screenshot_wire(opts, "webp"))?,
+        "png"          => conn.call(&see_screenshot_wire(opts, "png"))?,
+        "json"         => conn.call(dump_wire)?,
+        "xml" => {
+            if opts.size.is_some() || opts.native || opts.secure_check {
+                return Err(io::Error::other("see: screenshot flags only apply to jpg/webp/png"));
+            }
+            let body = conn.call(dump_wire)?;
+            let text = std::str::from_utf8(&body)
+                .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
+            let json = json::parse(text)
+                .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
+            xml_dump::render(&json, 0).into_bytes()
+        }
+        other => return Err(io::Error::other(
+            format!("see: unsupported extension '.{other}' (jpg|webp|png|xml|json)"))),
+    };
+    if bytes.starts_with(b"ERR:secure-window:") {
+        let win = String::from_utf8_lossy(&bytes[b"ERR:secure-window:".len()..]);
+        return Err(io::Error::other(format!(
+            "screenshot blocked: {win} has FLAG_SECURE set — the system denies \
+             screen capture of this window (common for banking, password, and \
+             incognito screens). Not saving to {path}."
+        )));
+    }
+    if bytes.starts_with(b"ERR:") {
+        return Err(io::Error::other(String::from_utf8_lossy(&bytes).into_owned()));
+    }
+    std::fs::write(path, &bytes)?;
+    eprintln!("saved {} bytes to {path}", bytes.len());
+    Ok(())
+}
+
+fn see_screenshot_wire(opts: &SeeOpts, fmt: &str) -> String {
+    let mut wire = String::from("screenshot");
+    if opts.native || opts.size.is_none() {
+        wire.push_str(" max=1");
+    } else if let Some(size) = opts.size {
+        wire.push_str(&format!(" size={size}"));
+    }
+    if fmt != "jpeg" {
+        wire.push_str(&format!(" fmt={fmt}"));
+    }
+    if opts.secure_check {
+        wire.push_str(" secure_check=1");
+    }
+    wire
+}
+
+/// `mobax wait <spec>` — smart-dispatch on `spec` shape. `flags` lets RPA
+/// scripts override the daemon-side default (10 s) so long-running things
+/// like cold app launches don't silently hit the timeout.
+fn run_wait(
+    host: &str,
+    port: u16,
+    out_fmt: flags::OutFmt,
+    spec: &str,
+    f: &flags::ActionFlags,
+) -> io::Result<()> {
+    let reporter = output::Reporter::new(f.out(out_fmt));
+    let spec = spec.trim();
+    // "Nms" / "Ns" — sleep client-side, no daemon hop needed.
+    if let Some(ms) = parse_duration_ms(spec) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        return reporter.ok("wait", "ok",
+            json_out::Obj::new().n("slept_ms", ms as i64));
+    }
+    let mut conn = Conn::connect(host, port)?;
+    let timeout_ms = f.timeout_ms.unwrap_or(10_000);
+    if let Some(sels) = css_selector(spec) {
+        return run_wait_selector(&mut conn, &reporter, spec, &sels, f, timeout_ms);
+    }
+    let wire: String = if let Some(rest) = spec.strip_prefix("idle") {
+        let rest = rest.trim();
+        let idle_ms = if rest.is_empty() {
+            200
+        } else if let Some(ms) = parse_duration_ms(rest) {
+            ms
+        } else {
+            return Err(io::Error::other(format!("wait idle: bad duration '{rest}'")));
+        };
+        format!("wait_for_idle idle_ms={idle_ms} timeout_ms={timeout_ms}")
+    } else if is_component(spec) || is_pkg(spec) {
+        format!("wait_for_activity n={spec} timeout_ms={timeout_ms}")
+    } else {
+        // Same windows as tap / find: the app's, or the focused one.
+        let scope = if f.active_window { "active" } else { "app" };
+        format!("wait_for_text text={spec:?} scope={scope} timeout_ms={timeout_ms}")
+    };
+    // Retry layer: timeout exhaustion gets retried `retries` additional
+    // times. For most waits this is a no-op (retries=0), but it lets RPA
+    // scripts chain `--timeout 2s --retries 5` for cheap polling.
+    let mut attempts = f.total_attempts();
+    loop {
+        let body = conn.call(&wire)?;
+        if let Some(e) = errors::parse_err(&body) {
+            attempts = attempts.saturating_sub(1);
+            if attempts > 0 && e.code == errors::ErrCode::Timeout {
+                std::thread::sleep(std::time::Duration::from_millis(f.retry_delay_ms));
+                continue;
+            }
+            return Err(reporter.fail("wait", e));
+        }
+        return reporter.ok("wait", String::from_utf8_lossy(&body).trim_end(),
+            json_out::Obj::new().s("spec", spec).n("timeout_ms", timeout_ms as i64));
+    }
+}
+
+/// A `wait` / `fill` argument that reads as a CSS-like selector rather than text: `#id`, an
+/// `[attr]` predicate, or a relational / text pseudo-class.
+fn css_selector(spec: &str) -> Option<Vec<selector::Selector>> {
+    const PSEUDOS: [&str; 6] = [":has-text(", ":text-is(", ":in(", ":below(", ":right-of(", ":near("];
+    let shaped = spec.starts_with('#') || spec.contains('[') || PSEUDOS.iter().any(|p| spec.contains(p));
+    shaped.then(|| selector::Selector::parse(spec).ok()).flatten()
+}
+
+/// `mobax wait SELECTOR` — poll the app's windows until a node matches.
+fn run_wait_selector(
+    conn: &mut Conn,
+    reporter: &output::Reporter,
+    spec: &str,
+    sels: &[selector::Selector],
+    f: &flags::ActionFlags,
+    timeout_ms: u64,
+) -> io::Result<()> {
+    let start = std::time::Instant::now();
+    let budget = std::time::Duration::from_millis(timeout_ms * f.total_attempts() as u64);
+    loop {
+        let body = conn.call(f.dump_wire())?;
+        if let Some(e) = errors::parse_err(&body) {
+            return Err(reporter.fail("wait", e));
+        }
+        let text = std::str::from_utf8(&body)
+            .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
+        let dump = json::parse(text)
+            .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
+        let ctx = selector::MatchCtx::from_roots(json::app_roots(&dump).into_iter().rev().collect());
+        let mut matches = selector::find_all_with(&ctx, sels);
+        selector::apply_filters(&mut matches, f);
+        if let Some(n) = matches.first() {
+            let elapsed = start.elapsed().as_millis() as i64;
+            let (l, t, r, b) = selector::bounds(n).unwrap_or((0, 0, 0, 0));
+            let (x, y) = ((l + r) / 2, (t + b) / 2);
+            return reporter.ok("wait", &format!("ok x={x} y={y} elapsed={elapsed}"),
+                json_out::Obj::new().s("spec", spec).n("x", x).n("y", y).n("elapsed_ms", elapsed));
+        }
+        if start.elapsed() >= budget {
+            return Err(reporter.fail("wait", errors::ErrInfo::new(
+                errors::ErrCode::Timeout, format!("wait_for_selector:{spec}"))));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+}
+
+/// `mobax find SELECTOR` — match a CSS-like selector against the current
+/// dump_active tree and print one node summary per match. Honours
+/// --visible/--clickable/--enabled/--unique/--nth.
+fn run_find(
+    host: &str,
+    port: u16,
+    out_fmt: flags::OutFmt,
+    sel: &str,
+    f: &flags::ActionFlags,
+) -> io::Result<()> {
+    let reporter = output::Reporter::new(f.out(out_fmt));
+    let selectors = match selector::Selector::parse(sel) {
+        Ok(s) => s,
+        Err(e) => return Err(reporter.fail("find",
+            errors::ErrInfo::new(errors::ErrCode::BadArg, e))),
+    };
+    let mut conn = Conn::connect(host, port)?;
+    let body = conn.call(f.dump_wire())?;
+    if let Some(e) = errors::parse_err(&body) {
+        return Err(reporter.fail("find", e));
+    }
+    let text = std::str::from_utf8(&body)
+        .map_err(|e| io::Error::other(format!("dump not utf-8: {e}")))?;
+    let json = json::parse(text)
+        .map_err(|e| io::Error::other(format!("dump not json: {e}")))?;
+    // App windows, topmost first — the order `mobax tap` prefers.
+    let ctx = selector::MatchCtx::from_roots(json::app_roots(&json).into_iter().rev().collect());
+    let mut matches = selector::find_all_with(&ctx, &selectors);
+    selector::apply_filters(&mut matches, f);
+
+    if matches.is_empty() {
+        return Err(reporter.fail("find",
+            errors::ErrInfo::new(errors::ErrCode::NotFound,
+                format!("no node matched '{sel}'"))));
+    }
+    if f.require_unique && matches.len() > 1 {
+        return Err(reporter.fail("find",
+            errors::ErrInfo::new(errors::ErrCode::Ambiguous,
+                format!("--unique: '{sel}' matched {} nodes", matches.len()))));
+    }
+    if let Some(n) = f.nth {
+        if n == 0 || n > matches.len() {
+            return Err(reporter.fail("find",
+                errors::ErrInfo::new(errors::ErrCode::NotFound,
+                    format!("--nth {n} out of range (have {})", matches.len()))));
+        }
+        let picked = matches[n - 1];
+        matches.clear();
+        matches.push(picked);
+    }
+
+    // Output: either one human row per match, or one JSON line per match
+    // (so machine consumers can read with --json | jq -c).
+    match f.out(out_fmt) {
+        flags::OutFmt::Human => {
+            let mut out = io::stdout().lock();
+            for n in &matches {
+                write_find_row(&mut out, n)?;
+            }
+            out.flush()?;
+        }
+        flags::OutFmt::Json => {
+            let mut out = io::stdout().lock();
+            for n in &matches {
+                let row = find_row_obj(n).finish();
+                let line = json_out::Obj::new()
+                    .s("verb", "find")
+                    .b("ok", true)
+                    .raw("result", &row)
+                    .finish();
+                writeln!(out, "{line}")?;
+            }
+            out.flush()?;
+        }
+    }
+    Ok(())
+}
+
+fn write_find_row(out: &mut io::StdoutLock<'_>, n: &json::Value) -> io::Result<()> {
+    let cls = selector::get_str(n, "cls").unwrap_or("");
+    let id  = selector::get_str(n, "rid").unwrap_or("");
+    let t   = selector::get_str(n, "text").unwrap_or("");
+    let d   = selector::get_str(n, "desc").unwrap_or("");
+    let bs  = match selector::bounds(n) {
+        Some((x1, y1, x2, y2)) => {
+            let cx = (x1 + x2) / 2;
+            let cy = (y1 + y2) / 2;
+            format!("[{x1},{y1}][{x2},{y2}] center=({cx},{cy})")
+        }
+        None => "[]".into(),
+    };
+    write!(out, "{bs}\tclass={cls}\tid={id}\ttext={t:?}\tdesc={d:?}")?;
+    for key in ["role", "state", "actions"] {
+        if let Some(v) = selector::get_str(n, key) {
+            write!(out, "\t{key}={v:?}")?;
+        }
+    }
+    writeln!(out)
+}
+
+fn find_row_obj(n: &json::Value) -> json_out::Obj {
+    let mut o = json_out::Obj::new()
+        .s("class", selector::get_str(n, "cls").unwrap_or(""))
+        .s("id",    selector::get_str(n, "rid").unwrap_or(""))
+        .s("text",  selector::get_str(n, "text").unwrap_or(""))
+        .s("desc",  selector::get_str(n, "desc").unwrap_or(""))
+        .s("flags", selector::get_str(n, "flags").unwrap_or(""));
+    for key in ["role", "state", "error", "range", "collection", "item", "actions"] {
+        o = o.opt_s(key, selector::get_str(n, key));
+    }
+    if let Some((x1, y1, x2, y2)) = selector::bounds(n) {
+        let cx = (x1 + x2) / 2;
+        let cy = (y1 + y2) / 2;
+        o = o.n("x1", x1).n("y1", y1).n("x2", x2).n("y2", y2)
+             .n("cx", cx).n("cy", cy);
+    }
+    o
+}
+
+/// Dispatch a verb line parsed inside `mobax run`. Re-uses the one-shot verb
+/// parser, then routes the cmd through a session-aware handler when one
+/// exists (TapText, Find, Wait, …) or the standard one-shot path otherwise.
+pub(crate) fn dispatch_session_verb(
+    sess: &mut session::Session,
+    argv: &[String],
+) -> io::Result<()> {
+    let opts = match parse_args(argv) {
+        Ok(o) => o,
+        Err(e) => return Err(io::Error::other(e)),
+    };
+    // Pull defaults from the session unless the verb line set its own.
+    match opts.cmd {
+        Cmd::TapText { query, mut flags } => {
+            merge_session_defaults(&mut flags, sess);
+            sess.defaults = flags.clone();
+            let reporter = output::Reporter::new(flags.out(sess.default_out));
+            tap_text::run_session(sess, &query, &reporter, "tap")
+        }
+        Cmd::TapXY { x, y, flags } => {
+            let reporter = output::Reporter::new(flags.out(sess.default_out));
+            let body = sess.conn.call(&format!("tap x={x} y={y}"))?;
+            if let Some(e) = errors::parse_err(&body) {
+                return Err(reporter.fail("tap", e));
+            }
+            reporter.ok("tap", String::from_utf8_lossy(&body).trim_end(),
+                json_out::Obj::new().n("x", x as i64).n("y", y as i64))
+        }
+        Cmd::Wait { spec, mut flags } => {
+            merge_session_defaults(&mut flags, sess);
+            run_wait(&sess.peer_host(), sess.peer_port(),
+                sess.default_out, &spec, &flags)
+        }
+        Cmd::Find { selector: sel, mut flags } => {
+            merge_session_defaults(&mut flags, sess);
+            run_find(&sess.peer_host(), sess.peer_port(),
+                sess.default_out, &sel, &flags)
+        }
+        Cmd::Submit { sel, mut flags } => {
+            merge_session_defaults(&mut flags, sess);
+            let reporter = output::Reporter::new(flags.out(sess.default_out));
+            let wire = match &sel {
+                Some(s) => format!("submit {s}"),
+                None => "submit".into(),
+            };
+            let body = sess.conn.call(&wire)?;
+            if let Some(e) = errors::parse_err(&body) {
+                return Err(reporter.fail("submit", e));
+            }
+            reporter.ok("submit", String::from_utf8_lossy(&body).trim_end(),
+                json_out::Obj::new().opt_s("selector", sel.as_deref()))
+        }
+        Cmd::Paste { sel, mut flags } => {
+            merge_session_defaults(&mut flags, sess);
+            let reporter = output::Reporter::new(flags.out(sess.default_out));
+            let wire = match &sel {
+                Some(s) => format!("paste {s}"),
+                None => "paste".into(),
+            };
+            let body = sess.conn.call(&wire)?;
+            if let Some(e) = errors::parse_err(&body) {
+                return Err(reporter.fail("paste", e));
+            }
+            reporter.ok("paste", String::from_utf8_lossy(&body).trim_end(),
+                json_out::Obj::new().opt_s("selector", sel.as_deref()))
+        }
+        Cmd::TypeFocused { text, mut flags } => {
+            merge_session_defaults(&mut flags, sess);
+            let reporter = output::Reporter::new(flags.out(sess.default_out));
+            let body = sess.conn.call(&format!("text {text}"))?;
+            if let Some(e) = errors::parse_err(&body) {
+                return Err(reporter.fail("type", e));
+            }
+            reporter.ok("type", String::from_utf8_lossy(&body).trim_end(),
+                json_out::Obj::new().s("text", &text))
+        }
+        Cmd::TypeInto { selector, text, mut flags } => {
+            merge_session_defaults(&mut flags, sess);
+            let reporter = output::Reporter::new(flags.out(sess.default_out));
+            fill_into(&mut sess.conn, &reporter, &selector, &text, &flags)
+        }
+        Cmd::Input(wire) => {
+            let body = sess.conn.call(&wire)?;
+            if let Some(e) = errors::parse_err(&body) {
+                let reporter = output::Reporter::new(sess.default_out);
+                return Err(reporter.fail("do", e));
+            }
+            let mut out = io::stdout().lock();
+            out.write_all(&body)?;
+            if body.last() != Some(&b'\n') { out.write_all(b"\n")?; }
+            out.flush()
+        }
+        other => {
+            // For verbs that aren't session-aware yet, build a fresh Opts
+            // and reuse the one-shot dispatch. We deliberately lose the
+            // warm-socket benefit here — but it's still strictly better
+            // than the user spawning a child `mobax` process per line.
+            let synthetic = Opts {
+                host: sess.peer_host(),
+                port: sess.peer_port(),
+                out_fmt: sess.default_out,
+                cmd: other,
+            };
+            run(&synthetic)
+        }
+    }
+}
+
+/// Apply session-level defaults to a verb-line flags struct: only fields
+/// the verb didn't set itself get inherited. Lets `set timeout=8s` at the
+/// top of a script flow into every subsequent `tap`/`wait`/etc.
+fn merge_session_defaults(f: &mut flags::ActionFlags, sess: &session::Session) {
+    if f.timeout_ms.is_none() { f.timeout_ms = sess.defaults.timeout_ms; }
+    if f.retries == 0           { f.retries = sess.defaults.retries; }
+    if f.retry_delay_ms == 200  { f.retry_delay_ms = sess.defaults.retry_delay_ms; }
+    if !f.require_visible       { f.require_visible   = sess.defaults.require_visible; }
+    if !f.require_clickable     { f.require_clickable = sess.defaults.require_clickable; }
+    if !f.require_enabled       { f.require_enabled   = sess.defaults.require_enabled; }
+    if !f.active_window         { f.active_window     = sess.defaults.active_window; }
+    if f.out_fmt.is_none()      { f.out_fmt = sess.defaults.out_fmt; }
+}
+
+/// Parse "Nms", "Ns" (where N is unsigned int).
+fn parse_duration_ms(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix("ms") {
+        n.trim().parse::<u64>().ok()
+    } else if let Some(n) = s.strip_suffix('s') {
+        n.trim().parse::<u64>().ok().map(|n| n * 1000)
+    } else {
+        None
+    }
+}
+
+fn is_component(s: &str) -> bool {
+    s.contains('/') && s.chars().all(|c|
+        c.is_ascii_alphanumeric() || c == '.' || c == '/' || c == '_' || c == '$')
+}
+
+/// `mobax cp` — direction from the `device:` prefix.
+fn run_cp(host: &str, port: u16, src: &str, dst: &str) -> io::Result<()> {
+    let to_dev = dst.starts_with("device:");
+    let from_dev = src.starts_with("device:");
+    if to_dev && from_dev {
+        return Err(io::Error::other("cp: both sides device — not supported"));
+    }
+    if !to_dev && !from_dev {
+        return Err(io::Error::other("cp: one side must start with 'device:'"));
+    }
+    let cmd = if from_dev {
+        let device = src.strip_prefix("device:").unwrap().to_string();
+        adb::Cmd::Pull { device, host: Some(dst.to_string()) }
+    } else {
+        let device = dst.strip_prefix("device:").unwrap().to_string();
+        adb::Cmd::Push { host: src.to_string(), device, mode: None }
+    };
+    adb::run(host, port, &cmd)
+}
+
+fn format_uptime(s: u64) -> String {
+    if s == 0 { return String::new(); }
+    let d = s / 86400;
+    let h = (s % 86400) / 3600;
+    let m = (s % 3600) / 60;
+    if d > 0 { format!("{d}d {h}h {m}m") }
+    else if h > 0 { format!("{h}h {m}m") }
+    else { format!("{m}m") }
+}
+
+fn format_bytes_pair(used_kb: u64, total_kb: u64) -> String {
+    if total_kb == 0 { return String::new(); }
+    let to_gib = |kb: u64| (kb as f64) / 1024.0 / 1024.0;
+    format!("{:.1} / {:.1} GiB", to_gib(used_kb), to_gib(total_kb))
+}
+
+/// `mobax info` — neofetch-style snapshot. Reads the local push-mirrored
+/// cache file (the state-daemon spawned by `mobax use` keeps it fresh via
+/// event hooks + 5-s heartbeat). No daemon round-trips on the hot path —
+/// total cost is one file read + JSON parse + format.
+fn run_info(host: &str, port: u16) -> io::Result<()> {
+    // 1. Fast path — cache file written by the host-side state-daemon.
+    let snap_bytes = match state_cache::read_cached(port) {
+        Some(b) => b,
+        None => {
+            // No daemon yet (or stale). Fall back to a single wire call.
+            let mut conn = Conn::connect(host, port)?;
+            conn.call("state device")?
+        }
+    };
+    let state = json::parse(std::str::from_utf8(&snap_bytes).unwrap_or("{}"))
+        .unwrap_or(json::Value::Null);
+    let get_str = |k: &str| -> String {
+        if let json::Value::Obj(fields) = &state {
+            for (kk, v) in fields {
+                if kk == k {
+                    return match v {
+                        json::Value::Str(s) => s.clone(),
+                        json::Value::Num(n) => n.to_string(),
+                        json::Value::Bool(b) => b.to_string(),
+                        _ => String::new(),
+                    };
+                }
+            }
+        }
+        String::new()
+    };
+    // Pulled from the snapshot — static (cached once on the daemon side)
+    // and dynamic (refreshed on every snapshot refresh).
+    let model       = get_str("model");
+    let mfg         = get_str("manufacturer");
+    let device      = get_str("device");
+    let release     = get_str("release");
+    let codename    = get_str("codename");
+    let build_type  = get_str("build_type");
+    let fingerprint = get_str("fingerprint");
+    let abi         = get_str("abi");
+    let sdk         = get_str("sdk");
+    let width       = get_str("width");
+    let height      = get_str("height");
+    let rotation    = get_str("rotation");
+    let battery     = get_str("battery_level");
+    let charging    = get_str("battery_charging");
+    let inter       = get_str("interactive");
+    let top         = get_str("top_activity");
+    let temp_c      = get_str("battery_temp_c");
+    let uptime_s    = get_str("uptime_s");
+    let mem_total_k = get_str("total_ram_kb");
+    let mem_avail_k = get_str("mem_available_kb");
+    let stor_total_k = get_str("total_storage_kb");
+    let stor_free_k = get_str("storage_free_kb");
+    let cpu_cores   = get_str("cpu_cores");
+    let cpu_model   = get_str("cpu_model");
+    let kernel      = get_str("kernel");
+    let locale      = get_str("locale");
+    let timezone    = get_str("timezone");
+    let theme       = get_str("theme");
+    let net         = get_str("network");
+    let ip          = get_str("ip");
+    let ssid        = get_str("wifi_ssid");
+    let app_count   = get_str("app_count");
+    let app_3rd     = get_str("app_count_3rd");
+    let _ = (host, fingerprint.clone());   // hush unused warnings
+
+    // Compose the right-hand-side rows.
+    let title  = if !model.is_empty() && !mfg.is_empty() {
+        format!("{mfg} {model}")
+    } else if !model.is_empty() { model.clone() } else { device.clone() };
+    let title_under = "─".repeat(title.chars().count().max(1));
+
+    let mut rows: Vec<(String, String)> = Vec::new();
+    let push = |rows: &mut Vec<(String, String)>, k: &str, v: String| {
+        if !v.is_empty() { rows.push((k.into(), v)); }
+    };
+    push(&mut rows, "OS",      if release.is_empty() {
+            String::new()
+        } else {
+            format!("Android {release}{}{}{}",
+                if codename.is_empty() || codename == "REL" { String::new() }
+                    else { format!(" ({codename})") },
+                if sdk.is_empty() { String::new() } else { format!(" — SDK {sdk}") },
+                if build_type.is_empty() || build_type == "user" { String::new() }
+                    else { format!(" ({build_type})") })
+        });
+    push(&mut rows, "Kernel",  kernel.clone());
+    push(&mut rows, "Uptime",  format_uptime(uptime_s.parse().unwrap_or(0)));
+    push(&mut rows, "Display", if width.is_empty() { String::new() }
+        else { format!("{width} × {height}   (rotation {rotation})") });
+    push(&mut rows, "CPU",     if cpu_cores.is_empty() { abi.clone() }
+        else if cpu_model.is_empty() { format!("{cpu_cores}× {abi}") }
+        else { format!("{cpu_cores}× {abi}  ({cpu_model})") });
+    let mem_t: u64 = mem_total_k.parse().unwrap_or(0);
+    let mem_a: u64 = mem_avail_k.parse().unwrap_or(0);
+    push(&mut rows, "Memory", format_bytes_pair(mem_t.saturating_sub(mem_a), mem_t));
+    let stor_t: u64 = stor_total_k.parse().unwrap_or(0);
+    let stor_f: u64 = stor_free_k.parse().unwrap_or(0);
+    push(&mut rows, "Storage", format_bytes_pair(stor_t.saturating_sub(stor_f), stor_t));
+    push(&mut rows, "Battery", if battery.is_empty() { String::new() }
+        else {
+            let onoff = if inter == "true" { "screen on" } else { "screen off" };
+            let chg   = if charging == "true" { ", charging" } else { "" };
+            let temp  = if temp_c.is_empty() || temp_c == "null" { String::new() }
+                        else { format!(", {temp_c} °C") };
+            format!("{battery}%  ({onoff}{chg}{temp})")
+        });
+    push(&mut rows, "Network", if net.is_empty() { String::new() } else {
+        let mut s = net.clone();
+        if !ssid.is_empty() { s.push_str(" · "); s.push_str(&ssid); }
+        if !ip.is_empty()   { s.push_str(" · "); s.push_str(&ip); }
+        s
+    });
+    push(&mut rows, "Theme",   theme.clone());
+    push(&mut rows, "Locale",  if locale.is_empty() { String::new() }
+        else if timezone.is_empty() { locale.clone() }
+        else { format!("{locale}  ·  {timezone}") });
+    push(&mut rows, "Apps",    if app_count.is_empty() { String::new() }
+        else if app_3rd.is_empty() || app_3rd == "0" { format!("{app_count} packages") }
+        else { format!("{app_count} packages  ({app_3rd} third-party)") });
+    push(&mut rows, "Top",     top);
+    push(&mut rows, "Daemon",  format!("mobaxd on tcp:{port}"));
+
+    // ASCII android bugdroid (7 rows, ~13 wide).
+    let logo: [&str; 12] = [
+        "                ",
+        "    \\       /   ",
+        "     \\ ___ /    ",
+        "      /   \\     ",
+        "     | o o |    ",
+        "     |  _  |    ",
+        "      \\___/     ",
+        "     |     |    ",
+        "     |     |    ",
+        "     |_____|    ",
+        "      |   |     ",
+        "                ",
+    ];
+
+    // Header rows: title and underline.
+    let mut header = vec![
+        ("".to_string(), title),
+        ("".to_string(), title_under),
+    ];
+    header.extend(rows);
+    let rows = header;
+
+    let mut out = io::stdout().lock();
+    let n = rows.len().max(logo.len());
+    for i in 0..n {
+        let logo_line = logo.get(i).copied().unwrap_or("                ");
+        let (key, val) = rows.get(i).cloned().unwrap_or_default();
+        if key.is_empty() {
+            writeln!(out, "{logo_line}{val}")?;
+        } else {
+            writeln!(out, "{logo_line}{key:<8}  {val}")?;
+        }
+    }
+    out.flush()
+}
+
+/// `mobax show <pkg>` — pm_path + the daemon's dumpsys package summary.
+fn run_show_pkg(host: &str, port: u16, pkg: &str) -> io::Result<()> {
+    let mut conn = Conn::connect(host, port)?;
+    let path = conn.call(&format!("pm_path {pkg}"))?;
+    let path_s = std::str::from_utf8(&path).unwrap_or("").trim();
+    let mut out = io::stdout().lock();
+    if path_s.starts_with("ERR:") {
+        return Err(io::Error::other(path_s.to_string()));
+    }
+    writeln!(out, "package: {pkg}")?;
+    writeln!(out, "  path:  {path_s}")?;
+    // Try a short dumpsys package — the first few lines usually cover
+    // versionName / versionCode / firstInstallTime.
+    let info = conn.call(&format!("dumpsys package {pkg}"));
+    if info.is_ok() {
+        // dumpsys returns chunked frames; for now skip detailed parsing.
+        // The path alone is the most-asked-for field.
+    }
+    out.flush()
+}
+
+fn write_response(cmd: &Cmd, body: &[u8]) -> io::Result<()> {
+    let mut out = io::stdout().lock();
+    out.write_all(body)?;
+    // Trailing newline only for text commands on a terminal — never for binary.
+    let is_text = matches!(
+        cmd,
+        Cmd::Ping | Cmd::Quit | Cmd::Input(_) | Cmd::Bench { .. } | Cmd::Find { .. }
+    );
+    if is_text && !body.is_empty() && body[body.len() - 1] != b'\n' {
+        out.write_all(b"\n")?;
+    }
+    out.flush()
+}
+
+// ---------- protocol ----------
+
+pub(crate) struct Conn {
+    sock: TcpStream,
+}
+
+impl Conn {
+    pub(crate) fn connect(host: &str, port: u16) -> io::Result<Self> {
+        let sock = match TcpStream::connect((host, port)) {
+            Ok(s) => s,
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused
+                    && is_local(host) => {
+                // No daemon listening on the default port. If exactly
+                // one device is attached, transparently auto-`mobax use`
+                // it so users don't have to do that step manually.
+                match try_auto_use(port) {
+                    Ok(()) => TcpStream::connect((host, port))?,
+                    Err(why) => return Err(io::Error::new(e.kind(),
+                        format!("no daemon on {host}:{port}; {why}"))),
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        sock.set_nodelay(true)?;
+        sock.set_read_timeout(Some(Duration::from_secs(30)))?;
+        sock.set_write_timeout(Some(Duration::from_secs(10)))?;
+        Ok(Self { sock })
+    }
+
+    pub(crate) fn call(&mut self, cmd: &str) -> io::Result<Vec<u8>> {
+        self.send_cmd(cmd)?;
+        self.read_frame()
+    }
+
+    /// Length-prefixed command write; doesn't read a reply.
+    pub(crate) fn send_cmd(&mut self, cmd: &str) -> io::Result<()> {
+        let payload = cmd.as_bytes();
+        let len = u32::try_from(payload.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "cmd too long"))?;
+        self.sock.write_all(&len.to_be_bytes())?;
+        self.sock.write_all(payload)?;
+        Ok(())
+    }
+
+    /// Read one length-prefixed response frame.
+    pub(crate) fn read_frame(&mut self) -> io::Result<Vec<u8>> {
+        let mut hdr = [0u8; 4];
+        self.sock.read_exact(&mut hdr)?;
+        let n = u32::from_be_bytes(hdr) as usize;
+        if n > 256 * 1024 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("oversized response: {n} bytes"),
+            ));
+        }
+        let mut buf = vec![0u8; n];
+        self.sock.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
+    /// Drain a server-streamed chunked response into `out`. Reads
+    /// `[len][chunk]…` frames until `len == 0`. A leading `ERR:` payload is
+    /// surfaced as an io::Error.
+    pub(crate) fn recv_chunks_to(&mut self, out: &mut dyn Write) -> io::Result<u64> {
+        let mut total = 0u64;
+        let mut first = true;
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let mut hdr = [0u8; 4];
+            self.sock.read_exact(&mut hdr)?;
+            let n = u32::from_be_bytes(hdr) as usize;
+            if n == 0 {
+                return Ok(total);
+            }
+            if n > 8 * 1024 * 1024 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("oversized chunk: {n} bytes"),
+                ));
+            }
+            if buf.len() < n { buf.resize(n, 0); }
+            self.sock.read_exact(&mut buf[..n])?;
+            if first && n >= 4 && &buf[..4] == b"ERR:" {
+                let msg = String::from_utf8_lossy(&buf[..n]).into_owned();
+                // Drain the terminating 0-frame so the socket stays in sync.
+                let mut h2 = [0u8; 4];
+                let _ = self.sock.read_exact(&mut h2);
+                return Err(io::Error::other(msg));
+            }
+            first = false;
+            out.write_all(&buf[..n])?;
+            total += n as u64;
+        }
+    }
+
+    /// Stream `src` to the server as `[len][chunk]…[len=0]` frames.
+    pub(crate) fn send_chunks_from(&mut self, src: &mut dyn Read) -> io::Result<u64> {
+        let mut total = 0u64;
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let n = src.read(&mut buf)?;
+            if n == 0 {
+                self.sock.write_all(&0u32.to_be_bytes())?;
+                return Ok(total);
+            }
+            let len = u32::try_from(n).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "chunk too large")
+            })?;
+            self.sock.write_all(&len.to_be_bytes())?;
+            self.sock.write_all(&buf[..n])?;
+            total += n as u64;
+        }
+    }
+}
+
+// ---------- bench ----------
+
+struct BenchCase {
+    label: &'static str,
+    wire: &'static str,
+}
+
+struct BenchResult {
+    label: &'static str,
+    wire: &'static str,
+    min_ms: f64,
+    p50_ms: f64,
+    p90_ms: f64,
+    p95_ms: f64,
+    p99_ms: f64,
+    mean_ms: f64,
+    stddev_ms: f64,
+    bytes: usize,
+    errors: u32,
+    last_error: Option<String>,
+}
+
+fn bench(host: &str, port: u16, n: u32, json_output: bool) -> io::Result<()> {
+    let mut conn = Conn::connect(host, port)?;
+    let meta = bench_metadata(&mut conn, port)?;
+    // Discover available commands by probing — start with cheap ones.
+    // Warm the default mirror first so the size-sweep timing doesn't include
+    // the one-time VirtualDisplay creation for each new size.
+    let _ = conn.call("screenshot")?;
+    let _ = conn.call("screenshot size=480")?;
+    let _ = conn.call("screenshot size=1080")?;
+    let _ = conn.call("screenshot max=1")?;
+    // Then re-warm 768 so the bench starts from the default.
+    let _ = conn.call("screenshot size=768")?;
+
+    let cases: &[BenchCase] = &[
+        BenchCase { label: "ping",                       wire: "ping" },
+        BenchCase { label: "info",                       wire: "info" },
+        BenchCase { label: "wm_info",                    wire: "wm_info" },
+        BenchCase { label: "state top",                  wire: "state top" },
+        BenchCase { label: "wait_for_idle",              wire: "wait_for_idle idle_ms=0 timeout_ms=1000" },
+        BenchCase { label: "dump_active",                wire: "dump_active" },
+        BenchCase { label: "dump",                       wire: "dump" },
+        BenchCase { label: "screenshot 480 q80 jpeg",    wire: "screenshot size=480" },
+        BenchCase { label: "screenshot 768 q80 jpeg",    wire: "screenshot size=768" },
+        BenchCase { label: "screenshot 1080 q80 jpeg",   wire: "screenshot size=1080" },
+        BenchCase { label: "screenshot 1080 q95 jpeg",   wire: "screenshot size=1080 q=95" },
+        BenchCase { label: "screenshot native q80 jpeg", wire: "screenshot max=1" },
+        BenchCase { label: "screenshot 768 q95 jpeg",    wire: "screenshot size=768 q=95" },
+        BenchCase { label: "screenshot 768 q80 webp",    wire: "screenshot size=768 fmt=webp" },
+    ];
+
+    let mut results = Vec::with_capacity(cases.len());
+    if !json_output {
+        eprintln!("warm-socket benchmark, n={n} per command");
+        eprintln!(
+            "device: {}{}{}  host: {}/{}  mobax {}",
+            meta.device_label(),
+            meta.display_label(),
+            meta.top_label(),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            env!("CARGO_PKG_VERSION"),
+        );
+        eprintln!(
+            "{:<30}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>12}  {:>6}",
+            "command", "min ms", "p50 ms", "p95 ms", "p99 ms", "mean ms", "bytes", "errors"
+        );
+    }
+    for case in cases {
+        // Warm-up.
+        let _ = conn.call(case.wire);
+        let mut samples = Vec::with_capacity(n as usize);
+        let mut last_len = 0usize;
+        let mut errors = 0u32;
+        let mut last_error = None;
+        for _ in 0..n {
+            let t0 = Instant::now();
+            match conn.call(case.wire) {
+                Ok(body) if body.starts_with(b"ERR:") => {
+                    errors += 1;
+                    last_error = Some(String::from_utf8_lossy(&body).into_owned());
+                }
+                Ok(body) => {
+                    samples.push(t0.elapsed());
+                    last_len = body.len();
+                }
+                Err(e) => {
+                    errors += 1;
+                    last_error = Some(e.to_string());
+                }
+            }
+        }
+        if samples.is_empty() {
+            let result = BenchResult {
+                label: case.label,
+                wire: case.wire,
+                min_ms: 0.0,
+                p50_ms: 0.0,
+                p90_ms: 0.0,
+                p95_ms: 0.0,
+                p99_ms: 0.0,
+                mean_ms: 0.0,
+                stddev_ms: 0.0,
+                bytes: last_len,
+                errors,
+                last_error,
+            };
+            if !json_output {
+                eprintln!(
+                    "{:<30}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>12}  {:>6}",
+                    case.label, "-", "-", "-", "-", "-", last_len, errors,
+                );
+            }
+            results.push(result);
+            continue;
+        }
+        samples.sort();
+        let min_ms = ms(samples[0]);
+        let p50_ms = ms(percentile(&samples, 0.50));
+        let p90_ms = ms(percentile(&samples, 0.90));
+        let p95_ms = ms(percentile(&samples, 0.95));
+        let p99_ms = ms(percentile(&samples, 0.99));
+        let mean_ms = samples.iter().map(|d| ms(*d)).sum::<f64>() / samples.len() as f64;
+        let variance = samples.iter()
+            .map(|d| {
+                let delta = ms(*d) - mean_ms;
+                delta * delta
+            })
+            .sum::<f64>() / samples.len() as f64;
+        let result = BenchResult {
+            label: case.label,
+            wire: case.wire,
+            min_ms,
+            p50_ms,
+            p90_ms,
+            p95_ms,
+            p99_ms,
+            mean_ms,
+            stddev_ms: variance.sqrt(),
+            bytes: last_len,
+            errors,
+            last_error,
+        };
+        if !json_output {
+            eprintln!(
+                "{:<30}  {:>9.3}  {:>9.3}  {:>9.3}  {:>9.3}  {:>9.3}  {:>12}  {:>6}",
+                result.label,
+                result.min_ms,
+                result.p50_ms,
+                result.p95_ms,
+                result.p99_ms,
+                result.mean_ms,
+                result.bytes,
+                result.errors,
+            );
+        }
+        results.push(result);
+    }
+    if json_output {
+        println!("{}", bench_json(n, &meta, &results));
+    }
+    Ok(())
+}
+
+fn ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
+}
+
+fn percentile(samples: &[Duration], q: f64) -> Duration {
+    let idx = ((samples.len() as f64 * q).ceil() as usize)
+        .saturating_sub(1)
+        .min(samples.len() - 1);
+    samples[idx]
+}
+
+struct BenchMeta {
+    model: String,
+    manufacturer: String,
+    sdk: String,
+    release: String,
+    width: String,
+    height: String,
+    rotation: String,
+    top_activity: String,
+}
+
+impl BenchMeta {
+    fn device_label(&self) -> String {
+        let name = match (self.manufacturer.is_empty(), self.model.is_empty()) {
+            (false, false) => format!("{} {}", self.manufacturer, self.model),
+            (_, false) => self.model.clone(),
+            _ => "unknown device".into(),
+        };
+        let os = match (self.release.is_empty(), self.sdk.is_empty()) {
+            (false, false) => format!(" Android {} SDK {}", self.release, self.sdk),
+            (true, false) => format!(" SDK {}", self.sdk),
+            (false, true) => format!(" Android {}", self.release),
+            (true, true) => String::new(),
+        };
+        format!("{name}{os}")
+    }
+
+    fn display_label(&self) -> String {
+        if self.width.is_empty() || self.height.is_empty() {
+            String::new()
+        } else if self.rotation.is_empty() {
+            format!("  display: {}x{}", self.width, self.height)
+        } else {
+            format!("  display: {}x{} r{}", self.width, self.height, self.rotation)
+        }
+    }
+
+    fn top_label(&self) -> String {
+        if self.top_activity.is_empty() || self.top_activity == "null" {
+            String::new()
+        } else {
+            format!("  top: {}", self.top_activity)
+        }
+    }
+}
+
+fn bench_metadata(conn: &mut Conn, port: u16) -> io::Result<BenchMeta> {
+    let snap = match state_cache::read_cached(port) {
+        Some(b) => b,
+        None => conn.call("state device")?,
+    };
+    let state = json::parse(std::str::from_utf8(&snap).unwrap_or("{}"))
+        .unwrap_or(json::Value::Null);
+    let get = |k: &str| json_field_string(&state, k);
+    Ok(BenchMeta {
+        model: get("model"),
+        manufacturer: get("manufacturer"),
+        sdk: get("sdk"),
+        release: get("release"),
+        width: get("width"),
+        height: get("height"),
+        rotation: get("rotation"),
+        top_activity: get("top_activity"),
+    })
+}
+
+fn json_field_string(v: &json::Value, key: &str) -> String {
+    if let json::Value::Obj(fields) = v {
+        for (k, val) in fields {
+            if k == key {
+                return match val {
+                    json::Value::Str(s) => s.clone(),
+                    json::Value::Num(n) => n.to_string(),
+                    json::Value::Bool(b) => b.to_string(),
+                    _ => String::new(),
+                };
+            }
+        }
+    }
+    String::new()
+}
+
+fn bench_json(n: u32, meta: &BenchMeta, results: &[BenchResult]) -> String {
+    let metadata = json_out::Obj::new()
+        .s("model", &meta.model)
+        .s("manufacturer", &meta.manufacturer)
+        .s("sdk", &meta.sdk)
+        .s("release", &meta.release)
+        .s("width", &meta.width)
+        .s("height", &meta.height)
+        .s("rotation", &meta.rotation)
+        .s("top_activity", &meta.top_activity)
+        .s("host_os", std::env::consts::OS)
+        .s("host_arch", std::env::consts::ARCH)
+        .s("mobax_version", env!("CARGO_PKG_VERSION"))
+        .finish();
+    let mut cases = String::from("[");
+    for (i, r) in results.iter().enumerate() {
+        if i > 0 { cases.push(','); }
+        cases.push_str(&bench_result_json(r));
+    }
+    cases.push(']');
+    json_out::Obj::new()
+        .s("type", "mobax_bench")
+        .n("n", n as i64)
+        .s("mode", "warm_socket")
+        .raw("metadata", &metadata)
+        .raw("cases", &cases)
+        .finish()
+}
+
+fn bench_result_json(r: &BenchResult) -> String {
+    let mut s = json_out::Obj::new()
+        .s("command", r.label)
+        .s("wire", r.wire)
+        .raw("min_ms", &format!("{:.3}", r.min_ms))
+        .raw("p50_ms", &format!("{:.3}", r.p50_ms))
+        .raw("p90_ms", &format!("{:.3}", r.p90_ms))
+        .raw("p95_ms", &format!("{:.3}", r.p95_ms))
+        .raw("p99_ms", &format!("{:.3}", r.p99_ms))
+        .raw("mean_ms", &format!("{:.3}", r.mean_ms))
+        .raw("stddev_ms", &format!("{:.3}", r.stddev_ms))
+        .n("bytes", r.bytes as i64)
+        .n("errors", r.errors as i64);
+    if let Some(e) = r.last_error.as_deref() {
+        s = s.s("last_error", e);
+    }
+    s.finish()
+}
+
+fn print_devices() -> io::Result<()> {
+    let mut rows = daemon::devices()?;
+    if rows.is_empty() {
+        println!("no devices attached");
+        return Ok(());
+    }
+    // If exactly one device is attached and no daemon is running for it
+    // yet, transparently `mobax use` so the listing shows it ready to go.
+    if rows.len() == 1 && rows[0].state == "device" && !rows[0].running {
+        let opts = daemon::ConnectOpts {
+            serial: Some(rows[0].serial.clone()),
+            port: None,
+        };
+        if let Ok(port) = daemon::connect(&opts) {
+            eprintln!("daemon up on tcp:{port} (auto)");
+            rows = daemon::devices()?;
+        }
+    }
+    println!(
+        "{:<24} {:<10} {:<7} {:<8} {:<10} {:<16} model",
+        "serial", "state", "jar", "running", "host_port", "sdk"
+    );
+    for r in rows {
+        println!(
+            "{:<24} {:<10} {:<7} {:<8} {:<10} {:<16} {}",
+            r.serial,
+            r.state,
+            if r.jar_present { "yes" } else { "no" },
+            if r.running { "yes" } else { "no" },
+            r.host_port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+            r.sdk.unwrap_or_else(|| "-".into()),
+            r.model.unwrap_or_else(|| "-".into()),
+        );
+    }
+    Ok(())
+}
+
+fn is_local(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// If exactly one device is attached, run the equivalent of `mobax use`
+/// against it so daemon-needing verbs work without an explicit `mobax use`
+/// first. Returns a short human reason on the error path.
+fn try_auto_use(port: u16) -> Result<(), String> {
+    let rows = daemon::devices().map_err(|e| format!("adb devices failed: {e}"))?;
+    let alive: Vec<_> = rows.iter().filter(|r| r.state == "device").collect();
+    match alive.len() {
+        0 => Err("no devices attached".into()),
+        1 => {
+            let opts = daemon::ConnectOpts {
+                serial: Some(alive[0].serial.clone()),
+                port: Some(port),
+            };
+            let p = daemon::connect(&opts)
+                .map_err(|e| format!("daemon::connect failed: {e}"))?;
+            eprintln!("daemon up on tcp:{p} (auto)");
+            Ok(())
+        }
+        n => Err(format!(
+            "{n} devices attached; pass `mobax use SERIAL` to pick one"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod parse_logs_tests {
+    use super::{adb, logcat_regex, parse_logs, Cmd};
+
+    fn q(v: &[&str]) -> adb::LogcatQuery {
+        match parse_logs(v).unwrap() {
+            Cmd::Adb(adb::Cmd::Logcat(q)) => q,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn defaults_and_filters() {
+        // Unfiltered: logcat's -t, and the host tail drops the buffer banners.
+        let d = q(&[]);
+        assert_eq!((d.args.as_slice(), d.tail), (&["-d", "-t", "100"].map(String::from)[..], Some(100)));
+        // Filters: no logcat -t (it counts before filtering); the host tails.
+        assert_eq!(q(&["--level", "warn"]).args, ["-d", "*:W"]);
+        assert_eq!(
+            q(&["--tag", "ActivityManager", "--tag", "mobaxd:D", "--level", "I"]).args,
+            ["-d", "ActivityManager:I", "mobaxd:D", "*:S"]
+        );
+        let c = q(&["--crash", "-t", "20", "--grep", "FATAL"]);
+        assert_eq!((c.args.as_slice(), c.tail), (&["-b", "crash", "-d", "-e", "FATAL"].map(String::from)[..], Some(20)));
+        assert_eq!(q(&["--crash", "-t", "20"]).args, ["-b", "crash", "-d", "-t", "20"]);
+        assert_eq!(q(&["--clear", "--crash"]).args, ["-b", "crash", "-c"]);
+        let f = q(&["--follow", "--exclude", "chatty"]);
+        assert_eq!((f.args.len(), f.tail, f.exclude.as_slice()), (0, None, &["chatty".to_string()][..]));
+        let p = q(&["--pkg", "com.android.settings"]);
+        assert_eq!((p.pkg.as_deref(), p.args.as_slice()), (Some("com.android.settings"), &["-d", "-t", "100"].map(String::from)[..]));
+    }
+
+    #[test]
+    fn host_side_options() {
+        // --exclude and --since turn logcat's -t off; the host keeps the tail.
+        assert_eq!(q(&["--exclude", "frozen", "-t", "5"]).args, ["-d"]);
+        let s = q(&["--since", "5m"]);
+        assert_eq!((s.args.as_slice(), s.since_secs), (&["-d".to_string()][..], Some(300)));
+        assert_eq!(q(&["--pid", "744", "-v", "brief", "-v", "uid"]).args,
+            ["--pid=744", "-v", "brief", "-v", "uid", "-d", "-t", "100"]);
+        assert_eq!(q(&["--", "-s", "PackageManager"]).args, ["-d", "-s", "PackageManager"]);
+    }
+
+    #[test]
+    fn regex_for_logcat() {
+        let r = |v: &[&str], ic| logcat_regex(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>(), ic);
+        assert_eq!(r(&["Not removing"], false), r"Not\x20removing");
+        assert_eq!(r(&["a b", "c"], false), r"(?:a\x20b)|(?:c)");
+        assert_eq!(r(&["Ab1"], true), "[Aa][bB]1");
+        // Escapes and class ranges stay as written; lone class letters gain a case.
+        assert_eq!(r(&[r"\x41\d[a-z_q]"], true), r"\x41\d[a-z_qQ]");
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        assert!(parse_logs(&["--level", "loud"]).is_err());
+        assert!(parse_logs(&["--tag", "two words"]).is_err());
+        assert!(parse_logs(&["--tag"]).is_err());
+        assert!(parse_logs(&["--bogus"]).is_err());
+        assert!(parse_logs(&["--since", "soon"]).is_err());
+        assert!(parse_logs(&["--format", "fancy"]).is_err());
+        assert!(parse_logs(&["--pkg", "a.b", "--pid", "1"]).is_err());
+        assert!(parse_logs(&["--", "two words"]).is_err());
+        assert!(parse_logs(&["--grep", "two words"]).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod parse_use_tests {
+    use super::{parse_args, Cmd};
+
+    fn selected_serial(args: &[&str]) -> Option<String> {
+        let args = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+        let opts = parse_args(&args).expect("use arguments should parse");
+        match opts.cmd {
+            Cmd::Connect(connect) => connect.serial,
+            other => panic!("expected connect command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ui_json_is_the_raw_dump_not_json_records() {
+        use super::{flags::OutFmt, UiFormat};
+        let parse = |v: &[&str]| parse_args(&v.iter().map(|a| a.to_string()).collect::<Vec<_>>()).unwrap();
+        let o = parse(&["ui", "--json"]);
+        assert!(matches!(o.cmd, Cmd::Ui { format: UiFormat::Json, .. }));
+        assert!(matches!(o.out_fmt, OutFmt::Human));
+        // Before the verb, --json is still the global output mode.
+        let o = parse(&["--json", "ui"]);
+        assert!(matches!((o.cmd, o.out_fmt), (Cmd::Ui { format: UiFormat::Interactive, .. }, OutFmt::Json)));
+    }
+
+    #[test]
+    fn use_accepts_serial_as_a_positional_argument() {
+        assert_eq!(selected_serial(&["use", "192.168.0.10:5555"]),
+            Some("192.168.0.10:5555".into()));
+    }
+
+    #[test]
+    fn global_device_selects_the_device_during_bootstrap() {
+        assert_eq!(selected_serial(&["--device", "SERIAL", "use"]),
+            Some("SERIAL".into()));
+        assert_eq!(selected_serial(&["use", "--device", "SERIAL"]),
+            Some("SERIAL".into()));
+    }
+
+    #[test]
+    fn tui_takes_an_optional_active_flag() {
+        let parse = |args: &[&str]| {
+            let args = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+            parse_args(&args).map(|opts| opts.cmd)
+        };
+        assert!(matches!(parse(&["tui"]), Ok(Cmd::Tui { active: false })));
+        assert!(matches!(parse(&["tui", "--active"]), Ok(Cmd::Tui { active: true })));
+        assert!(parse(&["tui", "--bogus"]).is_err());
+    }
+
+    #[test]
+    fn global_device_selects_the_device_to_drop() {
+        let parse = |args: &[&str]| {
+            let args = args.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+            parse_args(&args).map(|opts| opts.cmd)
+        };
+        // Must not need a forwarded daemon: drop also cleans up dead ones.
+        for args in [&["--device", "NOT_ATTACHED", "drop"][..], &["drop", "--device", "NOT_ATTACHED"]] {
+            match parse(args) {
+                Ok(Cmd::Disconnect(d)) => assert_eq!(d.serial.as_deref(), Some("NOT_ATTACHED")),
+                other => panic!("expected disconnect, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fill_prefers_the_input_in_the_upper_window() {
+        let dump = crate::json::parse(r#"{"windows":[
+            {"type":1,"layer":5,"root":{"cls":"android.widget.FrameLayout","bounds":[0,1600,1080,2400],"children":[
+                {"cls":"android.widget.EditText","rid":"com.foo:id/sheet_comment","text":"Comment","bounds":[40,2200,1040,2300],"children":[]}]}},
+            {"type":1,"layer":2,"root":{"cls":"android.widget.FrameLayout","bounds":[0,0,1080,2400],"children":[
+                {"cls":"android.widget.EditText","rid":"com.foo:id/comment","text":"Comment","bounds":[40,100,1040,200],"children":[]}]}}
+        ]}"#).unwrap();
+        let roots: Vec<_> = crate::json::app_roots(&dump).into_iter().rev().collect();
+        let node = super::find_fill_target(&roots, "Comment").expect("an input matches");
+        assert_eq!(super::node_to_daemon_selector(node), "id=com.foo:id/sheet_comment");
+    }
+
+    #[test]
+    fn fill_finds_a_compose_field_by_the_label_inside_it() {
+        // Compose TextField: the label is a child of the EditText, the hint is empty.
+        let dump = crate::json::parse(r#"{"windows":[
+            {"type":1,"layer":2,"root":{"cls":"android.view.View","bounds":[0,0,1080,2400],"children":[
+                {"cls":"android.widget.TextView","text":"과일 검색","bounds":[42,42,290,134]},
+                {"cls":"android.widget.EditText","bounds":[42,134,1038,302],"flags":"cLfevE","children":[
+                    {"cls":"android.widget.TextView","text":"검색어","bounds":[84,197,205,260]}]},
+                {"cls":"android.widget.EditText","bounds":[42,400,1038,560],"children":[
+                    {"cls":"android.widget.TextView","text":"메모","bounds":[84,460,160,520]}]}]}}
+        ]}"#).unwrap();
+        let roots: Vec<_> = crate::json::app_roots(&dump).into_iter().rev().collect();
+        let field = |q| super::find_fill_target(&roots, q).and_then(crate::selector::bounds);
+        assert_eq!(field("검색어"), Some((42, 134, 1038, 302)));
+        assert_eq!(field("메모"), Some((42, 400, 1038, 560)));
+    }
+
+    #[test]
+    fn conflicting_bootstrap_selectors_are_rejected() {
+        let args = ["--device", "SERIAL_A", "use", "SERIAL_B"]
+            .iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>();
+        let error = parse_args(&args).expect_err("conflicting selectors must fail");
+        assert!(error.contains("conflicting device selectors"));
+    }
+}

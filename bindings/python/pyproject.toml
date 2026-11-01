@@ -3,12 +3,12 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "handsets"
+name = "mobileax"
 version = "0.3.3"
-description = "Pythonic bindings for the Handsets Android control CLI"
+description = "Pythonic bindings for the mobileAX Android control CLI"
 readme = "README.md"
 license = { text = "MIT" }
-authors = [{ name = "Handsets contributors" }]
+authors = [{ name = "mobileAX contributors" }]
 requires-python = ">=3.9"
 classifiers = [
     "License :: OSI Approved :: MIT License",
@@ -20,9 +20,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/pbk20191/handsets"
-Documentation = "https://elliotgao2.github.io/handsets/"
-Source = "https://github.com/pbk20191/handsets/tree/main/bindings/python"
+Homepage = "https://github.com/pbk20191/mobileax"
+Documentation = "https://pbk20191.github.io/mobileax/"
+Source = "https://github.com/pbk20191/mobileax/tree/main/bindings/python"
 
 [tool.setuptools.packages.find]
 where = ["src"]

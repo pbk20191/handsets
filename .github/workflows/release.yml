@@ -37,16 +37,16 @@ jobs:
         with:
           packages: 'platforms;android-36 build-tools;36.0.0'
 
-      - name: Build hs.jar
+      - name: Build mobax.jar
         run: ./build.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: jar
-          path: build/hs.jar
+          path: build/mobax.jar
           if-no-files-found: error
 
-  # ─── Cross-build `hs` (and `handsets-viewer` where it has a GPU backend) ─
+  # ─── Cross-build `mobax` (and `mobax-viewer` where it has a GPU backend) ─
   build-cli:
     needs: build-jar
     strategy:
@@ -100,18 +100,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev
 
-      - name: Build hs
+      - name: Build mobax
         shell: bash
-        run: cargo build --release --locked -p hs --target ${{ matrix.target }}
+        run: cargo build --release --locked -p mobax --target ${{ matrix.target }}
 
-      - name: Build handsets-viewer
+      - name: Build mobax-viewer
         if: matrix.viewer
         shell: bash
-        run: cargo build --release --locked -p handsets-viewer --target ${{ matrix.target }}
+        run: cargo build --release --locked -p mobax-viewer --target ${{ matrix.target }}
 
-      - name: Build handsets-tui
+      - name: Build mobax-tui
         shell: bash
-        run: cargo build --release --locked -p handsets-tui --target ${{ matrix.target }}
+        run: cargo build --release --locked -p mobax-tui --target ${{ matrix.target }}
 
       - name: Download jar artifact
         uses: actions/download-artifact@v4
@@ -133,14 +133,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          stage="dist/handsets"
+          stage="dist/mobileax"
           mkdir -p "$stage"
-          cp "target/${{ matrix.target }}/release/hs${{ matrix.exe }}" "$stage/"
+          cp "target/${{ matrix.target }}/release/mobax${{ matrix.exe }}" "$stage/"
           if [[ "${{ matrix.viewer }}" == "true" ]]; then
-            cp "target/${{ matrix.target }}/release/handsets-viewer${{ matrix.exe }}" "$stage/"
+            cp "target/${{ matrix.target }}/release/mobax-viewer${{ matrix.exe }}" "$stage/"
           fi
-          cp "target/${{ matrix.target }}/release/handsets-tui${{ matrix.exe }}" "$stage/"
-          cp build/hs.jar "$stage/hs.jar"
+          cp "target/${{ matrix.target }}/release/mobax-tui${{ matrix.exe }}" "$stage/"
+          cp build/mobax.jar "$stage/mobax.jar"
           [[ -f LICENSE ]] && cp LICENSE "$stage/" || true
           cp README.md "$stage/"
           echo "${{ steps.ver.outputs.tag }}" > "$stage/VERSION"
@@ -149,11 +149,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          asset="handsets-${{ matrix.name }}.${{ matrix.archive }}"
+          asset="mobileax-${{ matrix.name }}.${{ matrix.archive }}"
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
-            powershell -NoProfile -Command "Compress-Archive -Path 'dist/handsets' -DestinationPath '$asset'"
+            powershell -NoProfile -Command "Compress-Archive -Path 'dist/mobileax' -DestinationPath '$asset'"
           else
-            tar -C dist -czf "$asset" handsets
+            tar -C dist -czf "$asset" mobileax
           fi
           if command -v sha256sum >/dev/null; then
             sha256sum "$asset" > "$asset.sha256"
@@ -161,7 +161,7 @@ jobs:
             shasum -a 256 "$asset" > "$asset.sha256"
           fi
 
-      # MCP bundle: `hs` + hs.jar run as `hs mcp` (see mcpb/manifest.json),
+      # MCP bundle: `mobax` + mobax.jar run as `mobax mcp` (see mcpb/manifest.json),
       # one per platform since the bundle carries a native binary.
       - uses: actions/setup-node@v4
         with:
@@ -171,9 +171,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/mcpb-stage.mjs             --version "${{ steps.ver.outputs.tag }}"             --platform "${{ matrix.mcpb }}"             --hs "target/${{ matrix.target }}/release/hs${{ matrix.exe }}"             --jar build/hs.jar             --out dist/mcpb
+          node scripts/mcpb-stage.mjs             --version "${{ steps.ver.outputs.tag }}"             --platform "${{ matrix.mcpb }}"             --cli "target/${{ matrix.target }}/release/mobax${{ matrix.exe }}"             --jar build/mobax.jar             --out dist/mcpb
           npx -y @anthropic-ai/mcpb@2.1.2 validate dist/mcpb/manifest.json
-          bundle="handsets-${{ matrix.name }}.mcpb"
+          bundle="mobileax-${{ matrix.name }}.mcpb"
           npx -y @anthropic-ai/mcpb@2.1.2 pack dist/mcpb "$bundle"
           if command -v sha256sum >/dev/null; then
             sha256sum "$bundle" > "$bundle.sha256"
@@ -183,12 +183,12 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: handsets-${{ matrix.name }}
+          name: mobileax-${{ matrix.name }}
           path: |
-            handsets-${{ matrix.name }}.${{ matrix.archive }}
-            handsets-${{ matrix.name }}.${{ matrix.archive }}.sha256
-            handsets-${{ matrix.name }}.mcpb
-            handsets-${{ matrix.name }}.mcpb.sha256
+            mobileax-${{ matrix.name }}.${{ matrix.archive }}
+            mobileax-${{ matrix.name }}.${{ matrix.archive }}.sha256
+            mobileax-${{ matrix.name }}.mcpb
+            mobileax-${{ matrix.name }}.mcpb.sha256
           if-no-files-found: error
 
   # ─── Publish the GitHub release (tag pushes only) ──────────────────────
@@ -202,7 +202,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: handsets-*
+          pattern: mobileax-*
           merge-multiple: true
 
       - name: List artifacts

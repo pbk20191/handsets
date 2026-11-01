@@ -1,32 +1,32 @@
 {
   "manifest_version": "0.3",
-  "name": "handsets",
-  "display_name": "Handsets",
+  "name": "mobileax",
+  "display_name": "mobileAX",
   "version": "0.0.0",
   "description": "Control Android devices and emulators: read the screen, tap, type, swipe and wait, over adb.",
-  "long_description": "Runs the `hs` CLI as a stdio MCP server (`hs mcp`); the bundle carries `hs` and its on-device daemon. Start with the `use` tool, then read the screen with `ui` or `screenshot` and act with `tap`, `type`, `fill`, `swipe` and `go`. adb is found through Google's Android CLI (`android info`), ANDROID_HOME, PATH or Android Studio's default SDK; set ADB path below to override.",
+  "long_description": "Runs the `mobax` CLI as a stdio MCP server (`mobax mcp`); the bundle carries `mobax` and its on-device daemon. Start with the `use` tool, then read the screen with `ui` or `screenshot` and act with `tap`, `type`, `fill`, `swipe` and `go`. adb is found through Google's Android CLI (`android info`), ANDROID_HOME, PATH or Android Studio's default SDK; set ADB path below to override.",
   "author": {
-    "name": "Elliot Gao",
-    "url": "https://github.com/elliotgao2/handsets"
+    "name": "Byeong Gwan",
+    "url": "https://github.com/pbk20191"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/pbk20191/handsets"
+    "url": "https://github.com/pbk20191/mobileax"
   },
-  "homepage": "https://github.com/pbk20191/handsets",
+  "homepage": "https://github.com/pbk20191/mobileax",
   "license": "MIT",
   "server": {
     "type": "binary",
-    "entry_point": "server/hs",
+    "entry_point": "server/mobax",
     "mcp_config": {
-      "command": "${__dirname}/server/hs",
+      "command": "${__dirname}/server/mobax",
       "args": ["mcp"],
       "env": {
-        "HANDSETS_ADB": "${user_config.adb_path}"
+        "MOBILEAX_ADB": "${user_config.adb_path}"
       },
       "platform_overrides": {
         "win32": {
-          "command": "${__dirname}/server/hs.exe"
+          "command": "${__dirname}/server/mobax.exe"
         }
       }
     }
@@ -55,7 +55,7 @@
     { "name": "logcat", "description": "Recent device log lines, filtered by app, priority, tag, pattern or time, with noise excluded." },
     { "name": "info", "description": "Device and daemon info." },
     { "name": "drop", "description": "Stop the on-device daemon." },
-    { "name": "hs", "description": "Run any other hs CLI verb." }
+    { "name": "mobax", "description": "Run any other mobax CLI verb." }
   ],
   "compatibility": {
     "platforms": ["darwin", "win32", "linux"]

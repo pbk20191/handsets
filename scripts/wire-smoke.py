@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Wire-protocol smoke test for the on-device daemon.
 
-    wire-smoke.py run  --jar build/hs.jar --out a.json [--serial S] [--port 9008]
+    wire-smoke.py run  --jar build/mobax.jar --out a.json [--serial S] [--port 9008]
     wire-smoke.py diff a.json b.json          # exit 1 on any difference
-    wire-smoke.py threads [--serial S]        # thread names of the running hsd
+    wire-smoke.py threads [--serial S]        # thread names of the running mobaxd
     wire-smoke.py bench   [-n 100]            # p50/p95 ms for hot verbs
 
 `run` pushes and starts the jar, runs every case, and records normalized
@@ -255,12 +255,12 @@ CASES = {
 
 
 def start_daemon(jar):
-    adb("shell", "pkill -f hsd")
+    adb("shell", "pkill -f mobaxd")
     time.sleep(0.3)
-    adb("push", jar, "/data/local/tmp/hs.jar")
-    adb("forward", f"tcp:{PORT}", f"localabstract:hsd_{PORT}")
-    adb("shell", f"CLASSPATH=/data/local/tmp/hs.jar nohup app_process /system/bin --nice-name=hsd "
-                 f"dev.handsets.daemon.Main --port={PORT} > /data/local/tmp/hsd.log 2>&1 &")
+    adb("push", jar, "/data/local/tmp/mobax.jar")
+    adb("forward", f"tcp:{PORT}", f"localabstract:mobaxd_{PORT}")
+    adb("shell", f"CLASSPATH=/data/local/tmp/mobax.jar nohup app_process /system/bin --nice-name=mobaxd "
+                 f"dev.mobileax.daemon.Main --port={PORT} > /data/local/tmp/mobaxd.log 2>&1 &")
     t0 = time.time()
     while time.time() - t0 < 10:
         try:
@@ -268,7 +268,7 @@ def start_daemon(jar):
                 return
         except Exception:
             time.sleep(0.2)
-    sys.exit("daemon did not start:\n" + adb("shell", "cat /data/local/tmp/hsd.log"))
+    sys.exit("daemon did not start:\n" + adb("shell", "cat /data/local/tmp/mobaxd.log"))
 
 
 def cmd_run(a):
@@ -299,7 +299,7 @@ def cmd_diff(a):
 
 
 def cmd_threads(a):
-    print(adb("shell", "for t in /proc/$(pidof hsd)/task/*; do cat $t/comm; done"))
+    print(adb("shell", "for t in /proc/$(pidof mobaxd)/task/*; do cat $t/comm; done"))
 
 
 def cmd_bench(a):

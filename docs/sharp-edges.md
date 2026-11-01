@@ -18,17 +18,17 @@
   reports) ship different adb versions. Whichever client talks to the other's
   server kills and restarts it, which drops port forwards and can hang a
   pipeline waiting on output. Point everything at one SDK, or pin
-  `HANDSETS_ADB`.
+  `MOBILEAX_ADB`.
 - A set-but-empty `ANDROID_HOME` makes `android info` report an empty SDK
-  path; `hs` drops empty `ANDROID_HOME` / `ANDROID_SDK_ROOT` before asking it.
+  path; `mobax` drops empty `ANDROID_HOME` / `ANDROID_SDK_ROOT` before asking it.
 - `android emulator start` has no `-gpu` flag; host GPU rendering has to come
   from `hw.gpu.mode=host` in the AVD's `config.ini` ([Emulators](emulator.md)).
 - `logcat -t N` takes the last N lines *before* its priority, tag and regex
-  filters, so `logcat -t 50 *:E` is often empty. `hs logs --level / --tag /
+  filters, so `logcat -t 50 *:E` is often empty. `mobax logs --level / --tag /
   --grep / --exclude` reads the buffer and keeps the last N matching lines
   itself.
-- `hs logs --grep` is logcat's own regex (ECMAScript, on the device). It has
+- `mobax logs --grep` is logcat's own regex (ECMAScript, on the device). It has
   no case-insensitive flag, so `-i` spells each letter both ways (`[aA]`);
   letters at the ends of a class range like `[a-z]` stay as written.
   `--exclude` is plain text, matched on the host.
-- `hs logs --since 5m` reads the device's clock, not the host's.
+- `mobax logs --since 5m` reads the device's clock, not the host's.
