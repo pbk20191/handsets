@@ -955,18 +955,18 @@ dependencies = [
 
 [[package]]
 name = "mobax"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "mobax-core",
 ]
 
 [[package]]
 name = "mobax-core"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "mobax-tui"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "crossterm",
  "mobax-core",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "mobax-viewer"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "ffmpeg-sys-next",
  "glow",
