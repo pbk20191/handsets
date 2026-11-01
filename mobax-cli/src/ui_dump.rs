@@ -13,6 +13,7 @@ struct Row {
                       // useful for selector construction even though the verb
                       // already encodes input-vs-clickable-vs-label.
     label:  String,   // always double-quoted; pulls from text, falls back to content-desc
+    sub:    String,   // more text a clickable container holds, quoted; may be empty
     id:     String,   // "#name" if the node has a resource-id, else empty
     coords: String,   // bare "cx,cy" — no @, no parens
     flags:  String,   // space-joined metadata: long / scroll / check / checked / password,
@@ -61,7 +62,7 @@ pub(crate) fn render_interactive(roots: &[&Value]) -> String {
 pub(crate) fn interactive_rows(roots: &[&Value]) -> Vec<UiRow> {
     let mut rows: Vec<Row> = Vec::new();
     for root in roots {
-        collect_interactive(root, None, &mut rows);
+        collect_interactive(root, None, Absorb::None, &mut rows);
     }
     // Pad only the structural columns (verb, class). They have bounded
     // vocabulary and help the eye scan down the table. Label / id /
@@ -79,6 +80,10 @@ pub(crate) fn interactive_rows(roots: &[&Value]) -> Vec<UiRow> {
             class = r.class,
             label = r.label,
         );
+        if !r.sub.is_empty() {
+            line.push_str(" · ");
+            line.push_str(&r.sub);
+        }
         if !r.id.is_empty() {
             line.push_str("  ");
             line.push_str(&r.id);
@@ -142,13 +147,61 @@ fn has_labelled_descendant(node: &Value) -> bool {
     }))
 }
 
+/// Inside a clickable container whose row already carries its text.
+#[derive(Clone, Copy)]
+enum Absorb<'a> {
+    None,
+    /// Plain text nodes here are part of a row above; unlabelled toggles
+    /// take its label.
+    Into(&'a str),
+}
+
+/// A node that is only text: not clickable, checkable, scrollable or input.
+fn is_label_only(node: &Value) -> bool {
+    let flags = selector::get_str(node, "flags").unwrap_or("");
+    let cls_full = selector::get_str(node, "cls").unwrap_or("");
+    let simple = cls_full.rsplit('.').next().unwrap_or(cls_full);
+    !flags.contains('c') && !flags.contains('k') && !flags.contains('s') && !is_input_widget(simple)
+}
+
+/// Texts of a clickable container's own content, in tree order: plain text
+/// descendants, not those inside nested clickable or input nodes (they get
+/// rows of their own).
+fn content_labels<'a>(node: &'a Value, out: &mut Vec<&'a str>) {
+    for c in selector::children(node).map(Vec::as_slice).unwrap_or(&[]) {
+        if !is_label_only(c) {
+            continue;
+        }
+        let text = selector::get_str(c, "text").unwrap_or("");
+        let desc = selector::get_str(c, "desc").unwrap_or("");
+        let own = if !text.is_empty() { text } else { desc };
+        if !own.trim().is_empty() && !out.contains(&own) {
+            out.push(own);
+        }
+        content_labels(c, out);
+    }
+}
+
 /// `slot` is the nearest ancestor with a resource-id and the index of the
 /// child subtree we are in; it names anonymous cells as `#rv_cards[3]`.
-fn collect_interactive(node: &Value, slot: Option<(&str, usize)>, rows: &mut Vec<Row>) {
+/// A clickable container with no text of its own takes the text it holds
+/// (`"Display" · "Dark theme, font size"`), and those text nodes don't get
+/// rows of their own: one row per thing to tap.
+fn collect_interactive<'a>(node: &'a Value, slot: Option<(&str, usize)>, absorb: Absorb<'a>, rows: &mut Vec<Row>) {
     let cls_full  = selector::get_str(node, "cls").unwrap_or("");
     let cls_short = cls_full.rsplit('.').next().unwrap_or(cls_full);
     let id_full   = selector::get_str(node, "rid").unwrap_or("");
     let id_short  = id_full.rsplit('/').next().unwrap_or(id_full);
+    let own_text  = {
+        let t = selector::get_str(node, "text").unwrap_or("");
+        if !t.is_empty() { t } else { selector::get_str(node, "desc").unwrap_or("") }
+    };
+    let clickable = selector::get_str(node, "flags").unwrap_or("").contains('c');
+    let mut held: Vec<&str> = Vec::new();
+    if clickable && own_text.is_empty() && !is_input_widget(cls_short) {
+        content_labels(node, &mut held);
+    }
+    let absorbed = matches!(absorb, Absorb::Into(_)) && is_label_only(node);
 
     // Skip nodes that aren't actually on-screen. Off-screen / negative
     // bounds usually mean the view has been scrolled out, recycled, or
@@ -156,7 +209,7 @@ fn collect_interactive(node: &Value, slot: Option<(&str, usize)>, rows: &mut Vec
     // off-screen taps with OFF_SCREEN) so listing it is just noise. We
     // still walk children: a parent with degenerate bounds can wrap a
     // child whose own bounds are valid.
-    if is_interactive(node) && has_visible_bounds(node) {
+    if (is_interactive(node) || !held.is_empty()) && has_visible_bounds(node) && !absorbed {
         let (x, y) = match selector::bounds(node) {
             Some((x1, y1, x2, y2)) => ((x1 + x2) / 2, (y1 + y2) / 2),
             None => (-1, -1),
@@ -172,8 +225,13 @@ fn collect_interactive(node: &Value, slot: Option<(&str, usize)>, rows: &mut Vec
         // grep for. The caller doesn't care which attribute carried it
         // — only that it identifies the node.
         let label_src = if !text.is_empty() { text } else { desc };
+        let inherited = match absorb { Absorb::Into(l) if flags.contains('k') => Some(l), _ => None };
         let label = if !label_src.is_empty() {
             truncate_quoted(label_src, 60)
+        } else if let Some(first) = held.first() {
+            truncate_quoted(first, 60)
+        } else if let Some(l) = inherited {
+            truncate_quoted(l, 60)
         } else if !id_short.is_empty() {
             format!("#{id_short}")
         } else if let Some((parent, i)) = slot {
@@ -220,10 +278,12 @@ fn collect_interactive(node: &Value, slot: Option<(&str, usize)>, rows: &mut Vec
             format!("#{id_short}")
         };
 
+        let sub = if held.len() > 1 { truncate_quoted(&held[1..].join(", "), 60) } else { String::new() };
         rows.push(Row {
             verb:   verb.into(),
             class:  cls_short.into(),
             label,
+            sub,
             id:     id_field,
             coords,
             flags:  tags,
@@ -234,9 +294,13 @@ fn collect_interactive(node: &Value, slot: Option<(&str, usize)>, rows: &mut Vec
     }
 
     if let Some(kids) = selector::children(node) {
+        let absorb = match held.first() {
+            Some(first) => Absorb::Into(first),
+            None => absorb,
+        };
         for (i, c) in kids.iter().enumerate() {
             let slot = if id_short.is_empty() { slot } else { Some((id_short, i)) };
-            collect_interactive(c, slot, rows);
+            collect_interactive(c, slot, absorb, rows);
         }
     }
 }
@@ -571,6 +635,35 @@ mod tests {
     /// cells) used to show up alongside the visible ones, with coords like
     /// "-540,-200" that no tap could ever reach. Regression: those nodes
     /// are now dropped before they hit the render.
+    /// A settings-style row: a clickable container with a title, a summary
+    /// and a switch. One row to tap carries both texts; the switch takes the
+    /// title; a nested button keeps its own row.
+    #[test]
+    fn a_clickable_row_takes_the_text_it_holds() {
+        let dump = json::parse(r#"{
+            "root": {
+                "cls": "android.widget.FrameLayout", "bounds": [0, 0, 1080, 2400],
+                "children": [
+                    {"cls":"android.widget.LinearLayout","flags":"c","bounds":[0,500,1080,700],"children":[
+                        {"cls":"android.widget.TextView","text":"Display","rid":"android:id/title","bounds":[40,510,600,560],"children":[]},
+                        {"cls":"android.widget.TextView","text":"Dark theme, font size","rid":"android:id/summary","bounds":[40,570,800,620],"children":[]},
+                        {"cls":"android.widget.Switch","flags":"ck","rid":"android:id/switch_widget","bounds":[900,560,1040,640],"children":[]},
+                        {"cls":"android.widget.Button","text":"More","flags":"c","bounds":[700,630,880,690],"children":[]}
+                    ]},
+                    {"cls":"android.widget.TextView","text":"Not in a row","bounds":[40,900,600,950],"children":[]}
+                ]
+            }
+        }"#).unwrap();
+        let table = render_interactive(&json::all_roots(&dump));
+        let lines: Vec<&str> = table.lines().collect();
+        assert!(lines[0].starts_with("tap") && lines[0].contains(r#""Display" · "Dark theme, font size""#), "got:\n{table}");
+        assert!(lines.iter().any(|l| l.contains("Switch") && l.contains(r#""Display""#) && l.contains("#switch_widget")), "got:\n{table}");
+        assert!(lines.iter().any(|l| l.contains(r#""More""#)), "nested button keeps its row:\n{table}");
+        assert!(!lines.iter().any(|l| l.starts_with('-') && l.contains("Display")), "title is part of the row:\n{table}");
+        assert!(lines.iter().any(|l| l.starts_with('-') && l.contains("Not in a row")), "got:\n{table}");
+        assert_eq!(lines.len(), 4, "got:\n{table}");
+    }
+
     #[test]
     fn drops_offscreen_and_zero_area_nodes() {
         let dump = json::parse(r#"{

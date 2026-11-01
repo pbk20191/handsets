@@ -18,6 +18,8 @@ pub(crate) struct Screen {
     key: String,
     /// Package of the topmost app window.
     pub pkg: String,
+    /// The soft keyboard's window is up.
+    pub keyboard: bool,
     rows: Vec<Ref>,
     next: u32,
 }
@@ -69,7 +71,9 @@ impl Screen {
             };
             out.push(Ref { n, ident, line: r.line, x: r.x, y: r.y, sel: r.sel });
         }
-        Screen { key, pkg, rows: out, next }
+        let keyboard = json::obj_get(dump, "windows").and_then(json::as_arr).unwrap_or(&[]).iter()
+            .any(|w| json::obj_get(w, "type").and_then(json::as_num) == Some(TYPE_INPUT_METHOD));
+        Screen { key, pkg, keyboard, rows: out, next }
     }
 
     /// A launching app's starting window: an app window whose root names
@@ -92,6 +96,11 @@ impl Screen {
         self.rows.len()
     }
 
+    /// The package, and whether the keyboard is up.
+    pub(crate) fn title(&self) -> String {
+        if self.keyboard { format!("{} · keyboard open", self.pkg) } else { self.pkg.clone() }
+    }
+
     /// Some row shows `text` (case-insensitive).
     pub(crate) fn shows(&self, text: &str) -> bool {
         let t = text.to_lowercase();
@@ -101,7 +110,7 @@ impl Screen {
     /// What an agent reads after an action or a watch: `note`, the package,
     /// then the rows that changed, or the whole new screen.
     pub(crate) fn describe(&self, note: &str, change: Change) -> String {
-        let mut out = format!("{note} · {}", self.pkg);
+        let mut out = format!("{note} · {}", self.title());
         match change {
             Change::Same => out.push_str(" · no visible change"),
             Change::Rows(lines) => {
@@ -172,6 +181,9 @@ impl Screen {
         self.rows.iter().map(|r| r.n).max().unwrap_or(1).to_string().len() + 1
     }
 }
+
+/// AccessibilityWindowInfo.TYPE_INPUT_METHOD.
+const TYPE_INPUT_METHOD: i64 = 2;
 
 /// `(key, package)` of a dump: its app windows, and the topmost one's package.
 fn identity(dump: &Value) -> (String, String) {
