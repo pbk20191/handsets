@@ -1,0 +1,1142 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A millisecond-latency CLI for driving Android devices. Built for LLM agents and shell scripts.">
+      
+      
+      
+        <link rel="canonical" href="https://pbk20191.github.io/mobileax/superpowers/plans/2026-10-26-daemon-looper-gradle/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+    
+    
+      
+        <title>데몬 단일 루퍼 + Gradle 빌드 Implementation Plan - mobileAX</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  
+  
+  
+  
+  
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="데몬 단일 루퍼 + Gradle 빌드 Implementation Plan - mobileAX">
+  <meta property="og:description" content="A millisecond-latency CLI for driving Android devices. Built for LLM agents and shell scripts.">
+  <meta property="og:url" content="https://pbk20191.github.io/mobileax/superpowers/plans/2026-10-26-daemon-looper-gradle/">
+  <meta property="og:site_name" content="mobileAX">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="데몬 단일 루퍼 + Gradle 빌드 Implementation Plan - mobileAX">
+  <meta name="twitter:description" content="A millisecond-latency CLI for driving Android devices. Built for LLM agents and shell scripts.">
+  
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "headline": "\ub370\ubaac \ub2e8\uc77c \ub8e8\ud37c + Gradle \ube4c\ub4dc Implementation Plan",
+    "description": "A millisecond-latency CLI for driving Android devices. Built for LLM agents and shell scripts.",
+    "url": "https://pbk20191.github.io/mobileax/superpowers/plans/2026-10-26-daemon-looper-gradle/",
+    
+    "publisher": {
+      "@type": "Organization",
+      "name": "mobileAX",
+      "url": "https://pbk20191.github.io/mobileax/"
+    }
+  }
+  </script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#gradle-implementation-plan" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../../.." title="mobileAX" class="md-header__button md-logo" aria-label="mobileAX" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            mobileAX
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              데몬 단일 루퍼 + Gradle 빌드 Implementation Plan
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/pbk20191/mobileax" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    pbk20191/mobileax
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../../architecture/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Architecture
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../../benchmark/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Benchmark
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../../cookbook/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cookbook
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../../emulator/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Emulators
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../../sharp-edges/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Sharp edges
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../../wire/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Wire reference
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../../.." title="mobileAX" class="md-nav__button md-logo" aria-label="mobileAX" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    mobileAX
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/pbk20191/mobileax" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    pbk20191/mobileax
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../benchmark/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmark
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../cookbook/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookbook
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../emulator/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Emulators
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../sharp-edges/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sharp edges
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../wire/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wire reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#global-constraints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Global Constraints
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#review-focus" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Review Focus
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#file-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        File Structure
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="File Structure">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#task-1-gradle-buildhsjar" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task 1: Gradle이 build/hs.jar를 만든다 (동작 변경 없음)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task 2: 와이어 스모크 하네스
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-3-loop-ioloop-conn" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task 3: 이벤트 루프 코어 (Loop, IoLoop, Conn)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-4-kotlin-main" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task 4: Kotlin 서버·디스패치·Main (루퍼 기동)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-5-ui-stateinput-main" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task 5: UI 이벤트·대기·State·Input을 main으로
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-6-suspend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task 6: 설치·패키지·파일 전송을 suspend로
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-7-dumpsys-logcat-shell-monitor-clip_watch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task 7: 서브프로세스 스트림 (dumpsys / logcat / shell / monitor / clip_watch)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-8-stream-stream_tilejpeg-stream_h264" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task 8: 화면 스트림 (stream, stream_tilejpeg, stream_h264) + 스크린샷 미러
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-9-legacy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task 9: 정리 — Legacy 제거, 스레드·지연 검증, 문서
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#task-10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Task 10 (선택, 여유 시): 스트림 공유
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="gradle-implementation-plan">데몬 단일 루퍼 + Gradle 빌드 Implementation Plan<a class="headerlink" href="#gradle-implementation-plan" title="Permanent link">&para;</a></h1>
+<blockquote>
+<p><strong>For agentic workers:</strong> REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (<code>- [ ]</code>) syntax for tracking.</p>
+</blockquote>
+<p><strong>Goal:</strong> on-device 데몬을 MainLooper 하나 + 작은 Work 풀 구조의 Kotlin 코루틴 모델로 바꾸고, Gradle이 <code>build/hs.jar</code>를 만드는 정식 빌드가 되게 한다. 와이어 프로토콜은 바이트 단위로 유지.</p>
+<p><strong>Architecture:</strong> <code>Looper.loop()</code>를 도는 main 스레드가 <code>MessageQueue.addOnFileDescriptorEventListener</code>(epoll)로 소켓·파이프를 감시하고, 연결마다 <code>Dispatchers.Main</code> 위의 코루틴 하나가 <code>readFrame → dispatch → respond</code>를 suspend로 처리한다. CPU/장시간 binder 작업만 <code>Work</code> 디스패처로 보낸다. 중간 단계에서는 아직 포팅 안 된 블로킹 Java 핸들러를 <code>Legacy</code> 디스패처 + 블로킹 스트림 어댑터로 돌려 매 태스크마다 jar가 동작하게 하고, 마지막에 <code>Legacy</code>를 제거한다.</p>
+<p><strong>Tech Stack:</strong> Kotlin 2.2.21 (JVM target 17), kotlinx-coroutines-core/android (최신 안정 1.10.x), Gradle(Kotlin DSL, 기존 wrapper), SDK R8(<code>build-tools/36.0.0/lib/d8.jar</code>), JUnit5 + kotlinx-coroutines-test (JVM 단위 테스트), Python 3 (<code>scripts/wire-smoke.py</code>, 기기 통합 테스트), AVD <code>Medium_Phone</code>(API 36).</p>
+<p><strong>Spec:</strong> <code>docs/superpowers/specs/2026-10-25-daemon-looper-gradle-design.md</code></p>
+<h2 id="global-constraints">Global Constraints<a class="headerlink" href="#global-constraints" title="Permanent link">&para;</a></h2>
+<ul>
+<li>와이어 프로토콜(<code>docs/wire.md</code>): verb, 인자, 응답 바이트, <code>uint32 BE length + payload</code> 프레이밍, <code>ERR:</code> 문자열, 스트림 <code>len=0</code> 종결자, <code>__exit__ N</code> 트레일러 — 전부 기존과 동일. <code>MAX_CMD = 256</code>, 위반 시 <code>BAD_ARG:bad-length:&lt;len&gt;</code> 후 연결 종료.</li>
+<li>엔트리: <code>dev.handsets.daemon.Main.main(String[])</code>, <code>--port=N</code>(기본 9008), 127.0.0.1 바인드, backlog 8, <code>SO_REUSEADDR</code>, <code>TCP_NODELAY</code>. stdout에 <code>hsd listening on 127.0.0.1:&lt;port&gt;</code> 와 <code>hsd ready (sdk=&lt;N&gt;)</code> 출력 유지.</li>
+<li>산출물: <code>build/hs.jar</code> (dex만), <code>--min-api 28</code>, R8 <code>--release</code>. 크기 목표: 기준 jar 대비 +300KB 이내, 초과 시 보고.</li>
+<li>R8: SDK <code>build-tools/&lt;ver&gt;/lib/d8.jar</code>의 <code>com.android.tools.r8.R8</code>를 <code>JavaExec</code>로 실행. 기본 build-tools <code>36.0.0</code>, <code>-PbuildTools=</code>로 변경.</li>
+<li>루퍼(main)에서 금지: 덤프, 인코딩, <code>Thread.sleep</code>, 블로킹 소켓/파이프 I/O, 상한 없는 binder 호출. 애매하면 <code>Work</code>.</li>
+<li>스레드 최종 상태: main + Work 풀(<code>min(4, availableProcessors)</code>) (+ 프레임워크 binder/MediaCodec 스레드). <code>hs-ua</code>는 main looper 시도가 실패할 때만 예외로 허용하고 보고.</li>
+<li>이미지/상태 스트림(<code>stream</code>, <code>stream_tilejpeg</code>, <code>state_watch</code>, <code>clip_watch</code>)은 최신 프레임만 유지. <code>stream_h264</code>는 공유 전까지 프레임 무손실 + 연결별 backpressure.</li>
+<li>호스트 코드(<code>handsets-cli</code>, <code>handsets-tui</code>, <code>handsets-viewer</code>, <code>bindings/</code>) 수정 금지.</li>
+<li>검증 기기: AVD <code>Medium_Phone</code> (API 36, x86_64) 하나. adb: <code>E:\packages\Android\Sdk\platform-tools\adb.exe</code>.</li>
+</ul>
+<h2 id="review-focus">Review Focus<a class="headerlink" href="#review-focus" title="Permanent link">&para;</a></h2>
+<ol>
+<li><strong>TCP 단편화:</strong> 명령 프레임의 4바이트 길이/페이로드가 여러 read로 쪼개져 도착 → 하나의 명령으로 정상 처리. (Task 3 <code>ConnTest.fragmentedFrame</code>)</li>
+<li><strong>스트림 중 클라이언트 강제 종료:</strong> <code>stream*</code>/<code>state_watch</code>/<code>logcat</code>/<code>shell</code> 중 소켓이 끊김 → 구독 해제, 서브프로세스 kill, 인코더/VirtualDisplay 해제, 다른 연결 영향 없음. (Task 3 <code>ConnTest.cancelOnEof</code>, Task 9 smoke <code>disconnect_cleanup</code>)</li>
+<li><strong>느린/읽지 않는 클라이언트:</strong> 스트림을 열고 읽지 않는 클라이언트가 있어도 다른 연결의 <code>ping</code> p95 &lt; 50ms. (Task 3 <code>ConnTest.latestOnlyReplaces</code>, Task 8 smoke <code>slow_client</code>)</li>
+<li><strong>설치 중 업로드 중단:</strong> <code>install size=N</code> 후 N바이트를 다 보내기 전에 끊김 → 세션 abandon, 데몬 정상. (Task 6 smoke <code>install_truncated</code>)</li>
+<li><strong>UTF-8 / 경계 길이 명령:</strong> CJK <code>clip_set</code>, <code>text</code>, 길이 정확히 256/257 프레임 → 기존과 같은 응답. (Task 4 <code>DispatchTest.cjkAndLengthBounds</code>, smoke 케이스)</li>
+</ol>
+<hr />
+<h2 id="file-structure">File Structure<a class="headerlink" href="#file-structure" title="Permanent link">&para;</a></h2>
+<p>새 Kotlin 파일 (<code>src/dev/handsets/daemon/</code>, 패키지 <code>dev.handsets.daemon</code>):</p>
+<table>
+<thead>
+<tr>
+<th>파일</th>
+<th>책임</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Loop.kt</code></td>
+<td><code>Main</code>/<code>Work</code>/<code>Legacy</code> 디스패처, 루트 <code>scope</code>, <code>onMain {}</code> 헬퍼</td>
+</tr>
+<tr>
+<td><code>IoLoop.kt</code></td>
+<td><code>IoLoop</code> 인터페이스 + <code>MessageQueueIoLoop</code>(Android), fd 획득 <code>Fds</code></td>
+</tr>
+<tr>
+<td><code>Conn.kt</code></td>
+<td>비블로킹 연결: suspend 읽기, 출력 큐(backpressure / latest-only), 종료</td>
+</tr>
+<tr>
+<td><code>HsServer.kt</code></td>
+<td>accept 루프, 연결별 코루틴</td>
+</tr>
+<tr>
+<td><code>Dispatch.kt</code></td>
+<td>verb 디스패치 (기존 <code>Server.handle</code> switch + <code>run*</code> 포팅)</td>
+</tr>
+<tr>
+<td><code>Args.kt</code></td>
+<td>기존 <code>Server</code>의 순수 파싱 헬퍼(<code>strArg</code>, <code>longArg</code>, <code>positional</code>, <code>parseInputArgs</code>, …) 포팅</td>
+</tr>
+<tr>
+<td><code>Main.kt</code></td>
+<td>엔트리, 초기화 순서, <code>Looper.loop()</code> (기존 <code>Main.java</code> 대체)</td>
+</tr>
+<tr>
+<td><code>Waits.kt</code></td>
+<td><code>UiEvents</code> + <code>WaitRegistry</code> 대체 (suspend)</td>
+</tr>
+<tr>
+<td><code>StateRefresher.kt</code></td>
+<td><code>Debouncer</code> + State 리프레시/구독 fan-out</td>
+</tr>
+<tr>
+<td><code>ProcStream.kt</code></td>
+<td>서브프로세스 stdout을 IoLoop로 읽어 청크 프레임 전송</td>
+</tr>
+<tr>
+<td><code>Streams.kt</code></td>
+<td><code>stream</code>/<code>stream_tilejpeg</code>/<code>stream_h264</code>/<code>state_watch</code>/<code>clip_watch</code> 세션</td>
+</tr>
+<tr>
+<td><code>LegacyStreams.kt</code></td>
+<td>임시: <code>Conn</code> ↔ 블로킹 <code>DataInputStream/DataOutputStream</code> 어댑터 (Task 9에서 삭제)</td>
+</tr>
+</tbody>
+</table>
+<p>삭제: <code>Server.java</code>, <code>Main.java</code>, <code>UiEvents.java</code>, <code>WaitRegistry.java</code>, <code>Streamer.java</code>, <code>LocalIntentSender.java</code> (각 해당 태스크에서).
+테스트: <code>test/dev/handsets/daemon/*Test.kt</code> (JVM, android 미사용 코드만).
+스크립트: <code>scripts/wire-smoke.py</code>.</p>
+<hr />
+<h3 id="task-1-gradle-buildhsjar">Task 1: Gradle이 <code>build/hs.jar</code>를 만든다 (동작 변경 없음)<a class="headerlink" href="#task-1-gradle-buildhsjar" title="Permanent link">&para;</a></h3>
+<p><strong>Files:</strong>
+- Modify: <code>build.gradle.kts</code>, <code>settings.gradle.kts</code>, <code>proguard-rules.pro</code>, <code>build.sh</code>, <code>.gitignore</code>, <code>.github/workflows/release.yml</code>, <code>README.md</code>(Daemon IDE setup 섹션 → "Building the daemon"), <code>docs/architecture.md</code>(build 줄)
+- Untrack: <code>local.properties</code> (<code>git rm --cached</code>, <code>.gitignore</code>에 추가)
+- 그대로 포함: 워킹트리의 <code>Screenshot.java</code> 수정(<code>Binders.systemContext()</code> 사용)</p>
+<p><strong>Interfaces:</strong>
+- Produces: <code>./gradlew hsJar</code> → <code>build/hs.jar</code>; <code>./gradlew test</code> (JUnit5, 소스 <code>test/</code>); Gradle 속성 <code>-PandroidCompileSdk=&lt;int&gt;</code>(기본: 설치된 최신 numeric <code>android-N</code>), <code>-PbuildTools=&lt;ver&gt;</code>(기본 <code>36.0.0</code>). Gradle 내부 출력은 <code>build-gradle/</code>.</p>
+<ul>
+<li>[ ] <strong>Step 1:</strong> <code>build.gradle.kts</code> 정리 — <code>compileSdk</code> 하드코딩(<code>37.2</code>) 제거하고 <code>platforms/android-&lt;N&gt;</code> 중 최대 정수 N 선택(속성 우선). <code>java { toolchain 17 }</code>, <code>kotlin { jvmToolchain(17) }</code>, <code>-no-jdk</code> 제거(JDK 클래스는 android.jar bootclasspath가 대신하므로 Kotlin은 <code>compileOnly(files(androidJar))</code>로 충분). 의존성: <code>implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:&lt;최신 1.10.x&gt;")</code>, <code>testImplementation(kotlin("test"))</code>, <code>testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:&lt;같은 버전&gt;")</code>, JUnit5 platform. <code>sourceSets.test</code> → <code>test/</code>.</li>
+<li>[ ] <strong>Step 2:</strong> <code>hsJar</code> 태스크 등록: <code>JavaExec</code>(mainClass <code>com.android.tools.r8.R8</code>, classpath <code>${sdk}/build-tools/${bt}/lib/d8.jar</code>), args <code>--release --min-api 28 --lib &lt;androidJar&gt; --pg-conf proguard-rules.pro --output &lt;build-gradle/r8/hs-dex.zip&gt;</code> + 입력: <code>jar</code> 태스크 산출물 + <code>runtimeClasspath</code> jar 전체. 이후 <code>Zip</code>/<code>Copy</code>로 <code>classes.dex</code>만 담은 <code>build/hs.jar</code> 생성. <code>assemble</code>이 <code>hsJar</code>에 의존. inputs/outputs 선언해 up-to-date 동작.</li>
+<li>[ ] <strong>Step 3:</strong> <code>proguard-rules.pro</code>에 코루틴 규칙 추가: <code>-keepclassmembers class kotlinx.coroutines.** { volatile &lt;fields&gt;; }</code>, <code>-keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}</code>, <code>-keepnames class kotlinx.coroutines.android.AndroidDispatcherFactory {}</code>, <code>-keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}</code>.</li>
+<li>[ ] <strong>Step 4:</strong> <code>build.sh</code> → <code>exec ./gradlew hsJar "$@"</code> 래퍼 (Windows Git Bash에서도 동작하게 <code>cd "$(dirname "$0")"</code> 유지). CI: platforms <code>android-36</code>, build-tools <code>36.0.0</code>, JDK 17 유지, 단계는 <code>./build.sh</code> 그대로.</li>
+<li>[ ] <strong>Step 5: 빌드 확인</strong>
+  Run: <code>./gradlew hsJar &amp;&amp; unzip -l build/hs.jar</code>
+  Expected: <code>BUILD SUCCESSFUL</code>, 항목은 <code>classes.dex</code> 하나. 크기 기록.</li>
+<li>[ ] <strong>Step 6: 기준 jar 보관</strong> — <code>cp build/hs.jar build/baseline-hs.jar</code> (이후 모든 비교의 기준. 이 시점 코드는 기존 Java와 동일).</li>
+<li>[ ] <strong>Step 7: 기기 확인</strong> — <code>emulator -avd Medium_Phone</code> 기동 후 jar push, <code>CLASSPATH=/data/local/tmp/hs.jar nohup app_process /system/bin --nice-name=hsd dev.handsets.daemon.Main --port=9008 &gt; /data/local/tmp/hsd.log 2&gt;&amp;1 &amp;</code>, <code>adb forward tcp:9008 tcp:9008</code>, <code>ping</code>.
+  Expected: <code>pong</code>, 로그에 <code>hsd ready (sdk=36)</code>.</li>
+<li>[ ] <strong>Step 8: Commit</strong> — <code>build: gradle produces build/hs.jar via SDK R8</code></li>
+</ul>
+<h3 id="task-2">Task 2: 와이어 스모크 하네스<a class="headerlink" href="#task-2" title="Permanent link">&para;</a></h3>
+<p><strong>Files:</strong>
+- Create: <code>scripts/wire-smoke.py</code></p>
+<p><strong>Interfaces:</strong>
+- Produces: CLI
+  - <code>wire-smoke.py run --jar PATH --out results.json [--serial S] [--port 9008] [--only CASE,...]</code> — jar를 push·기동(Task 1 Step 7과 같은 명령, 기존 hsd는 <code>pkill -f hsd</code>로 종료)하고 케이스 실행, 정규화된 응답 저장.
+  - <code>wire-smoke.py diff A.json B.json</code> — 케이스별 차이 출력, 차이 있으면 exit 1.
+  - <code>wire-smoke.py threads --port 9008</code> — <code>pidof hsd</code> → <code>/proc/&lt;pid&gt;/task/*/comm</code> 목록 출력.
+  - <code>wire-smoke.py bench --port 9008 [-n 100]</code> — <code>ping</code>/<code>tap</code>/<code>dump_active</code>/<code>screenshot</code> p50/p95 ms.
+- 케이스 이름(이후 태스크가 참조): <code>ping info dump dump_active screenshot_jpeg screenshot_png tap swipe key text_cjk getprop settings_get wm_info pm_list pm_path state_fields clip_roundtrip_cjk deeplinks providers wait_idle wait_text_ok wait_text_timeout wait_activity tap_and_dump tap_and_settle node_click stream_n stream_h264_n stream_tile_n state_watch_n clip_watch_n logcat_head dumpsys_window shell_echo pull_push install install_truncated len_256 len_257 len_0 parallel_ping_during_wait slow_client disconnect_cleanup</code>.
+- 정규화: JSON의 숫자 중 시간·배터리·메모리·uptime·elapsed 계열 키, <code>elapsed=</code>/<code>x=..</code>(wait_text 좌표는 유지) 값, 이미지/비디오 바이트는 <code>{"kind":"jpeg|png|h264|tile","frames":n,"ok":true}</code> 요약으로 치환. 동시성 케이스는 지표가 임계값 이내인지 <code>true/false</code>만 기록(<code>parallel_ping_during_wait</code>: wait_for_text timeout_ms=5000 진행 중 다른 소켓 ping &lt; 100ms; <code>slow_client</code>: 읽지 않는 stream 소켓 3초 유지 중 ping p95 &lt; 50ms; <code>disconnect_cleanup</code>: stream/shell 소켓 강제 종료 후 2초 뒤 스레드 수 ≤ 접속 전 + 0, 그리고 <code>ping</code> 정상).
+- install 케이스용 APK: 기기에 이미 있는 작은 시스템 APK를 <code>pm_path</code>로 찾아 <code>pull</code>한 바이트를 사용(외부 파일 불필요).</p>
+<ul>
+<li>[ ] <strong>Step 1:</strong> 스크립트 작성 (표준 라이브러리만; adb 경로는 <code>ADB</code> 환경변수 또는 <code>local.properties</code>의 <code>sdk.dir</code> + <code>platform-tools/adb</code>).</li>
+<li>[ ] <strong>Step 2: 자기 일관성 확인</strong>
+  Run: <code>python scripts/wire-smoke.py run --jar build/baseline-hs.jar --out build/smoke-a.json &amp;&amp; python scripts/wire-smoke.py run --jar build/baseline-hs.jar --out build/smoke-b.json &amp;&amp; python scripts/wire-smoke.py diff build/smoke-a.json build/smoke-b.json</code>
+  Expected: diff exit 0 (정규화가 변동값을 모두 가림). 기준 jar에서 실패하는 동시성 케이스(<code>slow_client</code>, <code>parallel_ping_during_wait</code> 등)가 있다면 그 결과 그대로 기록 — 기준 동작이므로.</li>
+<li>[ ] <strong>Step 3:</strong> <code>python scripts/wire-smoke.py threads</code> 기준 스레드 목록을 <code>build/threads-baseline.txt</code>로 저장, <code>bench</code> 결과를 <code>build/bench-baseline.txt</code>로 저장.</li>
+<li>[ ] <strong>Step 4: Commit</strong> — <code>test: wire smoke harness for daemon protocol parity</code></li>
+</ul>
+<h3 id="task-3-loop-ioloop-conn">Task 3: 이벤트 루프 코어 (<code>Loop</code>, <code>IoLoop</code>, <code>Conn</code>)<a class="headerlink" href="#task-3-loop-ioloop-conn" title="Permanent link">&para;</a></h3>
+<p><strong>Files:</strong>
+- Create: <code>src/dev/handsets/daemon/Loop.kt</code>, <code>IoLoop.kt</code>, <code>Conn.kt</code>
+- Test: <code>test/dev/handsets/daemon/ConnTest.kt</code>, <code>test/dev/handsets/daemon/SelectorIoLoop.kt</code>(테스트용 IoLoop 구현)</p>
+<p><strong>Interfaces:</strong>
+- Produces:
+  - <code>Loop.kt</code>: <code>object Loop { val Main: CoroutineDispatcher; val Work: CoroutineDispatcher; val Legacy: CoroutineDispatcher; val scope: CoroutineScope; fun init(main: CoroutineDispatcher = Dispatchers.Main.immediate) }</code> — <code>Work</code> = 고정 <code>min(4, cpu)</code> 데몬 스레드 풀(<code>hs-work-N</code>) <code>.asCoroutineDispatcher()</code>, <code>Legacy</code> = 캐시드 풀(<code>hs-legacy-N</code>, Task 9에서 제거). <code>scope = CoroutineScope(SupervisorJob() + Main + CoroutineExceptionHandler{ 로그 })</code>. <code>init</code>이 <code>Dispatchers.Main</code> 해석 실패 시 <code>Handler(Looper.getMainLooper()).asCoroutineDispatcher("hs-main")</code>로 대체하고 어느 쪽인지 stderr에 <code>hsd dispatcher: main=&lt;kind&gt;</code> 출력.
+  - <code>IoLoop.kt</code>: <code>interface IoLoop { fun watch(fd: FileDescriptor, events: Int, cb: (fd: FileDescriptor, events: Int) -&gt; Int); fun unwatch(fd: FileDescriptor) }</code> (events/반환값 의미는 <code>MessageQueue.OnFileDescriptorEventListener</code>와 동일: <code>EVENT_INPUT=1, EVENT_OUTPUT=2, EVENT_ERROR=4</code>, 0 반환 = 해제). <code>class MessageQueueIoLoop(queue: MessageQueue) : IoLoop</code>. <code>object Fds { fun of(ch: SelectableChannel): FileDescriptor }</code> — Android <code>SocketChannelImpl</code>/<code>ServerSocketChannelImpl</code>의 <code>getFD()</code>를 리플렉션으로 호출.
+  - <code>Conn.kt</code>: <code>class Conn(ch: SocketChannel, io: IoLoop) { suspend fun readInt(): Int; suspend fun readFully(n: Int): ByteArray; suspend fun readChunk(max: Int): ByteArray? /* null=EOF */; suspend fun send(payload: ByteArray) /* 프레임(len+payload) 큐잉, 큐 바이트 &gt; OUT_LIMIT(4 MiB)이면 drain까지 suspend */; suspend fun sendRaw(bytes: ByteArray) /* 길이 접두 없이 */; fun sendLatest(slot: Int, payload: ByteArray) /* 같은 slot의 아직 안 나간 프레임을 교체 */; suspend fun flush(); val job: Job /* EOF/에러/close 시 cancel */; fun close() }</code>. 읽기 EOF는 <code>EOFException</code>을 던진다.</p>
+<ul>
+<li>[ ] <strong>Step 1: 실패하는 테스트 작성</strong> — <code>ConnTest</code> (JVM, <code>SelectorIoLoop</code>가 별도 스레드에서 <code>java.nio.channels.Selector</code>로 <code>IoLoop</code> 계약을 흉내, 디스패처는 단일 스레드 executor):</li>
+<li><code>fragmentedFrame</code>: 클라이언트가 <code>[0,0,0,4]</code>를 2바이트씩, <code>"ping"</code>을 1바이트씩 보냄 → <code>readInt()==4</code>, <code>String(readFully(4))=="ping"</code>.</li>
+<li><code>sendFramesInOrder</code>: <code>send("a")</code>, <code>send("bb")</code> → 클라이언트가 <code>00000001 61 00000002 6262</code> 수신.</li>
+<li><code>backpressureSuspends</code>: 클라이언트가 읽지 않을 때 <code>send</code>를 반복하면 누적 큐 바이트가 <code>OUT_LIMIT</code>+최대 프레임 1개를 넘지 않음(초과 시점에 suspend 확인 — <code>withTimeoutOrNull(200){ send(big) } == null</code>).</li>
+<li><code>latestOnlyReplaces</code>: 읽지 않는 클라이언트에 <code>sendLatest(0, f1..f50)</code> → 클라이언트가 읽기 시작하면 받은 프레임 수 ≤ 3 이고 마지막이 <code>f50</code>.</li>
+<li><code>cancelOnEof</code>: 클라이언트 close → <code>conn.job.isCancelled</code> 가 1초 내 true, 진행 중 <code>readInt()</code>는 <code>EOFException</code>/취소로 끝남.</li>
+<li>[ ] <strong>Step 2:</strong> Run: <code>./gradlew test --tests '*ConnTest*'</code> — Expected: FAIL (클래스 없음).</li>
+<li>[ ] <strong>Step 3:</strong> <code>Loop.kt</code>, <code>IoLoop.kt</code>, <code>Conn.kt</code> 구현. <code>Conn</code>은 읽기 대기 시 <code>EVENT_INPUT</code>, 출력 큐가 비어 있지 않을 때만 <code>EVENT_OUTPUT</code>을 watch(쓰기 가능할 때마다 non-blocking write). 소켓은 <code>configureBlocking(false)</code>, <code>TCP_NODELAY</code>.</li>
+<li>[ ] <strong>Step 4:</strong> Run: <code>./gradlew test --tests '*ConnTest*'</code> — Expected: PASS.</li>
+<li>[ ] <strong>Step 5: Commit</strong> — <code>daemon: looper io core (IoLoop, Conn, dispatchers)</code></li>
+</ul>
+<h3 id="task-4-kotlin-main">Task 4: Kotlin 서버·디스패치·Main (루퍼 기동)<a class="headerlink" href="#task-4-kotlin-main" title="Permanent link">&para;</a></h3>
+<p><strong>Files:</strong>
+- Create: <code>HsServer.kt</code>, <code>Dispatch.kt</code>, <code>Args.kt</code>, <code>Main.kt</code>, <code>LegacyStreams.kt</code>
+- Delete: <code>Server.java</code>, <code>Main.java</code>
+- Modify: <code>Binders.java</code>(<code>prepareMainLooper</code> 호출 제거 — Main이 담당), <code>Screenshot.java</code>(미러 HandlerThread는 그대로; Task 8에서 처리)
+- Test: <code>test/dev/handsets/daemon/ArgsTest.kt</code>, <code>test/dev/handsets/daemon/DispatchTest.kt</code></p>
+<p><strong>Interfaces:</strong>
+- Consumes: Task 3 <code>Loop</code>, <code>IoLoop</code>, <code>Fds</code>, <code>Conn</code>.
+- Produces:
+  - <code>class HsServer(port: Int, io: IoLoop, dispatch: Dispatch) { fun start() }</code> — <code>ServerSocketChannel</code> non-blocking, accept마다 <code>Loop.scope.launch { dispatch.session(conn) }</code>.
+  - <code>class Dispatch(h: Handlers) { suspend fun session(c: Conn) }</code> — 기존 <code>Server.handle</code> 루프와 같은 순서: <code>readInt</code> → 길이 검사 → <code>readFully</code> → UTF-8 → <code>trim</code> → head 분기. 스트림 verb 후 <code>return</code>(연결 종료) / 청크 verb 후 <code>continue</code> 의미 유지.
+  - <code>class Handlers</code> (Kotlin, 기존 <code>Server.Handlers</code> 필드 동일 이름, <code>lateinit var</code>).
+  - <code>Args.kt</code>: 기존 <code>Server</code> private static 헬퍼를 이름 그대로 top-level <code>internal fun</code>으로 (<code>strArg</code>, <code>strArgOr</code>, <code>longArg</code>, <code>extractKey</code>, <code>removeKey</code>, <code>positional</code>, <code>positionalPair</code>, <code>afterHead</code>, <code>parseInputArgs</code>, <code>parseScreenshotArgs</code>, <code>parseFileArgs</code>, <code>parseAmArgs</code>, <code>clampQuality</code>, <code>utf8</code>, <code>errBytes</code>, <code>textSelector</code>). <code>parseScreenshotArgs</code>/<code>textSelector</code>처럼 android 타입을 쓰는 것은 별도 파일로 분리 가능.
+  - <code>LegacyStreams.kt</code>: <code>fun Conn.blockingOut(): DataOutputStream</code> (쓰기 → <code>runBlocking(Loop.Main)</code>이 아닌 <code>Loop.scope.launch{ sendRaw }</code> + 용량 세마포어로 Legacy 스레드만 블로킹), <code>fun Conn.blockingIn(): DataInputStream</code> (Legacy 스레드에서 <code>runBlocking { readChunk }</code>). 아직 포팅 안 된 핸들러(<code>Files.pull/push</code>, <code>Installer</code>, <code>Dumpsys</code>, <code>Logcat</code>, <code>ShellExec</code>, <code>Lifecycle</code>, <code>Clipboard.watch</code>, <code>Streamer</code>, <code>TileStreamer</code>, <code>H264Streamer</code>, <code>state_watch</code>, waits)는 <code>withContext(Loop.Legacy) { 기존 Java 호출(blockingIn/Out) }</code>. <code>byte[]</code>를 반환하는 동기 핸들러 중 덤프·provider·pm_list·notifications·screenshot·deeplinks·location·settings는 <code>withContext(Loop.Work)</code>, 나머지 짧은 것(<code>ping</code>, <code>info</code>, <code>getprop</code>, <code>keyframe</code>, <code>wm_info</code>, <code>state &lt;field&gt;</code> 캐시 읽기)은 main에서 직접.
+  - <code>Main.kt</code>: <code>object Main { @JvmStatic fun main(args: Array&lt;String&gt;) }</code> 순서: hidden-API 해제 → <code>Looper.prepareMainLooper()</code> → <code>Loop.init()</code> → <code>HsServer.start()</code>(listening 출력) → <code>Loop.scope.launch { initDaemon() }</code> → <code>Looper.loop()</code>. <code>initDaemon</code>: <code>withContext(Work){ UiAutomation(mainLooper, conn) 생성 + connectWithRetry + setServiceInfo/flags + setRunAsMonkey }</code> → main에서 핸들러 생성 → warmup(<code>launch(Work){ dumper.dumpActive() }</code>) → <code>hsd ready (sdk=N)</code> 출력 → <code>ready.complete(Unit)</code>. <code>Dispatch.session</code>은 <code>ping</code>/<code>quit</code> 외 verb 처리 전 <code>ready.await()</code>. UA connect가 5초 내 실패/교착이면 <code>hs-ua</code> HandlerThread looper로 재생성하고 stderr <code>hsd ua-looper=thread</code>(성공 시 <code>=main</code>) 출력. 셧다운 훅(UA disconnect) 유지. <code>quit</code>은 <code>bye</code> 전송·flush 후 <code>exitProcess(0)</code>.</p>
+<ul>
+<li>[ ] <strong>Step 1: 실패하는 테스트</strong> — <code>ArgsTest</code>: 기존 Java 동작에서 뽑은 표 기반 케이스 (<code>strArg("text text=\"a b\"","text")=="a b"</code>, <code>longArg("wait_for_idle idle_ms=300","idle_ms",200)==300</code>, <code>positional("pm_path com.x")=="com.x"</code>, <code>parseInputArgs("tap x=10 y=20")</code> x/y, <code>removeKey</code>/<code>extractKey</code> 따옴표 처리). 기대값은 구현 전에 기존 <code>Server.java</code> 코드를 읽고 손으로 산출해 고정. <code>DispatchTest.cjkAndLengthBounds</code>: 가짜 <code>Handlers</code>로 <code>Dispatch.session</code>을 <code>SelectorIoLoop</code> 위에서 돌려 <code>len=0</code>→<code>ERR:BAD_ARG:bad-length:0</code>+종료, <code>len=257</code>→<code>ERR:BAD_ARG:bad-length:257</code>+종료, <code>len=256</code> 정상 처리, <code>ping</code>→<code>pong</code>. (<code>errBytes</code>의 정확한 접두는 기존 코드 기준.)</li>
+<li>[ ] <strong>Step 2:</strong> Run: <code>./gradlew test</code> — Expected: FAIL.</li>
+<li>[ ] <strong>Step 3:</strong> <code>Args.kt</code>, <code>Dispatch.kt</code>, <code>HsServer.kt</code>, <code>LegacyStreams.kt</code>, <code>Main.kt</code> 구현, <code>Server.java</code>/<code>Main.java</code> 삭제. <code>Dispatch</code>는 기존 switch의 모든 case를 동일 head 문자열로 포함(누락 시 <code>default</code> 응답도 기존과 동일).</li>
+<li>[ ] <strong>Step 4:</strong> Run: <code>./gradlew test</code> — Expected: PASS.</li>
+<li>[ ] <strong>Step 5: 기기 패리티</strong>
+  Run: <code>./gradlew hsJar &amp;&amp; python scripts/wire-smoke.py run --jar build/hs.jar --out build/smoke-t4.json &amp;&amp; python scripts/wire-smoke.py diff build/smoke-a.json build/smoke-t4.json</code>
+  Expected: exit 0. 기기 로그에 <code>hsd dispatcher: main=...</code>, <code>hsd ua-looper=...</code> 확인 후 결과를 커밋 메시지에 기록.</li>
+<li>[ ] <strong>Step 6: Commit</strong> — <code>daemon: kotlin server on main looper with legacy bridges</code></li>
+</ul>
+<h3 id="task-5-ui-stateinput-main">Task 5: UI 이벤트·대기·State·Input을 main으로<a class="headerlink" href="#task-5-ui-stateinput-main" title="Permanent link">&para;</a></h3>
+<p><strong>Files:</strong>
+- Create: <code>Waits.kt</code>, <code>StateRefresher.kt</code>, <code>Input.kt</code>(기존 <code>Input.java</code> 대체)
+- Delete: <code>UiEvents.java</code>, <code>WaitRegistry.java</code>, <code>Input.java</code>
+- Modify: <code>State.java</code>(refresher 스레드·HandlerThread 3개·<code>ensureRefresher</code>/<code>markDirty</code>/<code>dirtyLock</code> 제거, 리스너 등록을 주입받은 main <code>Handler</code>로; <code>computeDevice()</code>는 그대로 두고 package-private로), <code>Dispatch.kt</code>(waits/tap_and_*/state/state_watch/input을 Legacy에서 suspend 호출로)
+- Test: <code>test/dev/handsets/daemon/WaitsTest.kt</code>, <code>test/dev/handsets/daemon/DebouncerTest.kt</code></p>
+<p><strong>Interfaces:</strong>
+- Consumes: <code>Loop</code>, <code>Conn.sendLatest</code>.
+- Produces:
+  - <code>class Waits(clock: () -&gt; Long = SystemClock::uptimeMillis) { fun onEvent(type: Int); fun touch(); suspend fun awaitIdle(idleMs: Long, timeoutMs: Long): Long /* -1=timeout */; suspend fun awaitPredicate(timeoutMs: Long, check: suspend () -&gt; Boolean): Long /* 이벤트마다 재평가, -1=timeout */ ; fun subscribe(c: (AccessibilityEventType: Int) -&gt; Unit) }</code> — <code>UiAutomation.setOnAccessibilityEventListener</code>는 <code>Main.kt</code>가 <code>Waits.onEvent(ev.eventType)</code>로 연결 (UA 콜백 스레드가 main이 아니면 <code>Handler(main).post</code>). <code>wait_for_text</code>의 노드 검색 predicate는 <code>withContext(Work)</code>.
+  - <code>class Debouncer(scope: CoroutineScope, debounceMs: Long, heartbeatMs: Long, action: suspend () -&gt; Unit) { fun mark() }</code> — <code>mark()</code>마다 debounce 재시작, 마지막 실행 후 <code>heartbeatMs</code> 경과 시에도 실행. <code>DEBOUNCE_MS</code>/<code>HEARTBEAT_MS</code> 값은 <code>State.java</code> 기존 상수 그대로.
+  - <code>class StateRefresher(state: State, scope) { fun ensureStarted(); fun subscribe(l: (ByteArray) -&gt; Unit); fun unsubscribe(l) ; fun deviceFresh(): suspend ByteArray }</code> — <code>action</code> = <code>withContext(Work){ state.computeDevice() }</code> → main에서 캐시 저장 + 구독자 호출.
+  - <code>Input.kt</code>: <code>class Input(ua: UiAutomation)</code> 같은 메서드 이름, <code>swipe</code>/<code>text</code>/<code>keyPress</code> 등 시간 간격이 있는 것은 <code>suspend</code>(<code>delay</code>), <code>injectInputEvent</code>는 <code>withContext(Work)</code>.
+- [ ] <strong>Step 1: 실패하는 테스트</strong> (kotlinx-coroutines-test <code>runTest</code>, 가상 시간, 가상 clock = <code>testScheduler.currentTime</code>):
+  - <code>WaitsTest.idleReturnsAfterQuiet</code>: <code>touch()</code> 후 <code>awaitIdle(200, 5000)</code> → 가상 시간 200ms에 반환값 ≥200.
+  - <code>WaitsTest.eventsPostponeIdle</code>: 100ms마다 <code>onEvent</code> 5회 → 반환 시각 = 마지막 이벤트 + 200.
+  - <code>WaitsTest.idleTimeout</code>: 50ms마다 이벤트 계속 → <code>awaitIdle(200, 1000) == -1L</code>, 가상 1000ms에 반환.
+  - <code>WaitsTest.predicateRecheckedOnEvent</code>: check가 3번째 이벤트 후 true → 그 시각의 경과 반환.
+  - <code>DebouncerTest.coalesces</code>: 30ms 간격 <code>mark()</code> 5회 → action 1회, 마지막 mark + debounce 시각.
+  - <code>DebouncerTest.heartbeat</code>: mark 없이 <code>heartbeatMs * 2</code> 경과 → action 2회.
+- [ ] <strong>Step 2:</strong> Run: <code>./gradlew test --tests '*WaitsTest*' --tests '*DebouncerTest*'</code> — FAIL.
+- [ ] <strong>Step 3:</strong> 구현 + <code>State.java</code> 정리 + <code>Dispatch</code> 연결(<code>state_watch</code>는 <code>StateRefresher.subscribe { conn.sendLatest(0, it) }</code>, 연결 job 종료 시 unsubscribe).
+- [ ] <strong>Step 4:</strong> Run: <code>./gradlew test</code> — PASS.
+- [ ] <strong>Step 5:</strong> 기기 패리티 — Task 4 Step 5와 같은 명령(<code>smoke-t5.json</code>). Expected: diff exit 0, <code>parallel_ping_during_wait</code> true.
+- [ ] <strong>Step 6: Commit</strong> — <code>daemon: event-driven waits, state refresh and input on main looper</code></p>
+<h3 id="task-6-suspend">Task 6: 설치·패키지·파일 전송을 suspend로<a class="headerlink" href="#task-6-suspend" title="Permanent link">&para;</a></h3>
+<p><strong>Files:</strong>
+- Create: <code>Transfers.kt</code>
+- Delete: <code>LocalIntentSender.java</code>
+- Modify: <code>Installer.java</code>, <code>Pm.java</code>, <code>Files.java</code> → 세션 생성/commit/결과 해석만 남기고 스트림 읽기·대기는 <code>Transfers.kt</code>로 이동 (또는 Kotlin으로 변환 — 구현자 재량), <code>Dispatch.kt</code>
+- Test: smoke <code>install</code>, <code>install_truncated</code>, <code>pull_push</code>, <code>pm_*</code></p>
+<p><strong>Interfaces:</strong>
+- Produces:
+  - <code>class StatusReceiver { val intentSender: IntentSender; suspend fun await(timeoutMs: Long): Intent? }</code> — <code>IIntentSender</code> 프록시 콜백에서 <code>CompletableDeferred.complete</code>, 대기는 <code>withTimeoutOrNull</code>. 타임아웃 값은 기존 그대로(install 180_000 / install_multi 120_000 / uninstall 60_000).
+  - <code>suspend fun Conn.copyChunksTo(out: OutputStream): Long</code> — 기존 <code>Files.copyChunks</code> 와이어 형식(<code>[len][chunk]…[len=0]</code>) 그대로 읽어 <code>withContext(Work){ out.write }</code>.
+  - <code>suspend fun Conn.streamFileFrom(input: InputStream)</code> — <code>pull</code>의 청크 + 종결자 송신, 읽기는 Work.
+  - <code>suspend fun install(c: Conn, size: Long, reinstall: Boolean, grant: Boolean): ByteArray</code>, <code>installMulti(c, sizes: LongArray, …)</code>, <code>push(c, path, mode, size)</code>, <code>pull(c, path)</code> — 응답 바이트는 기존과 동일. 업로드 중 EOF → 세션 <code>abandon()</code> 후 예외 전파(연결 종료).
+- [ ] <strong>Step 1:</strong> 기존 <code>Installer.install/installMulti</code>, <code>Files.push/pull/drain</code> 의 응답 문자열·에러 태그를 목록으로 뽑아 <code>Transfers.kt</code> 주석이 아닌 smoke 케이스 기대값에 반영되었는지 확인 (<code>install_truncated</code> 포함).
+- [ ] <strong>Step 2:</strong> 구현, Legacy 경로 제거.
+- [ ] <strong>Step 3:</strong> 기기 패리티 (<code>smoke-t6.json</code>) — diff exit 0, <code>install_truncated</code> 후 <code>ping</code> 정상, <code>pm list sessions</code>에 남은 세션 없음.
+- [ ] <strong>Step 4: Commit</strong> — <code>daemon: suspend-based install, pm and file transfer</code></p>
+<h3 id="task-7-dumpsys-logcat-shell-monitor-clip_watch">Task 7: 서브프로세스 스트림 (dumpsys / logcat / shell / monitor / clip_watch)<a class="headerlink" href="#task-7-dumpsys-logcat-shell-monitor-clip_watch" title="Permanent link">&para;</a></h3>
+<p><strong>Files:</strong>
+- Create: <code>ProcStream.kt</code>
+- Modify: <code>Dumpsys.java</code>, <code>Logcat.java</code>, <code>ShellExec.java</code>, <code>Lifecycle.java</code> → argv 구성만 남김(또는 Kotlin 변환), <code>Clipboard.java</code>(<code>watch</code> 제거, <code>currentText()</code> package-private), <code>Dispatch.kt</code>
+- Test: smoke <code>logcat_head dumpsys_window shell_echo clip_watch_n disconnect_cleanup</code></p>
+<p><strong>Interfaces:</strong>
+- Produces:
+  - <code>suspend fun runProcStream(c: Conn, argv: List&lt;String&gt;, exitTrailer: Boolean)</code> — <code>ProcessBuilder(argv).redirectErrorStream(true).start()</code>; stdout fd 획득(<code>FilterInputStream.in</code> 리플렉션 → <code>FileInputStream.getFD()</code>), <code>Os.fcntlInt(fd, F_SETFL, O_NONBLOCK)</code> 후 <code>IoLoop.watch(EVENT_INPUT)</code>로 <code>Os.read</code> → 읽은 만큼 <code>c.send(chunk)</code>(청크 크기 상한은 기존 코드의 버퍼 크기와 동일). EOF → <code>exitTrailer</code>이면 <code>__exit__ N</code> 프레임(기존 형식) → <code>len=0</code>. 연결 job 취소 시 <code>process.destroy()</code>. fd 획득이 불가능하면 Work에서 블로킹 read 후 main으로 전달하는 폴백 (spec 4.2 허용).
+  - <code>clip_watch</code>: <code>Loop.scope</code> 위 <code>while(isActive){ delay(intervalMs); val t = withContext(Work){ clip.currentText() }; if (t != last) c.sendLatest(0, …) }</code> — 프레임 형식은 기존 <code>Clipboard.emit</code>과 동일.
+- [ ] <strong>Step 1:</strong> 구현.
+- [ ] <strong>Step 2:</strong> 기기 패리티 (<code>smoke-t7.json</code>) — diff exit 0, <code>disconnect_cleanup</code>(shell <code>sleep 100</code> 중 끊기 → 기기에서 해당 <code>sleep</code> 프로세스 사라짐) true.
+- [ ] <strong>Step 3: Commit</strong> — <code>daemon: subprocess streams via looper fd events</code></p>
+<h3 id="task-8-stream-stream_tilejpeg-stream_h264">Task 8: 화면 스트림 (<code>stream</code>, <code>stream_tilejpeg</code>, <code>stream_h264</code>) + 스크린샷 미러<a class="headerlink" href="#task-8-stream-stream_tilejpeg-stream_h264" title="Permanent link">&para;</a></h3>
+<p><strong>Files:</strong>
+- Create: <code>Streams.kt</code>
+- Delete: <code>Streamer.java</code>
+- Modify: <code>Screenshot.java</code>(미러별 <code>HandlerThread</code> 제거, <code>ImageReader</code> 리스너를 main <code>Handler</code>로; <code>FrameListener</code> 호출은 main), <code>TileStreamer.java</code>(패킷 생성 함수만 남김: <code>buildPacket(forceKeyframe): ByteArray</code>), <code>H264Streamer.java</code>(인코더 생성/설정·<code>requestKeyframe</code>만 남기고 드레인 루프 제거), <code>Dispatch.kt</code>
+- Test: smoke <code>stream_n stream_tile_n stream_h264_n screenshot_* slow_client disconnect_cleanup</code></p>
+<p><strong>Interfaces:</strong>
+- Produces:
+  - <code>suspend fun jpegStream(c: Conn, mirror: Screenshot.Mirror, quality: Int, fps: Int)</code> — 프레임 이벤트 → <code>Channel&lt;Unit&gt;(CONFLATED)</code>; fps&gt;0이면 간격 유지, 0이면 <code>IDLE_INTERVAL_MS</code>(500) 재전송 동작 유지; 인코딩 <code>withContext(Work)</code>; 전송 <code>c.sendLatest(0, jpeg)</code>.
+  - <code>suspend fun tileStream(c: Conn, mirror, quality, tile)</code> — 같은 구조, 패킷 생성은 Work, keyframe 강제 조건 기존과 동일, 전송은 <code>sendLatest</code>가 아닌 <code>send</code>(타일 델타는 누락 불가 — 기존 코드가 delta를 이전 프레임 기준으로 만든다면 무손실이어야 함; 기존 코드를 읽고 무손실 여부 확인 후 결정, 커밋 메시지에 기록).
+  - <code>suspend fun h264Stream(c: Conn, args)</code> — <code>MediaCodec.setCallback(cb, mainHandler)</code>; <code>onOutputBufferAvailable</code>에서 버퍼를 <code>ByteArray</code>로 복사(복사는 작으므로 main 허용, 1MB 초과 프레임은 Work) 후 연결별 <code>Channel&lt;ByteArray&gt;(capacity = 64)</code>에 <code>send</code>(가득 차면 해당 연결의 드레인만 지연 — <code>releaseOutputBuffer</code>를 send 이후 호출). 송신 코루틴이 <code>c.send</code>. <code>keyframe</code> verb는 활성 세션 목록(main 전용 <code>mutableSetOf</code>)에 대해 <code>requestKeyframe()</code>, 응답 <code>ok n=&lt;세션 수&gt;</code>.
+  - 기존 <code>H264Streamer</code>의 SPS/PPS·에러 프레임 형식·해상도 규칙(roundEven, 2048 cap) 그대로.
+- [ ] <strong>Step 1:</strong> 구현.
+- [ ] <strong>Step 2:</strong> 기기 패리티 (<code>smoke-t8.json</code>) — diff exit 0, <code>slow_client</code> true, <code>disconnect_cleanup</code> 후 <code>dumpsys display | grep -c hs-</code> 가 접속 전과 동일(VirtualDisplay 해제).
+- [ ] <strong>Step 3:</strong> 수동: <code>handsets-viewer</code> 또는 <code>hs</code> TUI 미러링이 정상 표시(가능한 범위에서; 불가능하면 보고).
+- [ ] <strong>Step 4: Commit</strong> — <code>daemon: screen streams on looper with work-pool encoding</code></p>
+<h3 id="task-9-legacy">Task 9: 정리 — Legacy 제거, 스레드·지연 검증, 문서<a class="headerlink" href="#task-9-legacy" title="Permanent link">&para;</a></h3>
+<p><strong>Files:</strong>
+- Delete: <code>LegacyStreams.kt</code>, <code>Loop.Legacy</code>
+- Modify: 남은 <code>synchronized</code>/<code>volatile</code>/<code>CopyOnWriteArrayList</code> 중 이제 main 전용인 것 제거(<code>Dumper</code>, <code>Input</code>, <code>Providers</code>, <code>Clipboard</code>, <code>Screenshot</code>, <code>State</code> 등 — 풀에서 접근하는 객체는 유지), <code>docs/architecture.md</code>(스레드 모델 절 추가, Kotlin 파일 반영), <code>README.md</code>
+- Test: smoke 전체, <code>threads</code>, <code>bench</code></p>
+<ul>
+<li>[ ] <strong>Step 1:</strong> <code>grep -rn "Legacy\|blockingIn\|blockingOut" src/</code> → 0건이 되도록 남은 경로 포팅.</li>
+<li>[ ] <strong>Step 2:</strong> <code>grep -rnE "new Thread|HandlerThread|Thread\.sleep|\.wait\(|BlockingQueue" src/</code> → 허용 목록만 남는지 확인: <code>Main.kt</code>의 UA 폴백(<code>hs-ua</code>, 사용 시), 셧다운 훅, <code>connectWithRetry</code>의 sleep(루퍼 시작 전·Work 스레드).</li>
+<li>[ ] <strong>Step 3:</strong> Run: <code>./gradlew test hsJar</code> → PASS. jar 크기 기준 대비 기록.</li>
+<li>[ ] <strong>Step 4:</strong> 최종 기기 검증: <code>run</code> → <code>smoke-final.json</code>, <code>diff build/smoke-a.json build/smoke-final.json</code> exit 0; <code>threads</code> 결과가 main(<code>hsd</code>) + <code>hs-work-*</code>(≤4) (+ <code>hs-ua</code> 폴백 시) + 프레임워크 스레드(<code>Binder:*</code>, <code>HeapTaskDaemon</code>, <code>ReferenceQueueD</code>, <code>FinalizerDaemon</code>, <code>FinalizerWatchd</code>, <code>Jit thread pool</code>, <code>Signal Catcher</code>, <code>Profile Saver</code>, <code>perfetto_hprof_</code>, <code>ADB-JDWP</code>, MediaCodec 관련) 만; <code>bench</code> p50/p95가 <code>build/bench-baseline.txt</code> 대비 +10% 이내.</li>
+<li>[ ] <strong>Step 5: Commit</strong> — <code>daemon: drop legacy bridges; document looper thread model</code></li>
+</ul>
+<h3 id="task-10">Task 10 (선택, 여유 시): 스트림 공유<a class="headerlink" href="#task-10" title="Permanent link">&para;</a></h3>
+<p><strong>Files:</strong>
+- Modify: <code>Streams.kt</code>, <code>H264Streamer.java</code>(또는 Kotlin화), <code>Screenshot.java</code>
+- Test: smoke에 <code>stream_h264_shared</code>(같은 파라미터 2개 연결 + 다른 파라미터 1개 연결) 케이스 추가</p>
+<p><strong>Interfaces:</strong>
+- Produces: <code>class SharedH264(key: H264Key) { fun join(c: Conn): Job; }</code> 레지스트리 <code>Map&lt;H264Key, SharedH264&gt;</code> (main 전용), <code>data class H264Key(w: Int, h: Int, fps: Int, kbps: Int, gopSec: Int)</code> — 정규화된 값 기준. 인코더 출력은 한 번 복사한 <code>ByteArray</code>를 모든 구독자 채널에 같은 참조로 전달. 합류 시 캐시한 codec-config 먼저 → IDR 요청 → 다음 IDR부터 전달. 구독자 채널(capacity 64) <code>trySend</code> 실패 시 그 구독자 큐 비우고 <code>waitingIdr = true</code> + IDR 요청. 마지막 구독자 이탈 시 인코더/VirtualDisplay 해제. <code>keyframe</code> 응답 <code>n</code> = 연결 수. JPEG/tile: <code>(mirror, q[, tile])</code> 키로 프레임당 인코딩 1회 공유 (tile은 연결별 이전 프레임 상태가 있으면 공유 대상에서 제외 — 구현자가 코드 확인 후 결정).
+- [ ] <strong>Step 1:</strong> 구현.
+- [ ] <strong>Step 2:</strong> smoke: <code>stream_h264_shared</code>에서 두 공유 연결이 모두 첫 프레임 전 SPS/PPS, 첫 비디오 프레임이 IDR, <code>dumpsys media.codec</code>(또는 <code>threads</code>)로 인코더 2개(공유 1 + 별도 1) 확인. 기존 케이스 diff exit 0.
+- [ ] <strong>Step 3: Commit</strong> — <code>daemon: share encoders across identical stream subscribers</code></p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["navigation.top", "navigation.tabs", "navigation.sections", "navigation.indexes", "content.code.copy", "search.suggest", "search.highlight"], "search": "../../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../../assets/javascripts/bundle.c21346df.min.js"></script>
+      
+    
+  </body>
+</html>
