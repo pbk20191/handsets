@@ -42,3 +42,6 @@ bindings/python/build/
 
 # Machine-local SDK path
 local.properties
+
+# IDE AI-assistant settings (machine-local)
+.ai/

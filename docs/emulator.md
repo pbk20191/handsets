@@ -35,6 +35,22 @@ Starting the emulator directly, pass it on the command line instead:
 emulator -avd NAME -gpu host
 ```
 
+To make it the default for every AVD, whoever starts it, turn the matching
+feature flags on in `~/.android/advancedFeatures.ini` (create it if missing):
+
+```ini
+ForceGpuHost = on
+Vulkan = on
+GLDirectMem = on
+```
+
+`ForceGpuHost` puts the emulator on the host GPU even when the AVD says
+`auto` (the emulator's verbose log then shows `gpu_mode_requested: host`).
+Watch the spelling: the emulator silently ignores names it doesn't know,
+`EnforceHostGPU` included. `Vulkan` exposes host Vulkan to the
+guest; `GLDirectMem` maps guest GL buffers straight to host memory instead
+of copying them.
+
 The default `auto` can choose a slower renderer. Every mirror frame is read
 back from the GPU (the daemon's main cost for `stream`), so the renderer
 shows up directly in frame rates, and numbers from different GPU modes

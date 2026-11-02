@@ -105,6 +105,9 @@ class Waits {
         }
     }
 
+    /** Ms since the last event (or [touch]). */
+    val quietMs: Long get() = System.currentTimeMillis() - lastEventTs
+
     /** Accessibility events (and [touch]es) seen so far; a mark for [awaitSettle]. */
     val seq: Long get() = eventSeq
 

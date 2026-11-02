@@ -75,11 +75,31 @@ internal class Server(private val h: Handlers) {
         }
     }
 
+    /**
+     * Waits out an activity transition before a dump, up to [SLIDE_WAIT_MS]:
+     * - a window sliding in reports its nodes where they were mid-slide, and
+     *   sends no events while it moves, so every row would be at the wrong x;
+     * - just after an action, between two activities, no app window is
+     *   listed at all and the dump would be empty. Only right after events:
+     *   a lock screen has no app window either, and shouldn't wait.
+     * Each waits for the next event (the slide's end, the new window).
+     * Main thread (the waits live there).
+     */
+    private suspend fun waitOutTransition() {
+        val waits = h.uiEvents.waits
+        val until = android.os.SystemClock.uptimeMillis() + SLIDE_WAIT_MS
+        while (h.dumper.sliding() || (waits.quietMs < SLIDE_WAIT_MS && h.dumper.noAppWindow())) {
+            val left = until - android.os.SystemClock.uptimeMillis()
+            if (left <= 0) break
+            waits.awaitEvent(left)
+        }
+    }
+
     /** dump / dump_active / screenshot: suspend, they wait on the dumper or the mirror. */
     suspend fun capture(head: String, cmd: String): ByteArray = try {
         when (head) {
-            "dump" -> utf8(h.dumper.dumpAll())
-            "dump_active" -> utf8(h.dumper.dumpActive())
+            "dump" -> { waitOutTransition(); utf8(h.dumper.dumpAll()) }
+            "dump_active" -> { waitOutTransition(); utf8(h.dumper.dumpActive()) }
             else -> h.shot.capture(parseScreenshotArgs(cmd))
         }
     } catch (t: Throwable) {
@@ -308,6 +328,9 @@ internal class Server(private val h: Handlers) {
     }
 
     companion object {
+        /** Longest a dump waits out an activity transition. */
+        const val SLIDE_WAIT_MS = 1000L
+
         const val MAX_CMD: Int = 256
 
         /** Parse k=v tokens plus a single positional name (for `key BACK`).  */
