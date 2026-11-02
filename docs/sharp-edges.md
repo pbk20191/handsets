@@ -22,7 +22,8 @@
 - A set-but-empty `ANDROID_HOME` makes `android info` report an empty SDK
   path; `mobax` drops empty `ANDROID_HOME` / `ANDROID_SDK_ROOT` before asking it.
 - `android emulator start` has no `-gpu` flag; host GPU rendering has to come
-  from `hw.gpu.mode=host` in the AVD's `config.ini` ([Emulators](emulator.md)).
+  from `hw.gpu.mode=host` in the AVD's `config.ini`, or `ForceGpuHost = on`
+  in `~/.android/advancedFeatures.ini` ([Emulators](emulator.md)).
 - Running one AVD more than once needs `-read-only` on every instance, and a
   read-only emulator refuses snapshot save and load ("Snapshot save is
   disabled because "-read-only" was specified"). Keep the emulator you reset

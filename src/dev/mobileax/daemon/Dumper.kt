@@ -56,6 +56,15 @@ class Dumper(private val ua: UiAutomation) {
         }
     }
 
+    /**
+     * No app window at all: between two activities the one leaving is gone
+     * and the next isn't listed yet, so a dump has nothing but the status bar.
+     */
+    suspend fun noAppWindow(): Boolean = withContext(Loop.Work) {
+        val windows = ua.getWindows() ?: return@withContext false
+        windows.none { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+    }
+
     suspend fun dumpActive(): String = mutex.withLock { withContext(Loop.Work) { dumpActiveLocked() } }
 
     private fun dumpActiveLocked(): String {
