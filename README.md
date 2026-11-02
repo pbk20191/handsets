@@ -201,7 +201,7 @@ curl -fsSL https://raw.githubusercontent.com/pbk20191/mobileax/main/install.sh |
 Needs `adb`: `mobax` finds it through Google's Android CLI (`android info`),
 then `$ANDROID_HOME`, `$PATH` and Android Studio's default SDK;
 `MOBILEAX_ADB` overrides. macOS and Linux (Windows: the release zip). Pin a
-version with `MOBILEAX_VERSION=v0.5.1`. Emulator setup (Android CLI, host
+version with `MOBILEAX_VERSION=v0.5.2`. Emulator setup (Android CLI, host
 GPU): [docs/emulator.md](docs/emulator.md).
 
 Python bindings: `pip install ./bindings/python` (not on PyPI yet).
